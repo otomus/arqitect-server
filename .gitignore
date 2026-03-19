@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.pids/
+sandbox/
+models/
+*.db
+auth_store/
+.env
+*.conf
+
+# Config contains secrets — use arqitect.yaml.example as template
+arqitect.yaml
+
+# Community cache — seeded at runtime
+.community/
+
+# Runtime-fabricated nerves and tools
+nerves/
+mcp_tools/
+mcp_repos/
+mcp_registry.json
+
+# Runtime-generated state
+brain.log
+awareness_rules.json
+personality.json
+arqitect/brain/recipes/
+
+# Connector config generated from arqitect.yaml (contains tokens)
+connectors/
+
+# Plans, docs, architecture notes
+*.md
+architecture/

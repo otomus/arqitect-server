@@ -1,0 +1,1323 @@
+{
+  "sense": "hearing",
+  "timestamp": 1773911014.275588,
+  "platform": "Darwin",
+  "status": "operational",
+  "capabilities": {
+    "stt": {
+      "available": true,
+      "provider": "whisper-python",
+      "notes": ""
+    },
+    "tts": {
+      "available": true,
+      "provider": "say",
+      "notes": ""
+    },
+    "voices": {
+      "available": true,
+      "provider": "say",
+      "notes": ""
+    },
+    "record": {
+      "available": true,
+      "provider": "ffmpeg",
+      "notes": ""
+    },
+    "play": {
+      "available": true,
+      "provider": "afplay",
+      "notes": ""
+    }
+  },
+  "dependencies": {
+    "whisper-python": {
+      "installed": true,
+      "install_hint": ""
+    },
+    "whisper-cpp": {
+      "installed": false,
+      "path": "",
+      "install_hint": "brew install whisper-cpp"
+    },
+    "say": {
+      "installed": true,
+      "path": "/usr/bin/say",
+      "install_hint": ""
+    }
+  },
+  "config": {},
+  "user_action_needed": [
+    {
+      "key": "preferred_voice",
+      "prompt": "Voice",
+      "options": [
+        "Alice",
+        "Alva",
+        "Amira",
+        "Am\u00e9lie",
+        "Anna",
+        "Carmit",
+        "Damayanti",
+        "Daniel",
+        "Daria",
+        "Eddy (Chinese (China mainland))",
+        "Eddy (Chinese (Taiwan))",
+        "Eddy (English (UK))",
+        "Eddy (English (US))",
+        "Eddy (Finnish (Finland))",
+        "Eddy (French (Canada))",
+        "Eddy (French (France))",
+        "Eddy (German (Germany))",
+        "Eddy (Italian (Italy))",
+        "Eddy (Japanese (Japan))",
+        "Eddy (Korean (South Korea))",
+        "Eddy (Portuguese (Brazil))",
+        "Eddy (Spanish (Mexico))",
+        "Eddy (Spanish (Spain))",
+        "Ellen",
+        "Flo (Chinese (China mainland))",
+        "Flo (Chinese (Taiwan))",
+        "Flo (English (UK))",
+        "Flo (English (US))",
+        "Flo (Finnish (Finland))",
+        "Flo (French (Canada))",
+        "Flo (French (France))",
+        "Flo (German (Germany))",
+        "Flo (Italian (Italy))",
+        "Flo (Japanese (Japan))",
+        "Flo (Korean (South Korea))",
+        "Flo (Portuguese (Brazil))",
+        "Flo (Spanish (Mexico))",
+        "Flo (Spanish (Spain))",
+        "Ioana",
+        "Jacques",
+        "Joana",
+        "Kanya",
+        "Karen",
+        "Kyoko",
+        "Lana",
+        "Laura",
+        "Lekha",
+        "Lesya",
+        "Linh",
+        "Luciana",
+        "Majed",
+        "Meijia",
+        "Melina",
+        "Milena",
+        "Moira",
+        "Montse",
+        "M\u00f3nica",
+        "Nora",
+        "Paulina",
+        "Reed (Chinese (China mainland))",
+        "Reed (Chinese (Taiwan))",
+        "Reed (English (UK))",
+        "Reed (English (US))",
+        "Reed (Finnish (Finland))",
+        "Reed (French (Canada))",
+        "Reed (German (Germany))",
+        "Reed (Italian (Italy))",
+        "Reed (Japanese (Japan))",
+        "Reed (Korean (South Korea))",
+        "Reed (Portuguese (Brazil))",
+        "Reed (Spanish (Mexico))",
+        "Reed (Spanish (Spain))",
+        "Rishi",
+        "Rocko (Chinese (China mainland))",
+        "Rocko (Chinese (Taiwan))",
+        "Rocko (English (UK))",
+        "Rocko (English (US))",
+        "Rocko (Finnish (Finland))",
+        "Rocko (French (Canada))",
+        "Rocko (French (France))",
+        "Rocko (German (Germany))",
+        "Rocko (Italian (Italy))",
+        "Rocko (Japanese (Japan))",
+        "Rocko (Korean (South Korea))",
+        "Rocko (Portuguese (Brazil))",
+        "Rocko (Spanish (Mexico))",
+        "Rocko (Spanish (Spain))",
+        "Samantha",
+        "Sandy (Chinese (China mainland))",
+        "Sandy (Chinese (Taiwan))",
+        "Sandy (English (UK))",
+        "Sandy (English (US))",
+        "Sandy (Finnish (Finland))",
+        "Sandy (French (Canada))",
+        "Sandy (French (France))",
+        "Sandy (German (Germany))",
+        "Sandy (Italian (Italy))",
+        "Sandy (Japanese (Japan))",
+        "Sandy (Korean (South Korea))",
+        "Sandy (Portuguese (Brazil))",
+        "Sandy (Spanish (Mexico))",
+        "Sandy (Spanish (Spain))",
+        "Sara",
+        "Satu",
+        "Shelley (Chinese (China mainland))",
+        "Shelley (Chinese (Taiwan))",
+        "Shelley (English (UK))",
+        "Shelley (English (US))",
+        "Shelley (Finnish (Finland))",
+        "Shelley (French (Canada))",
+        "Shelley (French (France))",
+        "Shelley (German (Germany))",
+        "Shelley (Italian (Italy))",
+        "Shelley (Japanese (Japan))",
+        "Shelley (Korean (South Korea))",
+        "Shelley (Portuguese (Brazil))",
+        "Shelley (Spanish (Mexico))",
+        "Shelley (Spanish (Spain))",
+        "Sinji",
+        "Tessa",
+        "Thomas",
+        "Tina",
+        "Tingting",
+        "T\u00fcnde",
+        "Xander",
+        "Yelda",
+        "Yuna",
+        "Zosia",
+        "Zuzana",
+        "Albert",
+        "Bad News",
+        "Bahh",
+        "Bells",
+        "Boing",
+        "Bubbles",
+        "Cellos",
+        "Fred",
+        "Good News",
+        "Grandma (Chinese (China mainland))",
+        "Grandma (Chinese (Taiwan))",
+        "Grandma (English (UK))",
+        "Grandma (English (US))",
+        "Grandma (Finnish (Finland))",
+        "Grandma (French (Canada))",
+        "Grandma (French (France))",
+        "Grandma (German (Germany))",
+        "Grandma (Italian (Italy))",
+        "Grandma (Japanese (Japan))",
+        "Grandma (Korean (South Korea))",
+        "Grandma (Portuguese (Brazil))",
+        "Grandma (Spanish (Mexico))",
+        "Grandma (Spanish (Spain))",
+        "Grandpa (Chinese (China mainland))",
+        "Grandpa (Chinese (Taiwan))",
+        "Grandpa (English (UK))",
+        "Grandpa (English (US))",
+        "Grandpa (Finnish (Finland))",
+        "Grandpa (French (Canada))",
+        "Grandpa (French (France))",
+        "Grandpa (German (Germany))",
+        "Grandpa (Italian (Italy))",
+        "Grandpa (Japanese (Japan))",
+        "Grandpa (Korean (South Korea))",
+        "Grandpa (Portuguese (Brazil))",
+        "Grandpa (Spanish (Mexico))",
+        "Grandpa (Spanish (Spain))",
+        "Jester",
+        "Junior",
+        "Kathy",
+        "Organ",
+        "Ralph",
+        "Superstar",
+        "Trinoids",
+        "Whisper",
+        "Wobble",
+        "Zarvox"
+      ],
+      "options_detailed": [
+        {
+          "name": "Alice",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Alice.",
+          "type": "human"
+        },
+        {
+          "name": "Alva",
+          "locale": "sv_SE",
+          "sample": "Hej! Jag heter Alva.",
+          "type": "human"
+        },
+        {
+          "name": "Amira",
+          "locale": "ms_MY",
+          "sample": "Hi my name is Amira",
+          "type": "human"
+        },
+        {
+          "name": "Am\u00e9lie",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Am\u00e9lie.",
+          "type": "human"
+        },
+        {
+          "name": "Anna",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Anna.",
+          "type": "human"
+        },
+        {
+          "name": "Carmit",
+          "locale": "he_IL",
+          "sample": "\u05e9\u05dc\u05d5\u05dd, \u05e9\u05de\u05d9 \u05db\u05e8\u05de\u05d9\u05ea.",
+          "type": "human"
+        },
+        {
+          "name": "Damayanti",
+          "locale": "id_ID",
+          "sample": "Halo! Nama saya Damayanti.",
+          "type": "human"
+        },
+        {
+          "name": "Daniel",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Daniel.",
+          "type": "human"
+        },
+        {
+          "name": "Daria",
+          "locale": "bg_BG",
+          "sample": "Hello! My name is Daria.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebEddy\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebEddy\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (French (France))",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fEddy\u3067\u3059\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Eddy\uc785\ub2c8\ub2e4.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Eddy (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Eddy.",
+          "type": "human"
+        },
+        {
+          "name": "Ellen",
+          "locale": "nl_BE",
+          "sample": "Hallo! Mijn naam is Ellen.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebFlo\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebFlo\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Flo (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (French (France))",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fFlo\u3067\u3059\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Flo\uc785\ub2c8\ub2e4.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Flo (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Flo.",
+          "type": "human"
+        },
+        {
+          "name": "Ioana",
+          "locale": "ro_RO",
+          "sample": "Salut! Numele meu este Ioana.",
+          "type": "human"
+        },
+        {
+          "name": "Jacques",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Jacques.",
+          "type": "human"
+        },
+        {
+          "name": "Joana",
+          "locale": "pt_PT",
+          "sample": "Ol\u00e1! Chamo\u2011me Joana.",
+          "type": "human"
+        },
+        {
+          "name": "Kanya",
+          "locale": "th_TH",
+          "sample": "\u0e2a\u0e27\u0e31\u0e2a\u0e14\u0e35! \u0e09\u0e31\u0e19\u0e0a\u0e37\u0e48\u0e2d\u0e01\u0e31\u0e19\u0e22\u0e32",
+          "type": "human"
+        },
+        {
+          "name": "Karen",
+          "locale": "en_AU",
+          "sample": "Hi my name is Karen",
+          "type": "human"
+        },
+        {
+          "name": "Kyoko",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fKyoko\u3067\u3059\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Lana",
+          "locale": "hr_HR",
+          "sample": "Bok, zovem se Lana.",
+          "type": "human"
+        },
+        {
+          "name": "Laura",
+          "locale": "sk_SK",
+          "sample": "Ahoj, vol\u00e1m sa Laura.",
+          "type": "human"
+        },
+        {
+          "name": "Lekha",
+          "locale": "hi_IN",
+          "sample": "\u0928\u092e\u0938\u094d\u0924\u0947, \u092e\u0947\u0930\u093e \u0928\u093e\u092e \u0932\u0947\u0916\u093e \u0939\u0948\u0964",
+          "type": "human"
+        },
+        {
+          "name": "Lesya",
+          "locale": "uk_UA",
+          "sample": "\u041f\u0440\u0438\u0432\u0456\u0442! \u041c\u0435\u043d\u0435 \u0437\u0432\u0443\u0442\u044c \u041b\u0435\u0441\u044f.",
+          "type": "human"
+        },
+        {
+          "name": "Linh",
+          "locale": "vi_VN",
+          "sample": "Xin ch\u00e0o! T\u00ean t\u00f4i l\u00e0 Linh.",
+          "type": "human"
+        },
+        {
+          "name": "Luciana",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Luciana.",
+          "type": "human"
+        },
+        {
+          "name": "Majed",
+          "locale": "ar_001",
+          "sample": "\u0645\u0631\u062d\u0628\u064b\u0627! \u0627\u0633\u0645\u064a \u0645\u0627\u062c\u062f.",
+          "type": "human"
+        },
+        {
+          "name": "Meijia",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53eb\u7f8e\u4f73\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Melina",
+          "locale": "el_GR",
+          "sample": "\u03a7\u03b1\u03af\u03c1\u03b5\u03c4\u03b5! \u03a4\u03bf \u03cc\u03bd\u03bf\u03bc\u03ac \u03bc\u03bf\u03c5 \u03b5\u03af\u03bd\u03b1\u03b9 \u00ab\u039c\u03b5\u03bb\u03af\u03bd\u03b1\u00bb.",
+          "type": "human"
+        },
+        {
+          "name": "Milena",
+          "locale": "ru_RU",
+          "sample": "\u0417\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435! \u041c\u0435\u043d\u044f \u0437\u043e\u0432\u0443\u0442 \u041c\u0438\u043b\u0435\u043d\u0430.",
+          "type": "human"
+        },
+        {
+          "name": "Moira",
+          "locale": "en_IE",
+          "sample": "Hello! My name is Moira.",
+          "type": "human"
+        },
+        {
+          "name": "Montse",
+          "locale": "ca_ES",
+          "sample": "Hola! Em dic Montse.",
+          "type": "human"
+        },
+        {
+          "name": "M\u00f3nica",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo M\u00f3nica.",
+          "type": "human"
+        },
+        {
+          "name": "Nora",
+          "locale": "nb_NO",
+          "sample": "Hei! Jeg heter Nora.",
+          "type": "human"
+        },
+        {
+          "name": "Paulina",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Paulina.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebReed\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebReed\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Reed (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fReed\u3067\u3059\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Reed\uc785\ub2c8\ub2e4.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Reed (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Reed.",
+          "type": "human"
+        },
+        {
+          "name": "Rishi",
+          "locale": "en_IN",
+          "sample": "Hello! My name is Rishi.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebRocko\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebRocko\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (French (France))",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fRocko\u3067\u3059\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Rocko\uc785\ub2c8\ub2e4.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Rocko (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Rocko.",
+          "type": "human"
+        },
+        {
+          "name": "Samantha",
+          "locale": "en_US",
+          "sample": "Hello! My name is Samantha.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebSandy\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebSandy\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (French (France))",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fSandy\u3067\u3059\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Sandy\uc785\ub2c8\ub2e4.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sandy (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Sandy.",
+          "type": "human"
+        },
+        {
+          "name": "Sara",
+          "locale": "da_DK",
+          "sample": "Hej! Jeg hedder Sara.",
+          "type": "human"
+        },
+        {
+          "name": "Satu",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Satu.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebShelley\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebShelley\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (French (France))",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fShelley\u3067\u3059\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Shelley\uc785\ub2c8\ub2e4.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Shelley (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Shelley.",
+          "type": "human"
+        },
+        {
+          "name": "Sinji",
+          "locale": "zh_HK",
+          "sample": "\u4f60\u597d\uff01\u6211\u53eb\u5584\u6021\u3002",
+          "type": "human"
+        },
+        {
+          "name": "Tessa",
+          "locale": "en_ZA",
+          "sample": "Hello! My name is Tessa.",
+          "type": "human"
+        },
+        {
+          "name": "Thomas",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Thomas.",
+          "type": "human"
+        },
+        {
+          "name": "Tina",
+          "locale": "sl_SI",
+          "sample": "\u017divijo, ime mi je Tina.",
+          "type": "human"
+        },
+        {
+          "name": "Tingting",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53eb\u5a77\u5a77\u3002",
+          "type": "human"
+        },
+        {
+          "name": "T\u00fcnde",
+          "locale": "hu_HU",
+          "sample": "\u00dcdv\u00f6zl\u00f6m! A nevem T\u00fcnde.",
+          "type": "human"
+        },
+        {
+          "name": "Xander",
+          "locale": "nl_NL",
+          "sample": "Hallo! Mijn naam is Xander.",
+          "type": "human"
+        },
+        {
+          "name": "Yelda",
+          "locale": "tr_TR",
+          "sample": "Merhaba, benim ad\u0131m Yelda.",
+          "type": "human"
+        },
+        {
+          "name": "Yuna",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 \uc720\ub098\uc785\ub2c8\ub2e4.",
+          "type": "human"
+        },
+        {
+          "name": "Zosia",
+          "locale": "pl_PL",
+          "sample": "Hi my name is Zosia",
+          "type": "human"
+        },
+        {
+          "name": "Zuzana",
+          "locale": "cs_CZ",
+          "sample": "Hi my name is Zuzana",
+          "type": "human"
+        },
+        {
+          "name": "Albert",
+          "locale": "en_US",
+          "sample": "Hello! My name is Albert.",
+          "type": "novelty"
+        },
+        {
+          "name": "Bad News",
+          "locale": "en_US",
+          "sample": "Hello! My name is Bad News.",
+          "type": "novelty"
+        },
+        {
+          "name": "Bahh",
+          "locale": "en_US",
+          "sample": "Hello! My name is Bahh.",
+          "type": "novelty"
+        },
+        {
+          "name": "Bells",
+          "locale": "en_US",
+          "sample": "Hello! My name is Bells.",
+          "type": "novelty"
+        },
+        {
+          "name": "Boing",
+          "locale": "en_US",
+          "sample": "Hello! My name is Boing.",
+          "type": "novelty"
+        },
+        {
+          "name": "Bubbles",
+          "locale": "en_US",
+          "sample": "Hello! My name is Bubbles.",
+          "type": "novelty"
+        },
+        {
+          "name": "Cellos",
+          "locale": "en_US",
+          "sample": "Hello! My name is Cellos.",
+          "type": "novelty"
+        },
+        {
+          "name": "Fred",
+          "locale": "en_US",
+          "sample": "Hello! My name is Fred.",
+          "type": "novelty"
+        },
+        {
+          "name": "Good News",
+          "locale": "en_US",
+          "sample": "Hello! My name is Good News.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebGrandma\u3002",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebGrandma\u3002",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (French (France))",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fGrandma\u3067\u3059\u3002",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Grandma\uc785\ub2c8\ub2e4.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandma (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Grandma.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Chinese (China mainland))",
+          "locale": "zh_CN",
+          "sample": "\u4f60\u597d\uff01\u6211\u53ebGrandpa\u3002",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Chinese (Taiwan))",
+          "locale": "zh_TW",
+          "sample": "\u4f60\u597d\uff0c\u6211\u53ebGrandpa\u3002",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (English (UK))",
+          "locale": "en_GB",
+          "sample": "Hello! My name is Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (English (US))",
+          "locale": "en_US",
+          "sample": "Hello! My name is Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Finnish (Finland))",
+          "locale": "fi_FI",
+          "sample": "Hei! Nimeni on Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (French (Canada))",
+          "locale": "fr_CA",
+          "sample": "Bonjour! Je m\u2019appelle Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (French (France))",
+          "locale": "fr_FR",
+          "sample": "Bonjour, je m\u2019appelle Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (German (Germany))",
+          "locale": "de_DE",
+          "sample": "Hallo! Ich hei\u00dfe Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Italian (Italy))",
+          "locale": "it_IT",
+          "sample": "Ciao! Mi chiamo Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Japanese (Japan))",
+          "locale": "ja_JP",
+          "sample": "\u3053\u3093\u306b\u3061\u306f! \u79c1\u306e\u540d\u524d\u306fGrandpa\u3067\u3059\u3002",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Korean (South Korea))",
+          "locale": "ko_KR",
+          "sample": "\uc548\ub155\ud558\uc138\uc694. \uc81c \uc774\ub984\uc740 Grandpa\uc785\ub2c8\ub2e4.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Portuguese (Brazil))",
+          "locale": "pt_BR",
+          "sample": "Ol\u00e1, meu nome \u00e9 Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Spanish (Mexico))",
+          "locale": "es_MX",
+          "sample": "\u00a1Hola! Me llamo Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Grandpa (Spanish (Spain))",
+          "locale": "es_ES",
+          "sample": "\u00a1Hola! Me llamo Grandpa.",
+          "type": "novelty"
+        },
+        {
+          "name": "Jester",
+          "locale": "en_US",
+          "sample": "Hello! My name is Jester.",
+          "type": "novelty"
+        },
+        {
+          "name": "Junior",
+          "locale": "en_US",
+          "sample": "Hello! My name is Junior.",
+          "type": "novelty"
+        },
+        {
+          "name": "Kathy",
+          "locale": "en_US",
+          "sample": "Hello! My name is Kathy.",
+          "type": "novelty"
+        },
+        {
+          "name": "Organ",
+          "locale": "en_US",
+          "sample": "Hello! My name is Organ.",
+          "type": "novelty"
+        },
+        {
+          "name": "Ralph",
+          "locale": "en_US",
+          "sample": "Hello! My name is Ralph.",
+          "type": "novelty"
+        },
+        {
+          "name": "Superstar",
+          "locale": "en_US",
+          "sample": "Hello! My name is Superstar.",
+          "type": "novelty"
+        },
+        {
+          "name": "Trinoids",
+          "locale": "en_US",
+          "sample": "Hello! My name is Trinoids.",
+          "type": "novelty"
+        },
+        {
+          "name": "Whisper",
+          "locale": "en_US",
+          "sample": "Hello! My name is Whisper.",
+          "type": "novelty"
+        },
+        {
+          "name": "Wobble",
+          "locale": "en_US",
+          "sample": "Hello! My name is Wobble.",
+          "type": "novelty"
+        },
+        {
+          "name": "Zarvox",
+          "locale": "en_US",
+          "sample": "Hello! My name is Zarvox.",
+          "type": "novelty"
+        }
+      ],
+      "required_for": [
+        "tts"
+      ]
+    },
+    {
+      "key": "speech_rate",
+      "prompt": "Speech rate (words per minute)",
+      "options": [
+        "120",
+        "150",
+        "175",
+        "200",
+        "230",
+        "260"
+      ],
+      "required_for": [
+        "tts"
+      ]
+    },
+    {
+      "key": "whisper_model_size",
+      "prompt": "STT model size (smaller = faster, larger = accurate)",
+      "options": [
+        "tiny",
+        "base",
+        "small"
+      ],
+      "required_for": [
+        "stt"
+      ]
+    }
+  ],
+  "auto_installable": []
+}

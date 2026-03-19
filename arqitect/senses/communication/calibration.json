@@ -1,0 +1,53 @@
+{
+  "sense": "communication",
+  "timestamp": 1773911012.989931,
+  "platform": "Darwin",
+  "status": "operational",
+  "capabilities": {
+    "tone_rewrite": {
+      "available": true,
+      "provider": "communication",
+      "notes": ""
+    },
+    "text_format": {
+      "available": true,
+      "provider": "communication",
+      "notes": ""
+    },
+    "card_format": {
+      "available": true,
+      "provider": "communication",
+      "notes": ""
+    },
+    "emoji_format": {
+      "available": true,
+      "provider": "communication",
+      "notes": ""
+    },
+    "gif_format": {
+      "available": true,
+      "provider": "tenor_api",
+      "notes": "GIF search via Tenor free API \u2014 no key required"
+    },
+    "translate": {
+      "available": true,
+      "provider": "communication",
+      "notes": ""
+    },
+    "summarize": {
+      "available": true,
+      "provider": "communication",
+      "notes": ""
+    }
+  },
+  "dependencies": {
+    "communication": {
+      "installed": true,
+      "version": "latest",
+      "install_hint": ""
+    }
+  },
+  "config": {},
+  "user_action_needed": [],
+  "auto_installable": []
+}

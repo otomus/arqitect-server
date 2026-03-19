@@ -1,0 +1,67 @@
+{
+  "sense": "sight",
+  "timestamp": 1773911014.7347379,
+  "platform": "Darwin",
+  "status": "degraded",
+  "capabilities": {
+    "image_analysis": {
+      "available": false,
+      "provider": null,
+      "notes": "Vision GGUF model not downloaded. Restart to auto-download."
+    },
+    "screenshot": {
+      "available": true,
+      "provider": "screencapture",
+      "notes": ""
+    },
+    "camera_capture": {
+      "available": true,
+      "provider": "ffmpeg",
+      "notes": ""
+    },
+    "video_stream": {
+      "available": false,
+      "provider": null,
+      "notes": ""
+    }
+  },
+  "dependencies": {
+    "vision": {
+      "installed": false,
+      "version": "",
+      "install_hint": ""
+    },
+    "ffmpeg": {
+      "installed": true,
+      "path": "/opt/homebrew/bin/ffmpeg",
+      "install_hint": ""
+    },
+    "imagesnap": {
+      "installed": false,
+      "path": "",
+      "install_hint": "brew install imagesnap"
+    },
+    "screencapture": {
+      "installed": true,
+      "path": "/usr/sbin/screencapture",
+      "install_hint": ""
+    }
+  },
+  "config": {
+    "camera_device": null
+  },
+  "user_action_needed": [
+    {
+      "key": "camera_device",
+      "prompt": "Which camera device should I use?",
+      "options": [
+        "YSD-586: YSD-586"
+      ],
+      "required_for": [
+        "camera_capture",
+        "video_stream"
+      ]
+    }
+  ],
+  "auto_installable": []
+}

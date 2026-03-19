@@ -1,0 +1,36 @@
+{
+  "sense": "awareness",
+  "timestamp": 1773911012.888865,
+  "platform": "Darwin",
+  "status": "degraded",
+  "capabilities": {
+    "permission_check": {
+      "available": true,
+      "provider": "awareness_rules",
+      "notes": "Using default rules (awareness_rules.json not found)"
+    },
+    "self_reflection": {
+      "available": true,
+      "provider": "awareness_rules + cold_db",
+      "notes": ""
+    },
+    "inventory": {
+      "available": false,
+      "provider": "cold_db",
+      "notes": "Cold DB not found \u2014 inventory unavailable until first boot"
+    }
+  },
+  "dependencies": {
+    "awareness_rules.json": {
+      "installed": false,
+      "path": ""
+    },
+    "knowledge.db": {
+      "installed": false,
+      "path": ""
+    }
+  },
+  "config": {},
+  "user_action_needed": [],
+  "auto_installable": []
+}

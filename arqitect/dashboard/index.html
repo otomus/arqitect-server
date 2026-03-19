@@ -1,0 +1,2554 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Synapse-UI</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0a0f;
+    --panel: #12121a;
+    --border: #1e1e2e;
+    --text: #c8c8d4;
+    --dim: #555568;
+    --accent: #7c5bf5;
+    --accent-glow: rgba(124, 91, 245, 0.4);
+    --fire: #f55b5b;
+    --fire-glow: rgba(245, 91, 91, 0.4);
+    --green: #5bf5a0;
+    --green-glow: rgba(91, 245, 160, 0.3);
+    --yellow: #f5d05b;
+    --cyan: #5bc8f5;
+    --cyan-glow: rgba(91, 200, 245, 0.3);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-size: 13px;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  /* --- Layout --- */
+  .container {
+    display: grid;
+    grid-template-columns: 1fr 1fr 300px;
+    grid-template-rows: auto 1fr 1fr auto;
+    gap: 1px;
+    height: 100vh;
+    background: var(--border);
+  }
+
+  .header {
+    grid-column: 1 / -1;
+    background: var(--panel);
+    padding: 12px 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    background: linear-gradient(135deg, var(--accent), var(--green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  .header .status {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green-glow);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  .status-dot.dead {
+    background: var(--fire);
+    box-shadow: 0 0 8px var(--fire-glow);
+    animation: none;
+  }
+
+  @keyframes pulse-dot {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .panel {
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .panel-title {
+    padding: 8px 14px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .panel-body {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* --- Tab System --- */
+  .tab-bar {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .tab-btn {
+    padding: 7px 14px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--dim);
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    cursor: pointer;
+    font-family: inherit;
+    transition: all 0.2s;
+  }
+
+  .tab-btn:hover { color: var(--text); }
+
+  .tab-btn.active {
+    color: var(--accent);
+    border-bottom-color: var(--accent);
+  }
+
+  .tab-content {
+    display: none;
+    width: 100%;
+    height: 100%;
+  }
+
+  .tab-content.active { display: flex; flex-direction: column; }
+
+  .tab-switch {
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--dim);
+    cursor: pointer;
+    padding-bottom: 2px;
+    border-bottom: 2px solid transparent;
+    margin-right: 12px;
+    transition: all 0.2s;
+  }
+  .tab-switch:hover { color: var(--text); }
+  .tab-switch.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  /* --- Neural Map (Canvas) --- */
+  #neural-map {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+
+  /* --- Senses Panel --- */
+  .senses-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    height: 100%;
+  }
+
+  .senses-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  .senses-section:last-child { border-bottom: none; }
+
+  .senses-section-title {
+    padding: 6px 14px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--dim);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .senses-section-body {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  /* Sight preview */
+  .sight-preview {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0d0d14;
+  }
+
+  .sight-preview img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    display: none;
+  }
+
+  .sight-preview img.visible { display: block; }
+
+  .sight-placeholder {
+    color: var(--dim);
+    font-size: 11px;
+    text-align: center;
+    line-height: 1.6;
+  }
+
+  .sight-placeholder.hidden { display: none; }
+
+  /* Hearing config bar */
+  .hearing-config {
+    flex-shrink: 0;
+    display: flex;
+    gap: 16px;
+    padding: 6px 14px;
+    border-top: 1px solid var(--border);
+    background: rgba(10, 10, 15, 0.6);
+  }
+
+  .hearing-config-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 10px;
+  }
+
+  .hearing-config-label {
+    color: var(--dim);
+    font-weight: 600;
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+  }
+
+  .hearing-config-select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: 10px;
+    min-width: 90px;
+    cursor: pointer;
+  }
+
+  .hearing-config-select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .peek-btn, .listen-btn {
+    background: rgba(124, 91, 245, 0.2);
+    color: var(--accent);
+    border: 1px solid rgba(124, 91, 245, 0.3);
+    padding: 3px 10px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .peek-btn:hover, .listen-btn:hover {
+    background: rgba(124, 91, 245, 0.35);
+    border-color: var(--accent);
+  }
+
+  .peek-btn:disabled {
+    opacity: 0.4;
+    cursor: wait;
+  }
+
+  .listen-btn.active {
+    background: rgba(91, 200, 245, 0.2);
+    color: var(--cyan);
+    border-color: var(--cyan);
+  }
+
+  /* Audio waveform */
+  .audio-canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+    background: #0d0d14;
+  }
+
+  /* --- Thought Stream --- */
+  .stream {
+    overflow-y: auto;
+    padding: 10px 14px;
+    height: 100%;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .thought {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    animation: fade-in 0.3s ease;
+  }
+
+  .thought .tag {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-right: 8px;
+  }
+
+  .thought .tag.thinking { color: var(--accent); }
+  .thought .tag.synthesizing { color: var(--yellow); }
+  .thought .tag.response { color: var(--green); }
+  .thought .tag.error { color: var(--fire); }
+
+  .thought-media { margin-top: 6px; }
+  .thought-gif {
+    max-width: 200px;
+    max-height: 150px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+
+  .thought-card {
+    margin-top: 6px;
+    padding: 8px 12px;
+    border-left: 3px solid var(--accent);
+    background: rgba(124, 91, 245, 0.06);
+    border-radius: 0 4px 4px 0;
+  }
+  .thought-card-title {
+    font-weight: 700;
+    color: var(--accent);
+    font-size: 12px;
+    margin-bottom: 4px;
+  }
+  .thought-card-body { font-size: 12px; color: var(--text); }
+  .thought-card-footer { font-size: 10px; color: var(--dim); margin-top: 4px; font-style: italic; }
+
+  .thought-audio {
+    margin-top: 6px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .thought-audio-btn {
+    background: rgba(91, 200, 245, 0.15);
+    color: var(--cyan);
+    border: 1px solid rgba(91, 200, 245, 0.3);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 9px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .thought-audio-btn:hover { background: rgba(91, 200, 245, 0.3); }
+  .thought-audio-btn.playing { color: var(--green); border-color: var(--green); }
+
+  .thought-actions {
+    margin-top: 6px;
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .thought-action-btn {
+    background: rgba(124, 91, 245, 0.15);
+    color: var(--accent);
+    border: 1px solid rgba(124, 91, 245, 0.3);
+    padding: 3px 10px;
+    border-radius: 3px;
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+  }
+  .thought-action-btn:hover { background: rgba(124, 91, 245, 0.35); }
+
+  .thought .body strong { color: var(--accent); }
+  .thought .body em { font-style: italic; }
+  .thought .body code {
+    background: rgba(124, 91, 245, 0.1);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+  }
+
+  /* --- Chat View --- */
+  .chat-view {
+    overflow-y: auto;
+    padding: 10px 14px;
+    height: 100%;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .chat-msg {
+    max-width: 85%;
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+    animation: fade-in 0.3s ease;
+    word-wrap: break-word;
+  }
+
+  .chat-msg.user {
+    align-self: flex-end;
+    background: rgba(124, 91, 245, 0.15);
+    border: 1px solid rgba(124, 91, 245, 0.25);
+    color: var(--text);
+    border-bottom-right-radius: 2px;
+  }
+
+  .chat-msg.assistant {
+    align-self: flex-start;
+    background: rgba(91, 245, 160, 0.06);
+    border: 1px solid rgba(91, 245, 160, 0.15);
+    color: var(--text);
+    border-bottom-left-radius: 2px;
+  }
+
+  .chat-msg .chat-sender {
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 3px;
+  }
+  .chat-msg.user .chat-sender { color: var(--accent); }
+  .chat-msg.assistant .chat-sender { color: var(--green); }
+
+  .chat-msg .chat-text { }
+  .chat-msg .chat-text strong { color: var(--accent); }
+  .chat-msg .chat-text em { font-style: italic; }
+  .chat-msg .chat-text code {
+    background: rgba(124, 91, 245, 0.1);
+    padding: 1px 4px;
+    border-radius: 2px;
+    font-size: 12px;
+  }
+
+  .chat-msg .chat-time {
+    font-size: 9px;
+    color: var(--dim);
+    margin-top: 4px;
+    text-align: right;
+  }
+
+  .chat-typing {
+    align-self: flex-start;
+    color: var(--dim);
+    font-size: 11px;
+    font-style: italic;
+    padding: 4px 12px;
+  }
+  .chat-typing .dot-anim {
+    display: inline-block;
+    animation: blink 1.4s infinite;
+  }
+  .chat-typing .dot-anim:nth-child(2) { animation-delay: 0.2s; }
+  .chat-typing .dot-anim:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%,80%,100% { opacity: 0.2; } 40% { opacity: 1; } }
+
+  .thought .time {
+    color: var(--dim);
+    font-size: 10px;
+    float: right;
+  }
+
+  .thought .body {
+    margin-top: 3px;
+    color: var(--text);
+    word-break: break-word;
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* --- Reflex Terminal --- */
+  .terminal {
+    overflow-y: auto;
+    padding: 10px 14px;
+    height: 100%;
+    font-size: 12px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .log-line {
+    padding: 2px 0;
+    animation: fade-in 0.2s ease;
+  }
+
+  .log-line .prefix {
+    color: var(--dim);
+  }
+
+  .log-line.action .prefix { color: var(--accent); }
+  .log-line.result .prefix { color: var(--green); }
+  .log-line.error .prefix { color: var(--fire); }
+
+  /* --- Memory Panel --- */
+  .memory-panel {
+    padding: 10px 14px;
+    height: 100%;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .memory-section {
+    margin-bottom: 10px;
+  }
+
+  .memory-section-title {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .memory-tier {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+  }
+
+  .memory-tier.hot { background: var(--fire); box-shadow: 0 0 4px var(--fire-glow); }
+  .memory-tier.warm { background: var(--yellow); box-shadow: 0 0 4px rgba(245, 208, 91, 0.3); }
+  .memory-tier.cold { background: var(--accent); box-shadow: 0 0 4px var(--accent-glow); }
+
+  .memory-kv {
+    font-size: 11px;
+    padding: 1px 0;
+    color: var(--text);
+  }
+
+  .memory-kv .k {
+    color: var(--dim);
+  }
+
+  .memory-kv .v {
+    color: var(--green);
+  }
+
+  .memory-empty {
+    font-size: 11px;
+    color: var(--dim);
+    font-style: italic;
+  }
+
+  .memory-episode {
+    font-size: 11px;
+    padding: 2px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .memory-episode .ep-task {
+    color: var(--text);
+  }
+
+  .memory-episode .ep-meta {
+    color: var(--dim);
+    font-size: 10px;
+  }
+
+  .memory-episode .ep-ok { color: var(--green); }
+  .memory-episode .ep-fail { color: var(--fire); }
+
+  /* --- Right Sidebar (Senses Status + Nerves) --- */
+  .sidebar {
+    grid-row: 2 / 4;
+    grid-column: 3;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  /* Sense status indicators */
+  .sense-status-section {
+    flex-shrink: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sense-status-list {
+    padding: 8px 12px;
+  }
+
+  .sense-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 11px;
+  }
+
+  .sense-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .sense-dot.operational {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green-glow);
+  }
+
+  .sense-dot.degraded {
+    background: var(--yellow);
+    box-shadow: 0 0 6px rgba(245, 208, 91, 0.3);
+    animation: pulse-dot 2s ease-in-out infinite;
+  }
+
+  .sense-dot.unavailable {
+    background: var(--fire);
+    box-shadow: 0 0 6px var(--fire-glow);
+  }
+
+  .sense-dot.unknown {
+    background: var(--dim);
+  }
+
+  .sense-name {
+    color: var(--text);
+    font-weight: 600;
+    min-width: 90px;
+  }
+
+  .sense-status-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  .sense-status-label.operational { color: var(--green); }
+  .sense-status-label.degraded { color: var(--yellow); }
+  .sense-status-label.unavailable { color: var(--fire); }
+  .sense-status-label.unknown { color: var(--dim); }
+
+  .sense-caps {
+    font-size: 9px;
+    color: var(--dim);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+    display: block;
+    padding-left: 16px;
+    margin-top: -2px;
+    margin-bottom: 2px;
+  }
+
+  .sense-row { cursor: pointer; }
+  .sense-row:hover .sense-name { color: var(--accent); }
+
+  .sense-config {
+    padding: 6px 12px 8px 16px;
+    display: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .sense-config.open { display: block; }
+
+  .sense-config-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 3px 0;
+    font-size: 10px;
+  }
+
+  .sense-config-label {
+    color: var(--dim);
+    min-width: 100px;
+    font-weight: 600;
+  }
+
+  .sense-config-select {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 2px 6px;
+    font-family: inherit;
+    font-size: 10px;
+    min-width: 120px;
+    cursor: pointer;
+  }
+
+  .sense-config-select:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .sense-config-saved {
+    color: var(--green);
+    font-size: 9px;
+    font-weight: 600;
+    opacity: 0;
+    transition: opacity 0.3s;
+  }
+
+  .sense-config-saved.visible { opacity: 1; }
+
+  .sense-config-btn {
+    margin-left: auto;
+    font-size: 8px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--accent);
+    cursor: pointer;
+    padding: 1px 6px;
+    border: 1px solid rgba(124, 91, 245, 0.3);
+    border-radius: 3px;
+    transition: all 0.2s;
+  }
+
+  .sense-config-btn:hover {
+    background: rgba(124, 91, 245, 0.2);
+    border-color: var(--accent);
+  }
+
+  /* Nerve status */
+  .nerve-section {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .nerve-status-list {
+    padding: 10px 12px;
+    flex: 1;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+
+  .nerve-card {
+    padding: 10px;
+    margin-bottom: 8px;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    animation: fade-in 0.3s ease;
+    cursor: pointer;
+    transition: border-color 0.2s ease;
+  }
+  .nerve-card:hover {
+    border-color: var(--accent);
+  }
+
+  .nerve-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+  }
+
+  .nerve-card-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .nerve-card-name .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .nerve-card-name .dot.pass { background: var(--green); box-shadow: 0 0 4px var(--green-glow); }
+  .nerve-card-name .dot.fail { background: var(--fire); box-shadow: 0 0 4px var(--fire-glow); }
+  .nerve-card-name .dot.testing { background: var(--yellow); box-shadow: 0 0 4px rgba(245, 208, 91, 0.3); animation: pulse-dot 1s ease-in-out infinite; }
+  .nerve-card-name .dot.unknown { background: var(--dim); }
+
+  .nerve-card-score {
+    font-size: 12px;
+    font-weight: 700;
+    color: var(--dim);
+  }
+
+  .nerve-card-score.high { color: var(--green); }
+  .nerve-card-score.mid { color: var(--yellow); }
+  .nerve-card-score.low { color: var(--fire); }
+
+  .nerve-score-bar {
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+
+  .nerve-score-fill {
+    height: 100%;
+    border-radius: 2px;
+    transition: width 0.5s ease, background 0.3s ease;
+  }
+
+  .nerve-score-fill.high { background: var(--green); }
+  .nerve-score-fill.mid { background: var(--yellow); }
+  .nerve-score-fill.low { background: var(--fire); }
+
+  .nerve-badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 1px 6px;
+    border-radius: 3px;
+    text-transform: uppercase;
+  }
+
+  .nerve-badge.pass { background: rgba(91, 245, 160, 0.15); color: var(--green); }
+  .nerve-badge.fail { background: rgba(245, 91, 91, 0.15); color: var(--fire); }
+  .nerve-badge.testing { background: rgba(245, 208, 91, 0.15); color: var(--yellow); }
+
+  .nerve-card-tools {
+    font-size: 10px;
+    color: var(--dim);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .nerve-card-iter {
+    font-size: 10px;
+    color: var(--dim);
+    margin-top: 2px;
+  }
+
+  .nerve-empty {
+    font-size: 11px;
+    color: var(--dim);
+    font-style: italic;
+    padding: 20px 0;
+    text-align: center;
+  }
+
+  /* --- Nerve Detail Modal --- */
+  .nerve-modal-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 1000;
+    justify-content: center;
+    align-items: center;
+  }
+  .nerve-modal-overlay.active { display: flex; }
+  .nerve-modal {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 600px;
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: 24px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border) transparent;
+  }
+  .nerve-modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+  }
+  .nerve-modal-header h2 {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .nerve-modal-close {
+    background: none;
+    border: none;
+    color: var(--dim);
+    font-size: 20px;
+    cursor: pointer;
+  }
+  .nerve-modal-close:hover { color: var(--text); }
+  .nerve-modal-section {
+    margin-bottom: 16px;
+  }
+  .nerve-modal-section h3 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--dim);
+    margin-bottom: 6px;
+  }
+  .nerve-modal-stat {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 12px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+  .nerve-modal-stat .label { color: var(--dim); }
+  .nerve-modal-stat .value { color: var(--text); font-weight: 600; }
+  .nerve-modal-test {
+    padding: 8px;
+    margin-bottom: 4px;
+    background: rgba(255,255,255,0.02);
+    border-radius: 4px;
+    font-size: 11px;
+    border-left: 3px solid var(--dim);
+  }
+  .nerve-modal-test.pass { border-left-color: var(--green); }
+  .nerve-modal-test.fail { border-left-color: var(--fire); }
+  .nerve-modal-test .test-input { color: var(--text); margin-bottom: 2px; }
+  .nerve-modal-test .test-expected { color: var(--dim); margin-bottom: 2px; }
+  .nerve-modal-test .test-score { font-weight: 600; }
+  .nerve-modal-test .test-reasoning { color: var(--dim); font-style: italic; margin-top: 2px; }
+  .nerve-modal-prompt {
+    font-size: 11px;
+    color: var(--dim);
+    background: rgba(0,0,0,0.2);
+    padding: 8px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+    max-height: 100px;
+    overflow-y: auto;
+  }
+
+  /* --- Input Bar --- */
+  .input-bar {
+    grid-column: 1 / -1;
+    background: var(--panel);
+    display: flex;
+    align-items: center;
+    padding: 0;
+  }
+
+  .input-bar input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 14px 20px;
+    outline: none;
+  }
+
+  .input-bar input::placeholder {
+    color: var(--dim);
+  }
+
+  .input-bar button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    margin-right: 8px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: opacity 0.2s;
+  }
+
+  .input-bar button:hover { opacity: 0.8; }
+
+  .input-media-btn {
+    background: transparent;
+    border: none;
+    color: var(--dim);
+    cursor: pointer;
+    padding: 10px 6px 10px 14px;
+    display: flex;
+    align-items: center;
+    transition: color 0.2s;
+  }
+  .input-media-btn:first-child { padding-left: 14px; }
+  .input-media-btn:hover { color: var(--accent); }
+  .input-media-btn.recording {
+    color: var(--fire);
+    animation: pulse-recording 1s infinite;
+  }
+  @keyframes pulse-recording {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .chat-msg .chat-img {
+    max-width: 200px;
+    max-height: 150px;
+    border-radius: 4px;
+    margin-top: 4px;
+    border: 1px solid var(--border);
+  }
+
+  .kill-btn {
+    background: var(--fire) !important;
+    margin-right: 14px !important;
+  }
+
+  .sense-row[title] { cursor: help; }
+</style>
+</head>
+<body>
+<!-- Nerve Detail Modal -->
+<div class="nerve-modal-overlay" id="nerve-modal-overlay">
+  <div class="nerve-modal">
+    <div class="nerve-modal-header">
+      <h2 id="nerve-modal-name">—</h2>
+      <button class="nerve-modal-close" id="nerve-modal-close">&times;</button>
+    </div>
+    <div id="nerve-modal-body"></div>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <h1>Synapse</h1>
+    <div class="status">
+      <span id="conn-label" style="font-size:10px;color:var(--dim)">CONNECTING</span>
+      <div class="status-dot" id="conn-dot"></div>
+    </div>
+  </div>
+
+  <!-- Tabbed Panel: Neural Map / Senses -->
+  <div class="panel">
+    <div class="tab-bar">
+      <button class="tab-btn active" onclick="switchTab('map')">Neural Map</button>
+      <button class="tab-btn" onclick="switchTab('senses')">Senses</button>
+    </div>
+    <div class="panel-body">
+      <!-- Tab: Neural Map -->
+      <div class="tab-content active" id="tab-map">
+        <canvas id="neural-map" style="flex:1"></canvas>
+      </div>
+      <!-- Tab: Senses -->
+      <div class="tab-content" id="tab-senses">
+        <div class="senses-panel">
+          <!-- Sight -->
+          <div class="senses-section" style="flex:2">
+            <div class="senses-section-title">
+              Sight
+              <button class="peek-btn" id="peek-btn" onclick="requestPeek()">Screen</button>
+              <button class="peek-btn" id="camera-btn" onclick="requestCamera()">Camera</button>
+            </div>
+            <div class="senses-section-body">
+              <div class="sight-preview" id="sight-preview">
+                <div class="sight-placeholder" id="sight-placeholder">
+                  No image yet<br><strong>Screen</strong> = screenshot, <strong>Camera</strong> = webcam
+                </div>
+                <img id="sight-img" alt="sight feed">
+              </div>
+            </div>
+          </div>
+          <!-- Hearing -->
+          <div class="senses-section" style="flex:1">
+            <div class="senses-section-title">
+              Hearing
+              <button class="listen-btn" id="listen-btn" onclick="toggleListen()">Listen</button>
+            </div>
+            <div class="senses-section-body">
+              <canvas class="audio-canvas" id="audio-canvas"></canvas>
+            </div>
+            <div class="hearing-config" id="hearing-config">
+              <div class="hearing-config-row">
+                <label class="hearing-config-label">Voice</label>
+                <select class="hearing-config-select" id="hearing-voice-select"
+                        onchange="saveSenseConfig('hearing','preferred_voice',this.value)">
+                  <option value="">loading...</option>
+                </select>
+                <span class="sense-config-saved" id="saved-tab-hearing-voice">saved</span>
+              </div>
+              <div class="hearing-config-row">
+                <label class="hearing-config-label">Rate</label>
+                <select class="hearing-config-select" id="hearing-rate-select"
+                        onchange="saveSenseConfig('hearing','speech_rate',this.value)">
+                  <option value="">loading...</option>
+                </select>
+                <span class="sense-config-saved" id="saved-tab-hearing-rate">saved</span>
+              </div>
+              <div class="hearing-config-row">
+                <label class="hearing-config-label">STT Model</label>
+                <select class="hearing-config-select" id="hearing-stt-select"
+                        onchange="saveSenseConfig('hearing','whisper_model_size',this.value)">
+                  <option value="">loading...</option>
+                </select>
+                <span class="sense-config-saved" id="saved-tab-hearing-stt">saved</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Chat / Thought Stream -->
+  <div class="panel">
+    <div class="panel-title">
+      <span class="tab-switch active" id="chat-tab-chat" onclick="switchChatTab('chat')">Chat</span>
+      <span class="tab-switch" id="chat-tab-debug" onclick="switchChatTab('debug')">Debug</span>
+    </div>
+    <div class="panel-body">
+      <div class="chat-view" id="chat-view"></div>
+      <div class="stream" id="thought-stream" style="display:none"></div>
+    </div>
+  </div>
+
+  <!-- Reflex Terminal -->
+  <div class="panel">
+    <div class="panel-title">Reflex Terminal</div>
+    <div class="panel-body">
+      <div class="terminal" id="reflex-terminal"></div>
+    </div>
+  </div>
+
+  <!-- Memory Panel -->
+  <div class="panel">
+    <div class="panel-title">Memory</div>
+    <div class="panel-body">
+      <div class="memory-panel" id="memory-panel">
+        <div class="memory-section">
+          <div class="memory-section-title"><span class="memory-tier hot"></span> Hot — Session</div>
+          <div id="mem-session"><span class="memory-empty">no session</span></div>
+        </div>
+        <div class="memory-section">
+          <div class="memory-section-title"><span class="memory-tier hot"></span> Hot — Conversation</div>
+          <div id="mem-convo"><span class="memory-empty">no messages</span></div>
+        </div>
+        <div class="memory-section">
+          <div class="memory-section-title"><span class="memory-tier warm"></span> Warm — Episodes</div>
+          <div id="mem-episodes"><span class="memory-empty">no episodes</span></div>
+        </div>
+        <div class="memory-section">
+          <div class="memory-section-title"><span class="memory-tier cold"></span> Cold — Facts</div>
+          <div id="mem-facts"><span class="memory-empty">no facts</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right Sidebar: Sense Status + Nerve Status -->
+  <div class="panel sidebar">
+    <!-- Sense Status (compact) -->
+    <div class="sense-status-section">
+      <div class="panel-title">Sense Status</div>
+      <div class="sense-status-list" id="sense-status-list">
+        <div class="sense-row"><span class="sense-dot unknown"></span><span class="sense-name">Loading...</span></div>
+      </div>
+    </div>
+    <!-- Nerve Status -->
+    <div class="nerve-section">
+      <div class="panel-title">Nerve Status</div>
+      <div class="nerve-status-list" id="nerve-status-list">
+        <div class="nerve-empty">No nerves synthesized yet</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Input Bar -->
+  <div class="input-bar">
+    <button class="input-media-btn" id="mic-btn" onclick="toggleMic()" title="Record voice">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+        <line x1="12" y1="19" x2="12" y2="23"/>
+        <line x1="8" y1="23" x2="16" y2="23"/>
+      </svg>
+    </button>
+    <button class="input-media-btn" id="img-btn" onclick="document.getElementById('img-upload').click()" title="Send image">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="3" width="18" height="18" rx="2" ry="2"/>
+        <circle cx="8.5" cy="8.5" r="1.5"/>
+        <polyline points="21 15 16 10 5 21"/>
+      </svg>
+    </button>
+    <input type="file" id="img-upload" accept="image/*" style="display:none" onchange="handleImageUpload(event)">
+    <input type="text" id="task-input" placeholder="Type, speak, or send an image..." autofocus>
+    <button id="send-btn">Send</button>
+    <button class="kill-btn" id="kill-btn">Kill</button>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// SYNAPSE-UI — Vanilla JS Dashboard
+// ============================================================
+
+// --- Tab Switching ---
+function switchTab(tabName) {
+  // Toggle tab buttons
+  document.querySelectorAll(".tab-btn").forEach(btn => btn.classList.remove("active"));
+  document.querySelectorAll(".tab-content").forEach(tc => tc.classList.remove("active"));
+
+  if (tabName === "map") {
+    document.querySelectorAll(".tab-btn")[0].classList.add("active");
+    document.getElementById("tab-map").classList.add("active");
+    resizeCanvas();
+  } else {
+    document.querySelectorAll(".tab-btn")[1].classList.add("active");
+    document.getElementById("tab-senses").classList.add("active");
+  }
+}
+
+// --- WebSocket Connection ---
+let ws;
+let alive = false;
+let errorCount = 0;
+let totalActions = 0;
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}`);
+
+  ws.onopen = () => {
+    alive = true;
+    document.getElementById("conn-dot").classList.remove("dead");
+    document.getElementById("conn-label").textContent = "ONLINE";
+    logReflex("system", "Connected to Synaptic Bridge");
+  };
+
+  ws.onclose = () => {
+    alive = false;
+    document.getElementById("conn-dot").classList.add("dead");
+    document.getElementById("conn-label").textContent = "OFFLINE";
+    logReflex("error", "Disconnected — reconnecting in 2s...");
+    setTimeout(connect, 2000);
+  };
+
+  ws.onmessage = (e) => {
+    try {
+      const msg = JSON.parse(e.data);
+      handleMessage(msg);
+    } catch (err) {
+      console.error("Bad message:", err);
+    }
+  };
+}
+
+function handleMessage(msg) {
+  const { channel, data } = msg;
+
+  switch (channel) {
+    case "brain:task":
+      // Show incoming user messages from all sources.
+      // Skip if we sent this ourselves (already shown by sendTask).
+      if (data.task && !_sentTasks.delete(data.task)) {
+        const src = data.source || "";
+        const prefix = src && src !== "dashboard" ? `[${src}] ` : "";
+        addChatMessage("user", `${prefix}${data.task}`);
+      }
+      break;
+
+    case "brain:thought":
+      addThought(data.stage, data.task || data.nerve || "");
+      addNode("brain", data.stage);
+      logReflex("thought", `[${data.stage}] ${data.task || data.nerve || ""}`);
+      break;
+
+    case "brain:action":
+      logReflex("action", `Invoke nerve: ${data.nerve} ${data.args || ""}`);
+      addNode(data.nerve, "firing");
+      addEdge("brain", data.nerve);
+      totalActions++;
+      break;
+
+    case "brain:response":
+      addRichResponse(data);
+      addChatMessage("assistant", data.message, data);
+      logReflex("response", `${(data.message || "").substring(0, 120)}`);
+      break;
+
+    case "nerve:result":
+      try {
+        const parsed = JSON.parse(data.output);
+        if (parsed.tool) {
+          logReflex("result", `[${parsed.nerve || data.nerve}] used tool: ${parsed.tool}`);
+        }
+        if (parsed.fabricated) {
+          logReflex("result", `[${parsed.nerve || data.nerve}] fabricated tool: ${parsed.fabricated}`);
+        }
+        logReflex("result", `[${parsed.nerve || data.nerve}] ${truncate(parsed.response || data.output, 200)}`);
+      } catch (e) {
+        logReflex("result", `[${data.nerve}] ${truncate(data.output, 200)}`);
+      }
+      pulseNode(data.nerve);
+      break;
+
+    case "mcp:tool_call":
+      if (data.error) {
+        logReflex("error", `[MCP] ${data.tool}(${Object.values(data.args || {}).join(", ")}) ERROR: ${data.error}`);
+      } else {
+        logReflex("tool", `[MCP] ${data.tool}(${Object.values(data.args || {}).join(", ")}) → ${truncate(data.result_preview || "", 120)} (${data.elapsed}s)`);
+      }
+      break;
+
+    case "nerve:qualification":
+      updateNerveStatus(data.nerves || []);
+      break;
+
+    case "nerve:details":
+      renderNerveDetail(data);
+      break;
+
+    case "sense:status":
+      updateSenseStatus(data);
+      populateHearingConfig();
+      break;
+
+    case "sense:sight:frame":
+      handleSightFrame(data);
+      break;
+
+    case "sense:stt:result":
+      if (data.text) {
+        logReflex("system", `Voice transcribed: "${data.text}"`);
+        addChatMessageHtml("user", `🎤 "${data.text}"`, "");
+      }
+      break;
+
+    case "brain:audio":
+      // TTS audio arrived (async) — append play button to last assistant message
+      if (data.audio_b64) {
+        appendAudioToLastResponse(data.audio_b64, data.audio_mime || "audio/wav");
+      }
+      break;
+
+    case "sense:calibration":
+      if (data.user_action_needed) {
+        for (const action of data.user_action_needed) {
+          logReflex("system", `[${action.sense}] Config needed: ${action.prompt} (${action.options.join(", ")})`);
+        }
+      }
+      break;
+
+    case "sense:saved_config":
+      // Restore saved config values into dropdown selections
+      for (const [key, value] of Object.entries(data)) {
+        _senseConfigValues[key] = value;
+      }
+      // Re-render sense status with saved values
+      if (Object.keys(_senseCalibration).length > 0) {
+        updateSenseStatus(_senseCalibration);
+        populateHearingConfig();
+      }
+      break;
+
+    case "sense:config":
+      // Config change confirmed by backend
+      logReflex("system", `[${data.sense}] Config set: ${data.key} = ${data.value}`);
+      break;
+
+    case "system:stats":
+      break;
+
+    case "memory:state":
+      updateMemoryPanel(data);
+      break;
+
+    case "memory:update":
+      break;
+
+    case "system:kill":
+      logReflex("error", "KILL SWITCH ACTIVATED");
+      document.getElementById("conn-dot").classList.add("dead");
+      document.getElementById("conn-label").textContent = "KILLED";
+      break;
+  }
+}
+
+// --- Sense Status Panel ---
+// Store calibration data globally so config panels persist across updates
+let _senseCalibration = {};
+let _senseConfigValues = {};  // {senseName.key: value} — current saved values
+let _senseConfigOpen = new Set();  // track which config panels are expanded
+
+function updateSenseStatus(senses) {
+  _senseCalibration = senses;
+  const list = document.getElementById("sense-status-list");
+  const order = ["sight", "hearing", "touch", "awareness", "communication"];
+  let html = "";
+
+  for (const name of order) {
+    const cal = senses[name];
+    if (!cal) {
+      html += `<div class="sense-row">
+        <span class="sense-dot unknown"></span>
+        <span class="sense-name">${name}</span>
+        <span class="sense-status-label unknown">unknown</span>
+      </div>`;
+      continue;
+    }
+
+    const status = cal.status || "unknown";
+    const caps = cal.capabilities || {};
+    const available = Object.entries(caps).filter(([, v]) => v.available).map(([k]) => k);
+    const missing = Object.entries(caps).filter(([, v]) => !v.available).map(([k]) => k);
+    const actions = cal.user_action_needed || [];
+
+    let tooltip = `${name} [${status}]\nAvailable: ${available.join(", ") || "none"}`;
+    if (missing.length) tooltip += `\nMissing: ${missing.join(", ")}`;
+    if (actions.length) tooltip += `\nClick to configure`;
+
+    const capsText = available.join(", ");
+    const hasConfig = actions.length > 0;
+    const configBtn = hasConfig
+      ? `<span class="sense-config-btn" onclick="event.stopPropagation();toggleSenseConfig('${name}')">configure</span>`
+      : '';
+
+    html += `<div class="sense-row" title="${escapeAttr(tooltip)}" onclick="toggleSenseConfig('${name}')">
+      <span class="sense-dot ${status}"></span>
+      <span class="sense-name">${name}</span>
+      <span class="sense-status-label ${status}">${status}</span>
+      ${configBtn}
+    </div>`;
+    if (capsText) {
+      html += `<div class="sense-caps">${escapeHtml(capsText)}</div>`;
+    }
+
+    // Config panel
+    if (hasConfig) {
+      const isOpen = _senseConfigOpen.has(name);
+      html += `<div class="sense-config${isOpen ? " open" : ""}" data-sense="${name}">`;
+      for (const action of actions) {
+        const savedVal = _senseConfigValues[`${name}.${action.key}`] || "";
+        html += `<div class="sense-config-item">
+          <span class="sense-config-label">${escapeHtml(action.prompt)}</span>
+          <select class="sense-config-select" data-sense="${name}" data-key="${action.key}"
+                  onchange="saveSenseConfig('${name}', '${action.key}', this.value, this)">
+            <option value="">-- select --</option>`;
+        for (const opt of (action.options || [])) {
+          const selected = (opt === savedVal) ? " selected" : "";
+          html += `<option value="${escapeAttr(opt)}"${selected}>${escapeHtml(opt)}</option>`;
+        }
+        html += `</select>
+          <span class="sense-config-saved" id="saved-${name}-${action.key}">saved</span>
+        </div>`;
+      }
+      html += `</div>`;
+    }
+  }
+
+  list.innerHTML = html;
+}
+
+function toggleSenseConfig(senseName) {
+  if (_senseConfigOpen.has(senseName)) {
+    _senseConfigOpen.delete(senseName);
+  } else {
+    _senseConfigOpen.add(senseName);
+  }
+  const panel = document.querySelector(`.sense-config[data-sense="${senseName}"]`);
+  if (panel) panel.classList.toggle("open");
+}
+
+function saveSenseConfig(senseName, key, value) {
+  if (!value || !alive) return;
+  _senseConfigValues[`${senseName}.${key}`] = value;
+  ws.send(JSON.stringify({ type: "sense_config", sense: senseName, key, value }));
+  // Flash "saved" on both sidebar and tab indicators
+  for (const prefix of [`saved-${senseName}-${key}`, `saved-tab-hearing-${key === 'preferred_voice' ? 'voice' : 'stt'}`]) {
+    const indicator = document.getElementById(prefix);
+    if (indicator) {
+      indicator.classList.add("visible");
+      setTimeout(() => indicator.classList.remove("visible"), 2000);
+    }
+  }
+}
+
+function populateHearingConfig() {
+  const cal = _senseCalibration.hearing;
+  if (!cal || !cal.user_action_needed) return;
+
+  for (const action of cal.user_action_needed) {
+    let selectEl = null;
+    if (action.key === "preferred_voice") {
+      selectEl = document.getElementById("hearing-voice-select");
+    } else if (action.key === "speech_rate") {
+      selectEl = document.getElementById("hearing-rate-select");
+    } else if (action.key === "whisper_model_size") {
+      selectEl = document.getElementById("hearing-stt-select");
+    }
+    if (!selectEl) continue;
+
+    const savedVal = _senseConfigValues[`hearing.${action.key}`] || "";
+    const detailed = action.options_detailed || [];
+    let opts = '<option value="">-- select --</option>';
+    const options = action.options || [];
+    let lastType = "";
+    for (let i = 0; i < options.length; i++) {
+      const opt = String(options[i]);
+      const selected = (opt === savedVal) ? " selected" : "";
+      let label = opt;
+      if (detailed.length > i && detailed[i]) {
+        const d = detailed[i];
+        if (d.locale) label = opt + " — " + d.locale;
+        // Add optgroup separators for voice type
+        if (action.key === "preferred_voice" && d.type && d.type !== lastType) {
+          if (lastType) opts += '</optgroup>';
+          const groupLabel = d.type === "human" ? "Human Voices" : "Novelty / Effects";
+          opts += '<optgroup label="' + groupLabel + '">';
+          lastType = d.type;
+        }
+      }
+      opts += '<option value="' + opt.replace(/"/g, '&quot;') + '"' + selected + '>' + label + '</option>';
+    }
+    if (lastType) opts += '</optgroup>';
+    selectEl.innerHTML = opts;
+  }
+}
+
+// --- Sight Preview ---
+let peekPending = false;
+
+function requestPeek() {
+  if (!alive || peekPending) return;
+  peekPending = true;
+  const btn = document.getElementById("peek-btn");
+  btn.disabled = true;
+  btn.textContent = "...";
+  ws.send(JSON.stringify({ type: "peek", source: "screenshot" }));
+  switchTab("senses");
+  setTimeout(() => {
+    peekPending = false;
+    btn.disabled = false;
+    btn.textContent = "Screen";
+  }, 15000);
+}
+
+function requestCamera() {
+  if (!alive || peekPending) return;
+  peekPending = true;
+  const btn = document.getElementById("camera-btn");
+  btn.disabled = true;
+  btn.textContent = "...";
+  ws.send(JSON.stringify({ type: "peek", source: "camera" }));
+  switchTab("senses");
+  setTimeout(() => {
+    peekPending = false;
+    btn.disabled = false;
+    btn.textContent = "Camera";
+  }, 15000);
+}
+
+function handleSightFrame(data) {
+  peekPending = false;
+  const peekBtn = document.getElementById("peek-btn");
+  const camBtn = document.getElementById("camera-btn");
+  peekBtn.disabled = false;
+  peekBtn.textContent = "Screen";
+  camBtn.disabled = false;
+  camBtn.textContent = "Camera";
+
+  if (data.error) {
+    logReflex("error", `Sight peek failed: ${data.error}`);
+    return;
+  }
+
+  if (data.image) {
+    const img = document.getElementById("sight-img");
+    const placeholder = document.getElementById("sight-placeholder");
+    const mimeType = data.source === "camera" ? "image/jpeg" : "image/png";
+    img.src = `data:${mimeType};base64,${data.image}`;
+    img.classList.add("visible");
+    placeholder.classList.add("hidden");
+    switchTab("senses");
+  }
+}
+
+// --- Audio Waveform (Web Audio API) ---
+let audioCtx = null;
+let analyser = null;
+let audioSource = null;
+let audioStream = null;
+let listening = false;
+let audioAnimFrame = null;
+
+function toggleListen() {
+  if (listening) {
+    stopListening();
+  } else {
+    startListening();
+  }
+}
+
+async function startListening() {
+  const btn = document.getElementById("listen-btn");
+  try {
+    audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    audioCtx = new AudioContext();
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0.8;
+    audioSource = audioCtx.createMediaStreamSource(audioStream);
+    audioSource.connect(analyser);
+    listening = true;
+    btn.textContent = "Stop";
+    btn.classList.add("active");
+    // Auto-switch to Senses tab
+    switchTab("senses");
+    drawWaveform();
+  } catch (err) {
+    logReflex("error", `Microphone access denied: ${err.message}`);
+  }
+}
+
+function stopListening() {
+  const btn = document.getElementById("listen-btn");
+  listening = false;
+  btn.textContent = "Listen";
+  btn.classList.remove("active");
+  if (audioAnimFrame) cancelAnimationFrame(audioAnimFrame);
+  if (audioStream) {
+    audioStream.getTracks().forEach(t => t.stop());
+    audioStream = null;
+  }
+  if (audioCtx) {
+    audioCtx.close();
+    audioCtx = null;
+  }
+  // Clear canvas
+  const canvas = document.getElementById("audio-canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function drawWaveform() {
+  if (!listening || !analyser) return;
+
+  const canvas = document.getElementById("audio-canvas");
+  const ctx = canvas.getContext("2d");
+
+  // Resize canvas to parent
+  const parent = canvas.parentElement;
+  if (canvas.width !== parent.clientWidth || canvas.height !== parent.clientHeight) {
+    canvas.width = parent.clientWidth;
+    canvas.height = parent.clientHeight;
+  }
+
+  const bufferLength = analyser.frequencyBinCount;
+  const dataArray = new Uint8Array(bufferLength);
+
+  // Draw frequency bars
+  analyser.getByteFrequencyData(dataArray);
+
+  const w = canvas.width;
+  const h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  const barCount = Math.min(64, Math.floor(w / 4));
+  const step = Math.floor(bufferLength / barCount);
+  const barWidth = (w / barCount) - 1;
+
+  for (let i = 0; i < barCount; i++) {
+    const val = dataArray[i * step];
+    const barHeight = (val / 255) * h;
+    const x = i * (barWidth + 1);
+
+    // Gradient from cyan to accent
+    const ratio = val / 255;
+    const r = Math.round(91 + (124 - 91) * ratio);
+    const g = Math.round(200 + (91 - 200) * ratio);
+    const b = 245;
+
+    ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${0.4 + ratio * 0.6})`;
+    ctx.fillRect(x, h - barHeight, barWidth, barHeight);
+
+    // Glow cap
+    if (ratio > 0.5) {
+      ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${ratio * 0.3})`;
+      ctx.fillRect(x, h - barHeight - 2, barWidth, 2);
+    }
+  }
+
+  // Center line
+  ctx.strokeStyle = "rgba(85, 85, 104, 0.3)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, h * 0.5);
+  ctx.lineTo(w, h * 0.5);
+  ctx.stroke();
+
+  audioAnimFrame = requestAnimationFrame(drawWaveform);
+}
+
+// --- Thought Stream ---
+const thoughtStream = document.getElementById("thought-stream");
+
+function addThought(stage, text, gifUrl) {
+  const el = document.createElement("div");
+  el.className = "thought";
+  const now = new Date().toLocaleTimeString();
+  let mediaHtml = "";
+  if (gifUrl) {
+    mediaHtml = `<div class="thought-media"><img src="${escapeAttr(gifUrl)}" alt="GIF" class="thought-gif"></div>`;
+  }
+  el.innerHTML = `
+    <span class="tag ${stage}">${stage}</span>
+    <span class="time">${now}</span>
+    <div class="body">${escapeHtml(text)}</div>
+    ${mediaHtml}
+  `;
+  thoughtStream.appendChild(el);
+  thoughtStream.scrollTop = thoughtStream.scrollHeight;
+}
+
+function renderMarkdown(text) {
+  // Simple markdown: **bold**, *italic*, `code`, \n → <br>
+  let html = escapeHtml(text);
+  html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/\*(.+?)\*/g, "<em>$1</em>");
+  html = html.replace(/`(.+?)`/g, "<code>$1</code>");
+  html = html.replace(/\n/g, "<br>");
+  return html;
+}
+
+function addRichResponse(data) {
+  const el = document.createElement("div");
+  el.className = "thought";
+  const now = new Date().toLocaleTimeString();
+
+  // Message text — render markdown if flagged
+  const bodyHtml = data.markdown ? renderMarkdown(data.message) : escapeHtml(data.message);
+
+  let mediaHtml = "";
+
+  // GIF
+  const gifUrl = data.media && data.media.gif_url;
+  if (gifUrl) {
+    mediaHtml += `<div class="thought-media"><img src="${escapeAttr(gifUrl)}" alt="GIF" class="thought-gif"></div>`;
+  }
+
+  // Card
+  if (data.card) {
+    mediaHtml += `<div class="thought-card">
+      <div class="thought-card-title">${escapeHtml(data.card.title || "")}</div>
+      <div class="thought-card-body">${escapeHtml(data.card.body || "")}</div>
+      ${data.card.footer ? `<div class="thought-card-footer">${escapeHtml(data.card.footer)}</div>` : ""}
+    </div>`;
+  }
+
+  // Image
+  const imageB64 = data.media && data.media.image_b64;
+  if (imageB64) {
+    const imgMime = (data.media && data.media.image_mime) || "image/png";
+    mediaHtml += `<div class="thought-media"><img src="data:${imgMime};base64,${imageB64}" alt="Image" style="max-width:100%;border-radius:8px;margin-top:6px"></div>`;
+  }
+
+  // Audio playback
+  const audioB64 = data.media && data.media.audio_b64;
+  if (audioB64) {
+    const audioId = "audio-" + Date.now();
+    const mime = (data.media && data.media.audio_mime) || "audio/x-aiff";
+    mediaHtml += `<div class="thought-audio">
+      <button class="thought-audio-btn" onclick="playResponseAudio('${audioId}', this)">Play</button>
+      <audio id="${audioId}" src="data:${mime};base64,${audioB64}"></audio>
+      <span style="color:var(--dim);font-size:9px">voice</span>
+    </div>`;
+  }
+
+  // Interactive actions/buttons
+  if (data.actions && data.actions.length > 0) {
+    const btns = data.actions.map(a =>
+      `<button class="thought-action-btn" onclick="sendActionTask('${escapeAttr(a.value)}')">${escapeHtml(a.label)}</button>`
+    ).join("");
+    mediaHtml += `<div class="thought-actions">${btns}</div>`;
+  }
+
+  // Reactions
+  if (data.reactions && data.reactions.length > 0) {
+    mediaHtml += `<div class="thought-actions">${data.reactions.map(r => `<span style="font-size:16px;cursor:default">${r}</span>`).join(" ")}</div>`;
+  }
+
+  el.innerHTML = `
+    <span class="tag response">response</span>
+    <span class="time">${now}</span>
+    <div class="body">${bodyHtml}</div>
+    ${mediaHtml}
+  `;
+  thoughtStream.appendChild(el);
+  thoughtStream.scrollTop = thoughtStream.scrollHeight;
+}
+
+function playResponseAudio(audioId, btn) {
+  const audio = document.getElementById(audioId);
+  if (!audio) return;
+  if (audio.paused) {
+    audio.play();
+    btn.textContent = "Stop";
+    btn.classList.add("playing");
+    audio.onended = () => {
+      btn.textContent = "Play";
+      btn.classList.remove("playing");
+    };
+  } else {
+    audio.pause();
+    audio.currentTime = 0;
+    btn.textContent = "Play";
+    btn.classList.remove("playing");
+  }
+}
+
+function appendAudioToLastResponse(audioB64, mime) {
+  // Find last assistant message in chat and append audio player
+  const msgs = chatView.querySelectorAll(".chat-msg.assistant");
+  if (msgs.length === 0) return;
+  const lastMsg = msgs[msgs.length - 1];
+  // Don't add if already has audio
+  if (lastMsg.querySelector(".thought-audio")) return;
+  const audioId = "async-audio-" + Date.now();
+  const audioDiv = document.createElement("div");
+  audioDiv.className = "thought-audio";
+  audioDiv.innerHTML = `
+    <button class="thought-audio-btn" onclick="playResponseAudio('${audioId}', this)">Play</button>
+    <audio id="${audioId}" src="data:${mime};base64,${audioB64}"></audio>
+    <span style="color:var(--dim);font-size:9px">voice</span>
+  `;
+  lastMsg.querySelector(".chat-text").appendChild(audioDiv);
+}
+
+function sendActionTask(value) {
+  if (!alive) return;
+  ws.send(JSON.stringify({ type: "task", task: value }));
+  addThought("thinking", value);
+}
+
+// --- Reflex Terminal ---
+const reflexTerminal = document.getElementById("reflex-terminal");
+
+function logReflex(type, text) {
+  const el = document.createElement("div");
+  el.className = `log-line ${type}`;
+  const now = new Date().toLocaleTimeString();
+  el.innerHTML = `<span class="prefix">[${now}] ${type.toUpperCase()}:</span> ${escapeHtml(text)}`;
+  reflexTerminal.appendChild(el);
+  reflexTerminal.scrollTop = reflexTerminal.scrollHeight;
+
+  if (type === "error") errorCount++;
+}
+
+// --- Memory Panel ---
+let lastEpisodes = [];
+let lastFacts = {};
+
+function updateMemoryPanel(data) {
+  const sessionEl = document.getElementById("mem-session");
+  const session = data.session || {};
+  const sessionKeys = Object.keys(session);
+  if (sessionKeys.length > 0) {
+    sessionEl.innerHTML = sessionKeys
+      .filter(k => session[k])
+      .map(k => `<div class="memory-kv"><span class="k">${escapeHtml(k)}:</span> <span class="v">${escapeHtml(session[k])}</span></div>`)
+      .join("");
+  } else {
+    sessionEl.innerHTML = '<span class="memory-empty">no session</span>';
+  }
+
+  const convoEl = document.getElementById("mem-convo");
+  const convo = data.conversation || [];
+  if (convo.length > 0) {
+    convoEl.innerHTML = convo
+      .slice(-5)
+      .map(m => `<div class="memory-kv"><span class="k">${escapeHtml(m.role)}:</span> ${escapeHtml(truncate(m.content, 80))}</div>`)
+      .join("");
+  } else {
+    convoEl.innerHTML = '<span class="memory-empty">no messages</span>';
+  }
+
+  if (data.episodes && data.episodes.length > 0) {
+    lastEpisodes = data.episodes;
+  }
+  const epsEl = document.getElementById("mem-episodes");
+  if (lastEpisodes.length > 0) {
+    epsEl.innerHTML = lastEpisodes
+      .slice(-5)
+      .map(ep => {
+        const status = ep.success ? '<span class="ep-ok">OK</span>' : '<span class="ep-fail">FAIL</span>';
+        return `<div class="memory-episode"><span class="ep-task">${escapeHtml(truncate(ep.task || '?', 50))}</span> <span class="ep-meta">${escapeHtml(ep.nerve || '')}:${escapeHtml(ep.tool || '?')} ${status}</span></div>`;
+      })
+      .join("");
+  }
+
+  if (data.facts && Object.keys(data.facts).length > 0) {
+    lastFacts = data.facts;
+  }
+  const factsEl = document.getElementById("mem-facts");
+  const factKeys = Object.keys(lastFacts);
+  if (factKeys.length > 0) {
+    factsEl.innerHTML = factKeys
+      .map(k => `<div class="memory-kv"><span class="k">${escapeHtml(k)}:</span> <span class="v">${escapeHtml(lastFacts[k])}</span></div>`)
+      .join("");
+  }
+}
+
+// --- Nerve Status Panel ---
+const nerveStatusList = document.getElementById("nerve-status-list");
+const nerveState = new Map();
+
+function updateNerveStatus(nerves) {
+  if (!nerves || nerves.length === 0) return;
+
+  for (const n of nerves) {
+    nerveState.set(n.name, n);
+  }
+
+  if (nerveState.size === 0) {
+    nerveStatusList.innerHTML = '<div class="nerve-empty">No nerves synthesized yet</div>';
+    return;
+  }
+
+  let html = "";
+  for (const [name, n] of nerveState) {
+    const score = n.score || 0;
+    const status = n.status || "unknown";
+    const scoreClass = score >= 70 ? "high" : score >= 40 ? "mid" : "low";
+    const dotClass = status === "pass" ? "pass" : status === "fail" ? "fail" : status === "testing" ? "testing" : "unknown";
+    const badgeClass = status === "pass" ? "pass" : status === "fail" ? "fail" : status === "testing" ? "testing" : "";
+    const badgeLabel = status === "pass" ? "PASS" : status === "fail" ? "FAIL" : status === "testing" ? "TESTING" : "\u2014";
+    const tools = (n.tools || []).join(", ") || "none";
+
+    html += `<div class="nerve-card" onclick="openNerveDetail('${escapeHtml(name)}')">
+      <div class="nerve-card-header">
+        <span class="nerve-card-name"><span class="dot ${dotClass}"></span>${escapeHtml(name)}</span>
+        <span class="nerve-card-score ${scoreClass}">${score}%</span>
+      </div>
+      <div class="nerve-score-bar"><div class="nerve-score-fill ${scoreClass}" style="width:${score}%"></div></div>
+      <div style="display:flex;align-items:center;justify-content:space-between;">
+        <span class="nerve-badge ${badgeClass}">${badgeLabel}</span>
+        ${status === "testing" ? `<span class="nerve-card-iter">iter ${n.iteration || 0}/${n.max_iterations || 3}</span>` : ""}
+      </div>
+      <div class="nerve-card-tools">tools: ${escapeHtml(tools)}</div>
+    </div>`;
+  }
+  nerveStatusList.innerHTML = html;
+}
+
+// --- Neural Map (Canvas Force-Directed Graph) ---
+const canvas = document.getElementById("neural-map");
+const ctx = canvas.getContext("2d");
+
+const nodes = new Map();
+const edges = [];
+
+addNode("brain", "idle");
+
+function addNode(id, state) {
+  if (nodes.has(id)) {
+    const n = nodes.get(id);
+    n.firing = 1.0;
+    n.state = state;
+    return;
+  }
+  const angle = Math.random() * Math.PI * 2;
+  const dist = 60 + Math.random() * 80;
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+  nodes.set(id, {
+    x: cx + Math.cos(angle) * dist,
+    y: cy + Math.sin(angle) * dist,
+    vx: 0, vy: 0,
+    label: id,
+    firing: 1.0,
+    radius: id === "brain" ? 18 : 10,
+    state,
+  });
+}
+
+function addEdge(from, to) {
+  if (!edges.find((e) => e.from === from && e.to === to)) {
+    edges.push({ from, to, alpha: 1.0 });
+  } else {
+    const e = edges.find((e) => e.from === from && e.to === to);
+    e.alpha = 1.0;
+  }
+}
+
+function pulseNode(id) {
+  if (nodes.has(id)) nodes.get(id).firing = 1.0;
+}
+
+function resizeCanvas() {
+  const parent = canvas.parentElement;
+  canvas.width = parent.clientWidth;
+  canvas.height = parent.clientHeight;
+  if (nodes.has("brain")) {
+    const b = nodes.get("brain");
+    b.x = canvas.width / 2;
+    b.y = canvas.height / 2;
+  }
+}
+
+function simulate() {
+  const nodeArr = Array.from(nodes.values());
+  const cx = canvas.width / 2;
+  const cy = canvas.height / 2;
+
+  for (const n of nodeArr) {
+    n.vx += (cx - n.x) * 0.001;
+    n.vy += (cy - n.y) * 0.001;
+
+    for (const m of nodeArr) {
+      if (n === m) continue;
+      const dx = n.x - m.x;
+      const dy = n.y - m.y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      if (dist < 120) {
+        const force = 2 / (dist * dist);
+        n.vx += dx * force;
+        n.vy += dy * force;
+      }
+    }
+
+    for (const e of edges) {
+      const a = nodes.get(e.from);
+      const b = nodes.get(e.to);
+      if (!a || !b) continue;
+      if (n === a || n === b) {
+        const other = n === a ? b : a;
+        const dx = other.x - n.x;
+        const dy = other.y - n.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        if (dist > 80) {
+          n.vx += dx * 0.005;
+          n.vy += dy * 0.005;
+        }
+      }
+    }
+
+    n.vx *= 0.9;
+    n.vy *= 0.9;
+
+    if (n.label === "brain") {
+      n.vx *= 0.5;
+      n.vy *= 0.5;
+    }
+
+    n.x += n.vx;
+    n.y += n.vy;
+
+    n.x = Math.max(n.radius, Math.min(canvas.width - n.radius, n.x));
+    n.y = Math.max(n.radius, Math.min(canvas.height - n.radius, n.y));
+
+    n.firing *= 0.97;
+  }
+
+  for (const e of edges) {
+    e.alpha *= 0.995;
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  for (const e of edges) {
+    const a = nodes.get(e.from);
+    const b = nodes.get(e.to);
+    if (!a || !b) continue;
+
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.strokeStyle = `rgba(124, 91, 245, ${e.alpha * 0.6})`;
+    ctx.lineWidth = 1 + e.alpha;
+    ctx.stroke();
+
+    if (e.alpha > 0.3) {
+      const t = (Date.now() % 1000) / 1000;
+      const px = a.x + (b.x - a.x) * t;
+      const py = a.y + (b.y - a.y) * t;
+      ctx.beginPath();
+      ctx.arc(px, py, 3, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(124, 91, 245, ${e.alpha})`;
+      ctx.fill();
+    }
+  }
+
+  for (const [id, n] of nodes) {
+    if (n.firing > 0.1) {
+      const gradient = ctx.createRadialGradient(n.x, n.y, n.radius, n.x, n.y, n.radius * 3);
+      const color = id === "brain" ? "124, 91, 245" : "91, 245, 160";
+      gradient.addColorStop(0, `rgba(${color}, ${n.firing * 0.5})`);
+      gradient.addColorStop(1, `rgba(${color}, 0)`);
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.radius * 3, 0, Math.PI * 2);
+      ctx.fillStyle = gradient;
+      ctx.fill();
+    }
+
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+    if (id === "brain") {
+      ctx.fillStyle = `rgba(124, 91, 245, ${0.6 + n.firing * 0.4})`;
+    } else {
+      ctx.fillStyle = `rgba(91, 245, 160, ${0.4 + n.firing * 0.6})`;
+    }
+    ctx.fill();
+    ctx.strokeStyle = `rgba(255, 255, 255, 0.15)`;
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.fillStyle = `rgba(200, 200, 212, ${0.5 + n.firing * 0.5})`;
+    ctx.font = "10px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText(n.label, n.x, n.y + n.radius + 14);
+  }
+}
+
+function loop() {
+  simulate();
+  draw();
+  requestAnimationFrame(loop);
+}
+
+// --- Chat View ---
+const chatView = document.getElementById("chat-view");
+let typingIndicator = null;
+
+function addChatMessage(role, text, envelope) {
+  // Remove typing indicator
+  removeTypingIndicator();
+
+  const el = document.createElement("div");
+  el.className = `chat-msg ${role}`;
+  const now = new Date().toLocaleTimeString();
+  const sender = role === "user" ? "You" : "Sentient";
+
+  let bodyHtml = "";
+  if (role === "assistant" && envelope) {
+    bodyHtml = envelope.markdown ? renderMarkdown(envelope.message || text) : escapeHtml(text);
+
+    // GIF
+    const gifUrl = envelope.media && envelope.media.gif_url;
+    if (gifUrl) {
+      bodyHtml += `<div class="thought-media"><img src="${escapeAttr(gifUrl)}" alt="GIF" class="thought-gif"></div>`;
+    }
+
+    // Card
+    if (envelope.card) {
+      bodyHtml += `<div class="thought-card">
+        <div class="thought-card-title">${escapeHtml(envelope.card.title || "")}</div>
+        <div class="thought-card-body">${escapeHtml(envelope.card.body || "")}</div>
+        ${envelope.card.footer ? `<div class="thought-card-footer">${escapeHtml(envelope.card.footer)}</div>` : ""}
+      </div>`;
+    }
+
+    // Image
+    const chatImgB64 = envelope.media && envelope.media.image_b64;
+    if (chatImgB64) {
+      const chatImgMime = (envelope.media && envelope.media.image_mime) || "image/png";
+      bodyHtml += `<div class="thought-media"><img src="data:${chatImgMime};base64,${chatImgB64}" alt="Image" style="max-width:100%;border-radius:8px;margin-top:6px"></div>`;
+    }
+
+    // Audio
+    const audioB64 = envelope.media && envelope.media.audio_b64;
+    if (audioB64) {
+      const audioId = "chat-audio-" + Date.now();
+      const mime = (envelope.media && envelope.media.audio_mime) || "audio/x-aiff";
+      bodyHtml += `<div class="thought-audio">
+        <button class="thought-audio-btn" onclick="playResponseAudio('${audioId}', this)">Play</button>
+        <audio id="${audioId}" src="data:${mime};base64,${audioB64}"></audio>
+        <span style="color:var(--dim);font-size:9px">voice</span>
+      </div>`;
+    }
+
+    // Actions
+    if (envelope.actions && envelope.actions.length > 0) {
+      const btns = envelope.actions.map(a =>
+        `<button class="thought-action-btn" onclick="sendActionTask('${escapeAttr(a.value)}')">${escapeHtml(a.label)}</button>`
+      ).join("");
+      bodyHtml += `<div class="thought-actions">${btns}</div>`;
+    }
+
+    // Reactions
+    if (envelope.reactions && envelope.reactions.length > 0) {
+      bodyHtml += `<div class="thought-actions">${envelope.reactions.map(r => `<span style="font-size:16px;cursor:default">${r}</span>`).join(" ")}</div>`;
+    }
+  } else {
+    bodyHtml = escapeHtml(text);
+  }
+
+  const userTag = (role === "assistant" && envelope && envelope.user_id)
+    ? ` <span style="color:var(--dim);font-size:9px">[user:${escapeHtml(envelope.user_id)}]</span>`
+    : "";
+  el.innerHTML = `
+    <div class="chat-sender">${sender}${userTag}</div>
+    <div class="chat-text">${bodyHtml}</div>
+    <div class="chat-time">${now}</div>
+  `;
+  chatView.appendChild(el);
+  chatView.scrollTop = chatView.scrollHeight;
+}
+
+function showTypingIndicator() {
+  if (typingIndicator) return;
+  typingIndicator = document.createElement("div");
+  typingIndicator.className = "chat-typing";
+  typingIndicator.innerHTML = `Sentient is thinking<span class="dot-anim">.</span><span class="dot-anim">.</span><span class="dot-anim">.</span>`;
+  chatView.appendChild(typingIndicator);
+  chatView.scrollTop = chatView.scrollHeight;
+}
+
+function removeTypingIndicator() {
+  if (typingIndicator) {
+    typingIndicator.remove();
+    typingIndicator = null;
+  }
+}
+
+function switchChatTab(tab) {
+  const chatEl = document.getElementById("chat-view");
+  const debugEl = document.getElementById("thought-stream");
+  const chatTab = document.getElementById("chat-tab-chat");
+  const debugTab = document.getElementById("chat-tab-debug");
+  if (tab === "chat") {
+    chatEl.style.display = "flex";
+    debugEl.style.display = "none";
+    chatTab.classList.add("active");
+    debugTab.classList.remove("active");
+  } else {
+    chatEl.style.display = "none";
+    debugEl.style.display = "block";
+    chatTab.classList.remove("active");
+    debugTab.classList.add("active");
+  }
+}
+
+// --- Input Handling ---
+const _sentTasks = new Set();  // track tasks sent from this dashboard to avoid duplicates
+const taskInput = document.getElementById("task-input");
+const sendBtn = document.getElementById("send-btn");
+const killBtn = document.getElementById("kill-btn");
+
+// Persistent browser session ID for user identity across reloads
+const _dashboardSessionId = (() => {
+  let id = localStorage.getItem("sentient_session_id");
+  if (!id) {
+    id = "dash_" + crypto.randomUUID();
+    localStorage.setItem("sentient_session_id", id);
+  }
+  return id;
+})();
+
+// Browser geolocation — requested once, cached for session
+let _browserLocation = null;
+if (navigator.geolocation) {
+  navigator.geolocation.getCurrentPosition(
+    (pos) => { _browserLocation = { latitude: pos.coords.latitude, longitude: pos.coords.longitude }; },
+    () => {},  // silently fail if denied
+    { enableHighAccuracy: false, timeout: 5000 }
+  );
+}
+
+function sendTask() {
+  const task = taskInput.value.trim();
+  if (!task || !alive) return;
+  const payload = { type: "task", task, source: "dashboard", user_id: _dashboardSessionId };
+  if (_browserLocation) payload.location = _browserLocation;
+  ws.send(JSON.stringify(payload));
+  _sentTasks.add(task);
+  addChatMessage("user", task);
+  showTypingIndicator();
+  logReflex("system", `Task sent: ${task}`);
+  addThought("thinking", task);
+  taskInput.value = "";
+}
+
+sendBtn.addEventListener("click", sendTask);
+taskInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") sendTask();
+});
+
+killBtn.addEventListener("click", () => {
+  if (!alive) return;
+  if (confirm("Activate KILL SWITCH? This will paralyze the swarm.")) {
+    ws.send(JSON.stringify({ type: "kill" }));
+  }
+});
+
+// --- Voice Recording ---
+let mediaRecorder = null;
+let recordingChunks = [];
+
+function toggleMic() {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
+
+async function startRecording() {
+  if (!alive) return;
+  const micBtn = document.getElementById("mic-btn");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+    recordingChunks = [];
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordingChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      micBtn.classList.remove("recording");
+      micBtn.title = "Record voice";
+
+      const blob = new Blob(recordingChunks, { type: "audio/webm" });
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const b64 = reader.result.split(",")[1];
+        ws.send(JSON.stringify({ type: "voice", audio_b64: b64, mime: "audio/webm" }));
+        addChatMessage("user", "🎤 Voice message sent...");
+        showTypingIndicator();
+        logReflex("system", "Voice message sent for transcription");
+      };
+      reader.readAsDataURL(blob);
+    };
+
+    mediaRecorder.start();
+    micBtn.classList.add("recording");
+    micBtn.title = "Stop recording";
+    logReflex("system", "Recording voice...");
+  } catch (err) {
+    logReflex("error", `Microphone access denied: ${err.message}`);
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state === "recording") {
+    mediaRecorder.stop();
+  }
+}
+
+// --- Image Upload ---
+function handleImageUpload(event) {
+  const file = event.target.files[0];
+  if (!file || !alive) return;
+
+  const reader = new FileReader();
+  reader.onloadend = () => {
+    const b64 = reader.result.split(",")[1];
+    ws.send(JSON.stringify({ type: "image", image_b64: b64 }));
+
+    // Show thumbnail in chat
+    const imgHtml = `<img class="chat-img" src="${reader.result}" alt="uploaded image">`;
+    addChatMessageHtml("user", "📷 Image sent for analysis", imgHtml);
+    showTypingIndicator();
+    logReflex("system", `Image sent: ${file.name} (${Math.round(file.size/1024)}KB)`);
+  };
+  reader.readAsDataURL(file);
+  event.target.value = "";
+}
+
+function addChatMessageHtml(role, text, extraHtml) {
+  removeTypingIndicator();
+  const el = document.createElement("div");
+  el.className = `chat-msg ${role}`;
+  const now = new Date().toLocaleTimeString();
+  const sender = role === "user" ? "You" : "Sentient";
+  el.innerHTML = `
+    <div class="chat-sender">${sender}</div>
+    <div class="chat-text">${escapeHtml(text)}${extraHtml || ""}</div>
+    <div class="chat-time">${now}</div>
+  `;
+  chatView.appendChild(el);
+  chatView.scrollTop = chatView.scrollHeight;
+}
+
+// Also support pasting images
+taskInput.addEventListener("paste", (e) => {
+  const items = e.clipboardData && e.clipboardData.items;
+  if (!items) return;
+  for (const item of items) {
+    if (item.type.startsWith("image/")) {
+      e.preventDefault();
+      const file = item.getAsFile();
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const b64 = reader.result.split(",")[1];
+        ws.send(JSON.stringify({ type: "image", image_b64: b64 }));
+        const imgHtml = `<img class="chat-img" src="${reader.result}" alt="pasted image">`;
+        addChatMessageHtml("user", "📷 Image pasted for analysis", imgHtml);
+        showTypingIndicator();
+        logReflex("system", "Pasted image sent for analysis");
+      };
+      reader.readAsDataURL(file);
+      break;
+    }
+  }
+});
+
+// --- Utilities ---
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function escapeAttr(str) {
+  return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\n/g, "&#10;");
+}
+
+function truncate(str, len) {
+  return str.length > len ? str.slice(0, len) + "..." : str;
+}
+
+// --- Init ---
+window.addEventListener("resize", resizeCanvas);
+// --- Nerve Detail Modal ---
+const nerveModalOverlay = document.getElementById("nerve-modal-overlay");
+const nerveModalName = document.getElementById("nerve-modal-name");
+const nerveModalBody = document.getElementById("nerve-modal-body");
+document.getElementById("nerve-modal-close").onclick = () => nerveModalOverlay.classList.remove("active");
+nerveModalOverlay.onclick = (e) => { if (e.target === nerveModalOverlay) nerveModalOverlay.classList.remove("active"); };
+
+function openNerveDetail(name) {
+  nerveModalName.textContent = name;
+  nerveModalBody.innerHTML = '<div style="color:var(--dim);text-align:center;padding:20px">Loading...</div>';
+  nerveModalOverlay.classList.add("active");
+  // Request details from bridge
+  if (ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: "nerve_details", name }));
+  }
+}
+
+function renderNerveDetail(data) {
+  if (data.error) {
+    nerveModalBody.innerHTML = `<div style="color:var(--fire)">Nerve details not available</div>`;
+    return;
+  }
+  nerveModalName.textContent = data.name;
+  const score = typeof data.score === "object" ? data.score[0] : (data.score || 0);
+  const scoreClass = score >= 70 ? "high" : score >= 40 ? "mid" : "low";
+  const qualified = data.qualified === true ? "PASS" : data.qualified === false ? "FAIL" : "—";
+  const qualClass = data.qualified === true ? "pass" : data.qualified === false ? "fail" : "";
+
+  let html = `<div class="nerve-modal-section">
+    <h3>Overview</h3>
+    <div class="nerve-modal-stat"><span class="label">Score</span><span class="value ${scoreClass}">${score}%</span></div>
+    <div class="nerve-modal-stat"><span class="label">Status</span><span class="nerve-badge ${qualClass}" style="font-size:10px">${qualified}</span></div>
+    <div class="nerve-modal-stat"><span class="label">Role</span><span class="value">${escapeHtml(data.role || "tool")}</span></div>
+    <div class="nerve-modal-stat"><span class="label">Invocations</span><span class="value">${data.total_invocations || 0} (${data.successes || 0} ok / ${data.failures || 0} fail)</span></div>
+    <div class="nerve-modal-stat"><span class="label">Iterations</span><span class="value">${data.iterations || 0}</span></div>
+    <div class="nerve-modal-stat"><span class="label">Tests</span><span class="value">${data.pass_count || 0} / ${data.test_count || 0} passed</span></div>
+    <div class="nerve-modal-stat"><span class="label">Last Qualified</span><span class="value">${data.last_qualified || "—"}</span></div>
+  </div>`;
+
+  html += `<div class="nerve-modal-section">
+    <h3>Description</h3>
+    <div style="font-size:12px;color:var(--text)">${escapeHtml(data.description || "—")}</div>
+  </div>`;
+
+  if (data.system_prompt) {
+    html += `<div class="nerve-modal-section">
+      <h3>System Prompt</h3>
+      <div class="nerve-modal-prompt">${escapeHtml(data.system_prompt)}</div>
+    </div>`;
+  }
+
+  if (data.tools && data.tools.length) {
+    html += `<div class="nerve-modal-section">
+      <h3>Tools (${data.tools.length})</h3>
+      <div style="font-size:11px;color:var(--cyan)">${data.tools.map(t => escapeHtml(t)).join(", ")}</div>
+    </div>`;
+  }
+
+  const tests = data.test_results || [];
+  if (tests.length) {
+    html += `<div class="nerve-modal-section"><h3>Test Results (${tests.length})</h3>`;
+    for (const t of tests) {
+      const cls = t.passed ? "pass" : "fail";
+      const scoreVal = typeof t.score === "number" ? Math.round(t.score * 100) : "?";
+      html += `<div class="nerve-modal-test ${cls}">
+        <div class="test-input"><strong>${escapeHtml(t.category || "")}:</strong> ${escapeHtml(t.input || "")}</div>
+        <div class="test-expected">${escapeHtml(t.expected || "")}</div>
+        <div class="test-score" style="color:${t.passed ? 'var(--green)' : 'var(--fire)'}">${t.passed ? "PASS" : "FAIL"} (${scoreVal}%)</div>
+        ${t.reasoning ? `<div class="test-reasoning">${escapeHtml(t.reasoning)}</div>` : ""}
+      </div>`;
+    }
+    html += `</div>`;
+  }
+
+  nerveModalBody.innerHTML = html;
+}
+
+resizeCanvas();
+connect();
+loop();
+</script>
+</body>
+</html>

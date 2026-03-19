@@ -1,0 +1,51 @@
+# Size classes — system prompt tiers based on model capability.
+# The brain picks the appropriate tier based on the model's parameter count.
+
+tiny:
+  # <3B params (e.g. Qwen2.5:1.5b, Gemma3:1b)
+  max_system_tokens: 512
+  max_context_tokens: 2048
+  json_mode: strict
+  chain_depth: 1
+  features:
+    - tool_calling
+  notes: "Keep prompts extremely short. Single-shot only. No multi-step reasoning."
+
+small:
+  # 3B-8B params (e.g. Qwen2.5-Coder-7B, Llama3.2:3b)
+  max_system_tokens: 1024
+  max_context_tokens: 4096
+  json_mode: strict
+  chain_depth: 2
+  features:
+    - tool_calling
+    - basic_reasoning
+  notes: "Short system prompts. Simple chains. Avoid complex multi-step plans."
+
+medium:
+  # 8B-32B params (e.g. Qwen2.5-Coder:32b, Llama3.1:70b)
+  max_system_tokens: 2048
+  max_context_tokens: 8192
+  json_mode: flexible
+  chain_depth: 5
+  features:
+    - tool_calling
+    - reasoning
+    - code_generation
+    - multi_step_planning
+  notes: "Full system prompts. Multi-step chains. Can handle complex tasks."
+
+large:
+  # 32B+ params and cloud models (e.g. Claude, GPT-4)
+  max_system_tokens: 4096
+  max_context_tokens: 32768
+  json_mode: flexible
+  chain_depth: 10
+  features:
+    - tool_calling
+    - reasoning
+    - code_generation
+    - multi_step_planning
+    - self_reflection
+    - context_window_management
+  notes: "Full capability. Extended context. Complex reasoning and self-correction."

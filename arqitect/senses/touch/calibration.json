@@ -1,0 +1,72 @@
+{
+  "sense": "touch",
+  "timestamp": 1773911014.8410501,
+  "platform": "Darwin",
+  "status": "operational",
+  "capabilities": {
+    "read": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": ""
+    },
+    "write": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": ""
+    },
+    "append": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": ""
+    },
+    "list": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": ""
+    },
+    "tree": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": "Recursive directory listing"
+    },
+    "search": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": "Glob pattern search"
+    },
+    "copy": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": ""
+    },
+    "move": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": ""
+    },
+    "delete": {
+      "available": true,
+      "provider": "filesystem",
+      "notes": "Awareness-gated"
+    },
+    "exec": {
+      "available": true,
+      "provider": "subprocess",
+      "notes": "Awareness-gated"
+    },
+    "sysinfo": {
+      "available": true,
+      "provider": "platform",
+      "notes": ""
+    }
+  },
+  "dependencies": {
+    "sandbox_dir": {
+      "installed": true,
+      "path": "/Users/oronmozes/Documents/projects/sentient-server/sandbox"
+    }
+  },
+  "config": {},
+  "user_action_needed": [],
+  "auto_installable": []
+}
