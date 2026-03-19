@@ -34,4 +34,7 @@ connectors/
 
 # Plans, docs, architecture notes
 *.md
-architecture/
+/architecture/
+
+# Un-ignore docs site
+!docs/**/*.md
