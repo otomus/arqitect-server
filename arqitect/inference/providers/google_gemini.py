@@ -10,6 +10,6 @@ class GoogleGeminiProvider(OpenAICompatProvider):
         super().__init__(
             api_key=api_key or get_secret("google_ai_api_key"),
             base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-            default_model="gemini-2.0-flash",
+            default_model="",
             **kwargs,
         )

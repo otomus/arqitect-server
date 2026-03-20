@@ -25,6 +25,15 @@ class Sense(StrEnum):
     COMMUNICATION = "communication"
 
 
+class InferenceRole(StrEnum):
+    """Inference model roles — one model instance per role."""
+    BRAIN = "brain"
+    NERVE = "nerve"
+    CODER = "coder"
+    CREATIVE = "creative"
+    COMMUNICATION = "communication"
+
+
 class NerveRole(StrEnum):
     """Nerve model roles. Extensible — unknown roles fall back to default."""
     TOOL = "tool"

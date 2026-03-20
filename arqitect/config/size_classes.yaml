@@ -2,7 +2,7 @@
 # The brain picks the appropriate tier based on the model's parameter count.
 
 tiny:
-  # <3B params (e.g. Qwen2.5:1.5b, Gemma3:1b)
+  # <3B params
   max_system_tokens: 512
   max_context_tokens: 2048
   json_mode: strict
@@ -12,7 +12,7 @@ tiny:
   notes: "Keep prompts extremely short. Single-shot only. No multi-step reasoning."
 
 small:
-  # 3B-8B params (e.g. Qwen2.5-Coder-7B, Llama3.2:3b)
+  # 3B-8B params
   max_system_tokens: 1024
   max_context_tokens: 4096
   json_mode: strict
@@ -23,7 +23,7 @@ small:
   notes: "Short system prompts. Simple chains. Avoid complex multi-step plans."
 
 medium:
-  # 8B-32B params (e.g. Qwen2.5-Coder:32b, Llama3.1:70b)
+  # 8B-32B params
   max_system_tokens: 2048
   max_context_tokens: 8192
   json_mode: flexible
@@ -36,7 +36,7 @@ medium:
   notes: "Full system prompts. Multi-step chains. Can handle complex tasks."
 
 large:
-  # 32B+ params and cloud models (e.g. Claude, GPT-4)
+  # 32B+ params and cloud models
   max_system_tokens: 4096
   max_context_tokens: 32768
   json_mode: flexible

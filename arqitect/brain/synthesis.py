@@ -14,10 +14,10 @@ from arqitect.brain.config import (
 from arqitect.brain.helpers import llm_generate, extract_json, strip_markdown_fences
 from arqitect.brain.catalog import list_mcp_tools_with_info, discover_nerves
 from arqitect.brain.community import find_community_bundle, apply_community_bundle
-from arqitect.brain.routing import classify_nerve_role
+from arqitect.brain.routing import classify_nerve_role, validate_nerve_role
 from arqitect.brain.nerve_template import NERVE_TEMPLATE
 from arqitect.brain.events import publish_event, publish_nerve_status
-from arqitect.brain.types import Channel
+from arqitect.types import Channel, NerveRole
 
 logger = logging.getLogger(__name__)
 
@@ -381,7 +381,7 @@ def _synthesize_from_community(name: str, bundle: dict,
                                trigger_task: str) -> tuple[str, str]:
     """Synthesize a nerve using a community bundle as the source of truth."""
     description = bundle.get("description", name)
-    role = bundle.get("role", "tool")
+    role = validate_nerve_role(bundle.get("role", NerveRole.TOOL))
     print(f"[BRAIN] Synthesizing nerve from community bundle: {name} [role={role}]")
 
     nerve_dir, nerve_path = _create_nerve_files(name, role, description)

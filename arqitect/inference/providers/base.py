@@ -41,3 +41,21 @@ class InferenceProvider(ABC):
     @property
     def supports_lora(self) -> bool:
         return False
+
+    def preload(self, model: str, n_ctx: int = 2048) -> None:
+        """Eagerly load a model so it's ready for generation.
+
+        No-op for cloud providers. Local providers (e.g. GGUF) override
+        this to load model weights into memory at startup.
+
+        Args:
+            model: Model name or path to preload.
+            n_ctx: Context window size (from community adapter meta.json).
+        """
+
+    def list_loaded(self) -> list[str]:
+        """Return names of currently loaded models.
+
+        Returns an empty list for cloud providers (always ready).
+        """
+        return []

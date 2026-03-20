@@ -19,7 +19,7 @@ class AnthropicProvider(InferenceProvider):
                  json_mode: bool = False) -> str:
         client = self._get_client()
         kwargs = {
-            "model": model or "claude-sonnet-4-20250514",
+            "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": [{"role": "user", "content": prompt}],
@@ -36,7 +36,7 @@ class AnthropicProvider(InferenceProvider):
     def generate_vision(self, model: str, prompt: str, image_b64: str) -> str:
         client = self._get_client()
         response = client.messages.create(
-            model=model or "claude-sonnet-4-20250514",
+            model=model,
             max_tokens=2048,
             messages=[{
                 "role": "user",

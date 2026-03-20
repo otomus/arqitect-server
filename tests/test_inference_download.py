@@ -1,9 +1,10 @@
-"""Tests for arqitect.inference.download — model downloading from HuggingFace Hub."""
+"""Tests for arqitect.inference.download -- model downloading from HuggingFace Hub."""
 
 import os
 from unittest.mock import patch, MagicMock
 
 import pytest
+
 
 from arqitect.inference.download import ensure_model, download_gguf
 import arqitect.inference.download as download_mod
@@ -13,6 +14,7 @@ import arqitect.inference.download as download_mod
 # ensure_model
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestEnsureModel:
     """Tests for the ensure_model function."""
 
@@ -58,6 +60,7 @@ class TestEnsureModel:
 # download_gguf
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestDownloadGguf:
     """Tests for the download_gguf function."""
 
@@ -95,13 +98,10 @@ class TestDownloadGguf:
         """When huggingface_hub is not installed, returns None."""
         dest = str(tmp_path / "models")
 
-        # Remove huggingface_hub from sys.modules if present and make import fail
         import sys
         original = sys.modules.get("huggingface_hub")
         sys.modules["huggingface_hub"] = None  # force ImportError on from-import
 
-        # We need to actually trigger the import error path
-        # The function does `from huggingface_hub import hf_hub_download` inside try/except
         with patch.dict("sys.modules", {"huggingface_hub": None}):
             result = download_gguf("repo", "m.gguf", dest)
             assert result is None

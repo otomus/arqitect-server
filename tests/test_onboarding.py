@@ -1,11 +1,17 @@
-"""Tests for arqitect.brain.onboarding — email verification + profile setup."""
+"""Tests for arqitect.brain.onboarding — email verification + profile setup.
+
+Uses the real ColdMemory (via conftest ``mem`` fixture) backed by a temp
+SQLite database.  SMTP I/O is the only thing mocked — everything else
+runs against the real implementation.
+"""
 
 import smtplib
-import sqlite3
-import threading
 from unittest.mock import patch, MagicMock
 
 import pytest
+from dirty_equals import IsStr
+from hypothesis import given, settings, assume, HealthCheck
+from hypothesis import strategies as st
 
 from arqitect.brain.onboarding import (
     ASK_EMAIL,
@@ -20,169 +26,48 @@ from arqitect.brain.onboarding import (
 
 
 # ---------------------------------------------------------------------------
-# In-memory ColdMemory stand-in (uses real SQLite, no mocking)
+# Helpers — seed the real ColdMemory with deterministic state
 # ---------------------------------------------------------------------------
 
-class InMemoryCold:
-    """Minimal ColdMemory backed by an in-memory SQLite database.
+def _seed_user(cold, user_id: str, display_name: str = "", email: str = "") -> str:
+    """Insert a user row directly for test setup.
 
-    Implements the exact methods that onboarding.py calls on cold, using the
-    same SQL schema as the real ColdMemory class.
+    Returns the user_id for convenience.
     """
-
-    def __init__(self):
-        self.conn = sqlite3.connect(":memory:", check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
-        self.conn.executescript("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id TEXT PRIMARY KEY,
-                display_name TEXT DEFAULT '',
-                email TEXT DEFAULT '',
-                role TEXT DEFAULT 'user',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
-                secrets TEXT DEFAULT '{}'
-            );
-            CREATE TABLE IF NOT EXISTS user_links (
-                connector TEXT NOT NULL,
-                connector_id TEXT NOT NULL,
-                user_id TEXT NOT NULL REFERENCES users(user_id),
-                linked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (connector, connector_id)
-            );
-            CREATE TABLE IF NOT EXISTS verification_codes (
-                connector TEXT NOT NULL,
-                connector_id TEXT NOT NULL,
-                email TEXT NOT NULL,
-                code TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (connector, connector_id)
-            );
-            CREATE TABLE IF NOT EXISTS facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                confidence REAL DEFAULT 1.0,
-                UNIQUE(category, key)
-            );
-        """)
-
-    # ── Methods called by onboarding.py ──────────────────────────────────
-
-    def resolve_user(self, connector: str, connector_id: str) -> str:
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT user_id FROM user_links WHERE connector=? AND connector_id=?",
-                (connector, connector_id),
-            ).fetchone()
-        return row["user_id"] if row else ""
-
-    def get_user(self, user_id: str) -> dict | None:
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT * FROM users WHERE user_id=?", (user_id,),
-            ).fetchone()
-        return dict(row) if row else None
-
-    def create_user_with_email(self, email: str, connector: str, connector_id: str) -> str:
-        import uuid
-        email = email.lower().strip()
-        with self._lock:
-            existing = self.conn.execute(
-                "SELECT user_id FROM users WHERE email=?", (email,),
-            ).fetchone()
-            if existing:
-                user_id = existing["user_id"]
-                self.conn.execute(
-                    "INSERT INTO user_links (connector, connector_id, user_id) VALUES (?, ?, ?) "
-                    "ON CONFLICT(connector, connector_id) DO UPDATE SET user_id=excluded.user_id",
-                    (connector, connector_id, user_id),
-                )
-                self.conn.commit()
-                return user_id
-            user_id = str(uuid.uuid4())
-            self.conn.execute(
-                "INSERT INTO users (user_id, email) VALUES (?, ?)", (user_id, email),
-            )
-            self.conn.execute(
-                "INSERT INTO user_links (connector, connector_id, user_id) VALUES (?, ?, ?)",
-                (connector, connector_id, user_id),
-            )
-            self.conn.commit()
-            return user_id
-
-    def set_user_display_name(self, user_id: str, name: str):
-        with self._lock:
-            self.conn.execute(
-                "UPDATE users SET display_name=? WHERE user_id=?", (name, user_id),
-            )
-            self.conn.commit()
-
-    def set_user_fact(self, user_id: str, key: str, value: str):
-        category = f"user:{user_id}"
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO facts (category, key, value) VALUES (?, ?, ?) "
-                "ON CONFLICT(category, key) DO UPDATE SET value=excluded.value",
-                (category, key, value),
-            )
-            self.conn.commit()
-
-    def store_verification_code(self, connector: str, connector_id: str, email: str, code: str):
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO verification_codes (connector, connector_id, email, code) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(connector, connector_id) DO UPDATE SET email=excluded.email, code=excluded.code, "
-                "created_at=CURRENT_TIMESTAMP",
-                (connector, connector_id, email.lower().strip(), code),
-            )
-            self.conn.commit()
-
-    def verify_code(self, connector: str, connector_id: str, code: str) -> str | None:
-        with self._lock:
-            row = self.conn.execute(
-                "SELECT email, code FROM verification_codes WHERE connector=? AND connector_id=?",
-                (connector, connector_id),
-            ).fetchone()
-            if not row or row["code"] != code.strip():
-                return None
-            email = row["email"]
-            self.conn.execute(
-                "DELETE FROM verification_codes WHERE connector=? AND connector_id=?",
-                (connector, connector_id),
-            )
-            self.conn.commit()
-            return email
-
-    # ── Helpers for test setup ───────────────────────────────────────────
-
-    def _insert_user(self, user_id: str, display_name: str = "", email: str = ""):
-        self.conn.execute(
+    with cold._lock:
+        cold.conn.execute(
             "INSERT INTO users (user_id, display_name, email) VALUES (?, ?, ?)",
             (user_id, display_name, email),
         )
-        self.conn.commit()
+        cold.conn.commit()
+    return user_id
 
-    def _link_user(self, connector: str, connector_id: str, user_id: str):
-        self.conn.execute(
+
+def _link_user(cold, connector: str, connector_id: str, user_id: str) -> None:
+    """Create a user_links row directly for test setup."""
+    with cold._lock:
+        cold.conn.execute(
             "INSERT INTO user_links (connector, connector_id, user_id) VALUES (?, ?, ?)",
             (connector, connector_id, user_id),
         )
-        self.conn.commit()
+        cold.conn.commit()
 
+
+# ---------------------------------------------------------------------------
+# Fixture — extract cold from the conftest ``mem`` fixture
+# ---------------------------------------------------------------------------
 
 @pytest.fixture()
-def cold():
-    """Fresh in-memory cold storage for each test."""
-    return InMemoryCold()
+def cold(mem):
+    """Real ColdMemory backed by a temp SQLite database."""
+    return mem.cold
 
 
 # ---------------------------------------------------------------------------
 # get_onboarding_state
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetOnboardingState:
     """Tests for determining the current onboarding state."""
 
@@ -194,33 +79,46 @@ class TestGetOnboardingState:
         assert get_onboarding_state(cold, "telegram", "999") == AWAITING_CODE
 
     def test_returns_ask_name_when_linked_but_no_display_name(self, cold):
-        cold._insert_user("u1", display_name="")
-        cold._link_user("telegram", "999", "u1")
+        _seed_user(cold, "u1", display_name="")
+        _link_user(cold, "telegram", "999", "u1")
         assert get_onboarding_state(cold, "telegram", "999") == ASK_NAME
 
     def test_returns_verified_when_linked_with_display_name(self, cold):
-        cold._insert_user("u1", display_name="Alice")
-        cold._link_user("telegram", "999", "u1")
+        _seed_user(cold, "u1", display_name="Alice")
+        _link_user(cold, "telegram", "999", "u1")
         assert get_onboarding_state(cold, "telegram", "999") == VERIFIED
 
     def test_different_connectors_have_independent_state(self, cold):
-        cold._insert_user("u1", display_name="Alice")
-        cold._link_user("telegram", "999", "u1")
+        _seed_user(cold, "u1", display_name="Alice")
+        _link_user(cold, "telegram", "999", "u1")
         # Same connector_id on a different connector is not linked
         assert get_onboarding_state(cold, "discord", "999") == ASK_EMAIL
         assert get_onboarding_state(cold, "telegram", "999") == VERIFIED
+
+    @given(
+        connector=st.sampled_from(["telegram", "discord", "slack", "whatsapp"]),
+        connector_id=st.text(min_size=1, max_size=20),
+    )
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_unknown_identity_always_returns_ask_email(self, cold, connector, connector_id):
+        """Property: any unseen (connector, connector_id) pair yields ASK_EMAIL.
+
+        Safe to reuse fixture: read-only query on empty database.
+        """
+        assert get_onboarding_state(cold, connector, connector_id) == ASK_EMAIL
 
 
 # ---------------------------------------------------------------------------
 # handle_onboarding — VERIFIED state
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestHandleOnboardingVerified:
     """When the user is fully verified, onboarding is a no-op."""
 
     def test_returns_empty_message_and_user_id(self, cold):
-        cold._insert_user("u1", display_name="Bob")
-        cold._link_user("telegram", "10", "u1")
+        _seed_user(cold, "u1", display_name="Bob")
+        _link_user(cold, "telegram", "10", "u1")
         msg, uid = handle_onboarding(cold, "telegram", "10", "hello")
         assert msg == ""
         assert uid == "u1"
@@ -230,25 +128,26 @@ class TestHandleOnboardingVerified:
 # handle_onboarding — ASK_NAME state
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestHandleOnboardingAskName:
     """User is linked but has no display name yet."""
 
     def test_prompts_for_name_on_empty_message(self, cold):
-        cold._insert_user("u1", display_name="")
-        cold._link_user("telegram", "10", "u1")
+        _seed_user(cold, "u1", display_name="")
+        _link_user(cold, "telegram", "10", "u1")
         msg, uid = handle_onboarding(cold, "telegram", "10", "")
         assert "name" in msg.lower()
         assert uid == "u1"
 
     def test_prompts_for_name_on_whitespace_only(self, cold):
-        cold._insert_user("u1", display_name="")
-        cold._link_user("telegram", "10", "u1")
+        _seed_user(cold, "u1", display_name="")
+        _link_user(cold, "telegram", "10", "u1")
         msg, uid = handle_onboarding(cold, "telegram", "10", "   ")
         assert "name" in msg.lower()
 
     def test_sets_display_name_and_returns_greeting(self, cold):
-        cold._insert_user("u1", display_name="")
-        cold._link_user("telegram", "10", "u1")
+        _seed_user(cold, "u1", display_name="")
+        _link_user(cold, "telegram", "10", "u1")
         msg, uid = handle_onboarding(cold, "telegram", "10", "Alice")
         assert "Alice" in msg
         assert uid == "u1"
@@ -256,16 +155,16 @@ class TestHandleOnboardingAskName:
         assert user["display_name"] == "Alice"
 
     def test_strips_quotes_from_name(self, cold):
-        cold._insert_user("u1", display_name="")
-        cold._link_user("telegram", "10", "u1")
+        _seed_user(cold, "u1", display_name="")
+        _link_user(cold, "telegram", "10", "u1")
         msg, _ = handle_onboarding(cold, "telegram", "10", '"Bob"')
         assert "Bob" in msg
         user = cold.get_user("u1")
         assert user["display_name"] == "Bob"
 
     def test_stores_preferred_name_fact(self, cold):
-        cold._insert_user("u1", display_name="")
-        cold._link_user("telegram", "10", "u1")
+        _seed_user(cold, "u1", display_name="")
+        _link_user(cold, "telegram", "10", "u1")
         handle_onboarding(cold, "telegram", "10", "Charlie")
         row = cold.conn.execute(
             "SELECT value FROM facts WHERE category='user:u1' AND key='preferred_name'"
@@ -273,11 +172,29 @@ class TestHandleOnboardingAskName:
         assert row is not None
         assert row["value"] == "Charlie"
 
+    @given(name=st.text(min_size=1, max_size=50).filter(lambda s: s.strip()))
+    @settings(max_examples=15, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_any_nonempty_name_is_stored(self, cold, name):
+        """Property: any non-blank name is accepted and persisted.
+
+        Safe to reuse fixture: rows are deleted between iterations.
+        """
+        _seed_user(cold, "u1", display_name="")
+        _link_user(cold, "telegram", "10", "u1")
+        msg, uid = handle_onboarding(cold, "telegram", "10", name)
+        assert uid == "u1"
+        assert msg == IsStr  # some greeting is returned
+        # Clean up for next hypothesis example
+        cold.conn.execute("DELETE FROM users")
+        cold.conn.execute("DELETE FROM user_links")
+        cold.conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # handle_onboarding — ASK_EMAIL state
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestHandleOnboardingAskEmail:
     """User is completely new — not linked and no pending code."""
 
@@ -304,6 +221,7 @@ class TestHandleOnboardingAskEmail:
 # handle_onboarding — AWAITING_CODE state
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestHandleOnboardingAwaitingCode:
     """User has a pending verification code."""
 
@@ -315,7 +233,7 @@ class TestHandleOnboardingAwaitingCode:
 
     def test_verifies_correct_code_existing_user_with_name(self, cold):
         # Pre-create a user with the same email and a display name
-        cold._insert_user("u1", display_name="Alice", email="a@b.com")
+        _seed_user(cold, "u1", display_name="Alice", email="a@b.com")
         cold.store_verification_code("tg", "1", "a@b.com", "123456")
         msg, uid = handle_onboarding(cold, "tg", "1", "123456")
         assert uid == "u1"
@@ -352,11 +270,28 @@ class TestHandleOnboardingAwaitingCode:
         assert "verification code" in msg.lower()
         assert uid == ""
 
+    @given(wrong_code=st.from_regex(r"[0-9]{6}", fullmatch=True))
+    @settings(max_examples=15, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_random_wrong_codes_are_rejected(self, cold, wrong_code):
+        """Property: any 6-digit code that isn't the stored one is rejected.
+
+        Safe to reuse fixture: verification_codes are deleted between iterations.
+        """
+        stored_code = "999999"
+        assume(wrong_code != stored_code)
+        cold.store_verification_code("tg", "1", "a@b.com", stored_code)
+        msg, uid = handle_onboarding(cold, "tg", "1", wrong_code)
+        assert uid == ""
+        # Clean up for next hypothesis example
+        cold.conn.execute("DELETE FROM verification_codes")
+        cold.conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # _handle_email_submission
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestHandleEmailSubmission:
     """Tests for the internal email submission helper."""
 
@@ -384,6 +319,7 @@ class TestHandleEmailSubmission:
 # _send_verification_email
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestSendVerificationEmail:
     """Tests for SMTP email sending (all SMTP I/O is mocked)."""
 
@@ -443,6 +379,7 @@ class TestSendVerificationEmail:
 # Edge cases
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestOnboardingEdgeCases:
     """Boundary and edge-case coverage."""
 
@@ -459,3 +396,19 @@ class TestOnboardingEdgeCases:
     def test_state_constants_are_distinct(self):
         states = {ASK_EMAIL, AWAITING_CODE, ASK_NAME, VERIFIED}
         assert len(states) == 4
+
+    @given(
+        text=st.text(min_size=0, max_size=100).filter(
+            lambda s: "@" not in s or "." not in s.split("@")[-1]
+        ),
+    )
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_non_email_text_never_triggers_verification(self, cold, text):
+        """Property: text that doesn't match the email pattern never sends a code.
+
+        Safe to reuse fixture: read-only query on empty database.
+        """
+        msg, uid = handle_onboarding(cold, "tg", "1", text)
+        assert uid == ""
+        # Should either ask for email or prompt for 6-digit code (never "verification code sent")
+        assert "verification code has been sent" not in msg.lower()

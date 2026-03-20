@@ -1,4 +1,4 @@
-"""P4 — Chain execution tests: multi-step, single-step degradation, mid-chain synthesis.
+"""Chain execution tests: multi-step, single-step degradation, mid-chain synthesis.
 
 All LLM decision dicts are produced by typed factories.
 """
@@ -8,6 +8,7 @@ import os
 from unittest.mock import patch, MagicMock
 
 import pytest
+
 
 from tests.conftest import (
     FakeLLM, make_mem, register_qualified_nerve, make_nerve_file,
@@ -25,7 +26,10 @@ from tests.factories import (
 # 4.1 Multi-step chain with context accumulation
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestMultiStepChain:
+    """Multi-step chain with context passing between steps."""
+
     def test_chain_passes_context_between_steps(self, test_redis, tmp_memory_dir, nerves_dir, sandbox_dir):
         """Each step in a chain should receive output from previous steps."""
         mem_fixture = make_mem(test_redis)
@@ -73,7 +77,10 @@ class TestMultiStepChain:
 # 4.2 Single-step chain degrades to invoke_nerve
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestSingleStepChain:
+    """Single-step chains should degrade to a plain invoke."""
+
     def test_single_step_chain_converts_to_invoke(self, test_redis, tmp_memory_dir, nerves_dir, sandbox_dir):
         """A chain with a single step should convert to a plain invoke_nerve."""
         mem_fixture = make_mem(test_redis)
@@ -106,7 +113,10 @@ class TestSingleStepChain:
 # 4.4 Chain step synthesis with rename propagation
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestChainSynthesisRename:
+    """Mid-chain synthesis with rename propagation."""
+
     def test_mid_chain_synthesis_uses_renamed_name(self, test_redis, tmp_memory_dir, nerves_dir, sandbox_dir):
         """If a chain step synthesizes a nerve that gets renamed, invoke uses the renamed name."""
         mem_fixture = make_mem(test_redis)

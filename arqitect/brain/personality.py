@@ -15,6 +15,7 @@ Architecture:
 
 import json
 import logging
+import math
 import time
 from typing import Any, Callable
 
@@ -362,6 +363,10 @@ def _is_blocked_by_bounds(trait: str, new_value: Any, bounds: dict) -> bool:
 def clamp_trait(value: float, old_value: float) -> float:
     """Clamp a trait value within absolute bounds and max drift per cycle.
 
+    Rounds the result to 2 decimal places while guaranteeing the actual drift
+    ``abs(result - old_value)`` never exceeds MAX_DRIFT_PER_CYCLE. When rounding
+    would push drift over the limit, the result is nudged toward old_value.
+
     Args:
         value: Proposed new value.
         old_value: Current value.
@@ -370,7 +375,15 @@ def clamp_trait(value: float, old_value: float) -> float:
         Clamped value within [TRAIT_MIN, TRAIT_MAX] and max drift of MAX_DRIFT_PER_CYCLE.
     """
     delta = max(-MAX_DRIFT_PER_CYCLE, min(MAX_DRIFT_PER_CYCLE, value - old_value))
-    return round(max(TRAIT_MIN, min(TRAIT_MAX, old_value + delta)), 2)
+    bounded = max(TRAIT_MIN, min(TRAIT_MAX, old_value + delta))
+    result = round(bounded, 2)
+    # Rounding can push the actual drift beyond the limit. Clamp the result
+    # to the nearest 2-decimal value that respects the drift constraint.
+    if result > old_value + MAX_DRIFT_PER_CYCLE:
+        result = math.floor((old_value + MAX_DRIFT_PER_CYCLE) * 100) / 100
+    elif result < old_value - MAX_DRIFT_PER_CYCLE:
+        result = math.ceil((old_value - MAX_DRIFT_PER_CYCLE) * 100) / 100
+    return round(result, 2)
 
 
 # ── History & Rollback ───────────────────────────────────────────────────────

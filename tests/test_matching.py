@@ -1,6 +1,9 @@
 """P6 — Deterministic matching tests. No LLM or mocks needed."""
 
 import pytest
+from dirty_equals import IsInstance, IsPositive, IsNonNegative
+from hypothesis import given, settings, assume
+from hypothesis import strategies as st
 
 from arqitect.matching import (
     match_score, match_nerves, match_tools, best_match_tool,
@@ -14,6 +17,7 @@ from arqitect.types import Sense
 # Tokenizer
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestTokenize:
     def test_basic_tokenization(self):
         tokens = _tokenize("weather forecast today")
@@ -48,11 +52,30 @@ class TestTokenize:
         assert "weather" in tokens
         assert "forecast" in tokens
 
+    @given(text=st.text(min_size=0, max_size=200))
+    @settings(max_examples=200)
+    def test_tokenize_always_returns_set(self, text: str):
+        """Tokenize should always return a set, regardless of input."""
+        result = _tokenize(text)
+        assert result == IsInstance(set)
+        # Every element in the result must be a non-empty string
+        for token in result:
+            assert isinstance(token, str)
+            assert len(token) > 0
+
+    @given(text=st.text(alphabet=st.characters(whitelist_categories=("L", "N", "Zs")), min_size=0, max_size=100))
+    @settings(max_examples=100)
+    def test_tokenize_tokens_are_lowercase(self, text: str):
+        """All returned tokens should be lowercase."""
+        for token in _tokenize(text):
+            assert token == token.lower()
+
 
 # ---------------------------------------------------------------------------
 # Stem matching
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestStemMatch:
     def test_calculate_calculating(self):
         assert _is_stem_match("calculate", "calculating") is True
@@ -79,15 +102,31 @@ class TestStemMatch:
     def test_completely_different(self):
         assert _is_stem_match("apple", "zebra") is False
 
+    @given(word=st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=4, max_size=20))
+    @settings(max_examples=100)
+    def test_identical_words_always_match(self, word: str):
+        """A word is always a stem match with itself (when long enough)."""
+        assert _is_stem_match(word, word) is True
+
+    @given(
+        a=st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=20),
+        b=st.text(alphabet="abcdefghijklmnopqrstuvwxyz", min_size=1, max_size=20),
+    )
+    @settings(max_examples=100)
+    def test_stem_match_is_symmetric(self, a: str, b: str):
+        """Stem matching should be symmetric: stem(a, b) == stem(b, a)."""
+        assert _is_stem_match(a, b) == _is_stem_match(b, a)
+
 
 # ---------------------------------------------------------------------------
 # match_score
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestMatchScore:
     def test_exact_name_match(self):
         score = match_score("weather", "weather_tool", "get weather data")
-        assert score > 0
+        assert score == IsPositive
 
     def test_name_match_scores_higher_than_desc(self):
         name_score = match_score("weather", "weather_tool", "unrelated")
@@ -102,11 +141,47 @@ class TestMatchScore:
         score = match_score("weather forecast paris", "weather_forecast", "daily weather in cities")
         assert score > match_score("weather", "weather_forecast", "daily weather in cities")
 
+    @given(
+        query=st.text(min_size=0, max_size=100),
+        name=st.text(min_size=0, max_size=50),
+        desc=st.text(min_size=0, max_size=100),
+    )
+    @settings(max_examples=200)
+    def test_score_always_non_negative(self, query: str, name: str, desc: str):
+        """match_score must never return a negative value."""
+        score = match_score(query, name, desc)
+        assert score == IsNonNegative
+
+    @given(word=st.from_regex(r"[a-z]{4,15}", fullmatch=True))
+    @settings(max_examples=100)
+    def test_identical_strings_score_highest(self, word: str):
+        """Scoring a word against itself (as both name and desc) should beat scoring against unrelated terms."""
+        self_score = match_score(word, word, word)
+        other_score = match_score(word, "zzzzunrelated", "zzzzunrelated")
+        assert self_score >= other_score
+
+    @given(
+        a=st.from_regex(r"[a-z]{3,12}", fullmatch=True),
+        b=st.from_regex(r"[a-z]{3,12}", fullmatch=True),
+    )
+    @settings(max_examples=100)
+    def test_score_symmetry_relationship(self, a: str, b: str):
+        """match_score(a, b, b) and match_score(b, a, a) should both be non-negative.
+
+        Note: exact symmetry is not guaranteed because name vs description
+        weighting differs, but both directions should be non-negative.
+        """
+        score_ab = match_score(a, b, b)
+        score_ba = match_score(b, a, a)
+        assert score_ab == IsNonNegative
+        assert score_ba == IsNonNegative
+
 
 # ---------------------------------------------------------------------------
 # match_nerves with SENSE_BOOST
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestMatchNervesWithSenseBoost:
     def test_sense_gets_boosted(self):
         """Core senses should score higher than equivalent non-sense nerves."""
@@ -149,6 +224,7 @@ class TestMatchNervesWithSenseBoost:
 # match_tools
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestMatchTools:
     def test_basic_tool_matching(self):
         tools = {
@@ -166,11 +242,25 @@ class TestMatchTools:
         ranked = match_tools("hello there", tools, threshold=2.0)
         assert len(ranked) == 0
 
+    @given(query=st.text(min_size=1, max_size=80))
+    @settings(max_examples=50)
+    def test_match_tools_returns_sorted_descending(self, query: str):
+        """Results from match_tools should always be sorted by score descending."""
+        tools = {
+            "alpha": {"description": "alpha tool does alpha things"},
+            "beta": {"description": "beta tool does beta things"},
+            "gamma": {"description": "gamma tool does gamma things"},
+        }
+        ranked = match_tools(query, tools, threshold=0.0)
+        scores = [s for _, s in ranked]
+        assert scores == sorted(scores, reverse=True)
+
 
 # ---------------------------------------------------------------------------
 # find_duplicate_nerves
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestFindDuplicateNerves:
     def test_similar_descriptions_detected(self):
         catalog = {
@@ -180,7 +270,6 @@ class TestFindDuplicateNerves:
         }
         dupes = find_duplicate_nerves(catalog, threshold=2.0)
         # weather_nerve and climate_nerve should be flagged
-        dupe_pairs = [(a, b) for a, b, _ in dupes]
         found = any(
             ("weather_nerve" in pair and "climate_nerve" in pair)
             for pair in [(a, b) for a, b, _ in dupes]
@@ -194,3 +283,13 @@ class TestFindDuplicateNerves:
         }
         dupes = find_duplicate_nerves(catalog, threshold=3.0)
         assert len(dupes) == 0, f"Unrelated nerves should not be flagged: {dupes}"
+
+    def test_empty_catalog(self):
+        """An empty catalog should produce no duplicates."""
+        dupes = find_duplicate_nerves({}, threshold=1.0)
+        assert dupes == []
+
+    def test_single_nerve_no_duplicates(self):
+        """A catalog with one nerve cannot have duplicates."""
+        dupes = find_duplicate_nerves({"only_nerve": "does something"}, threshold=0.0)
+        assert dupes == []

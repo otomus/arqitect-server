@@ -14,10 +14,11 @@ import sys
 
 _SENSE_DIR = os.path.dirname(os.path.abspath(__file__))
 from arqitect.config.loader import get_project_root, get_sandbox_dir as _get_sandbox_dir
+from arqitect.types import Sense
 _PROJECT_ROOT = str(get_project_root())
 _SANDBOX_DIR = _get_sandbox_dir()
 
-SENSE_NAME = "touch"
+SENSE_NAME = Sense.TOUCH
 def _load_adapter_description() -> str:
     try:
         from arqitect.brain.adapters import get_description

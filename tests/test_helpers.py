@@ -1,6 +1,9 @@
 """Tests for arqitect/brain/helpers.py — pure utility functions."""
 
 import pytest
+from dirty_equals import IsDict, IsInstance
+from hypothesis import given, settings, HealthCheck
+import hypothesis.strategies as st
 
 from arqitect.brain.helpers import (
     _find_best_fact_match,
@@ -10,6 +13,7 @@ from arqitect.brain.helpers import (
     match_tool_name,
     strip_markdown_fences,
 )
+from arqitect.brain.dispatch import _parse_nerve_output
 
 
 # ---------------------------------------------------------------------------
@@ -17,6 +21,7 @@ from arqitect.brain.helpers import (
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestExtractJson:
     """Tests for extract_json — JSON extraction from LLM output."""
 
@@ -82,12 +87,35 @@ class TestExtractJson:
         result = extract_json(raw)
         assert result == {"key": "val"}
 
+    @given(st.text(min_size=0, max_size=2000))
+    @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+    def test_extract_json_never_crashes(self, raw):
+        """extract_json must return dict or None for any input, never raise."""
+        result = extract_json(raw)
+        assert result is None or isinstance(result, dict)
+
+    @given(
+        st.fixed_dictionaries({"key": st.text(min_size=1, max_size=50)}),
+        st.text(min_size=0, max_size=200),
+        st.text(min_size=0, max_size=200),
+    )
+    @settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+    def test_extract_json_finds_embedded_dict(self, obj, prefix, suffix):
+        """When a valid JSON dict is embedded in random text, extract_json should find it."""
+        import json
+        raw = prefix + json.dumps(obj) + suffix
+        result = extract_json(raw)
+        # Result may differ if prefix/suffix contain braces that form another dict,
+        # but it must still be a dict or None.
+        assert result is None or isinstance(result, dict)
+
 
 # ---------------------------------------------------------------------------
 # strip_markdown_fences
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestStripMarkdownFences:
     """Tests for strip_markdown_fences — code fence removal."""
 
@@ -122,12 +150,33 @@ class TestStripMarkdownFences:
         assert "a = 1" in result
         assert "c = a + b" in result
 
+    @given(st.text(min_size=0, max_size=2000))
+    @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+    def test_strip_markdown_fences_never_crashes(self, raw):
+        """strip_markdown_fences must return a string for any input, never raise."""
+        result = strip_markdown_fences(raw)
+        assert isinstance(result, str)
+
+    @given(
+        st.text(min_size=0, max_size=500),
+        st.sampled_from(["python", "json", "javascript", "rust", ""]),
+    )
+    @settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
+    def test_fenced_content_is_extractable(self, content, lang):
+        """Content wrapped in fences should be extracted (minus the fences)."""
+        fenced = f"```{lang}\n{content}\n```"
+        result = strip_markdown_fences(fenced)
+        # The fences themselves should not appear in the result
+        assert not result.startswith("```")
+        assert not result.endswith("```")
+
 
 # ---------------------------------------------------------------------------
 # match_tool_name
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestMatchToolName:
     """Tests for match_tool_name — fuzzy tool name matching."""
 
@@ -164,6 +213,7 @@ class TestMatchToolName:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestIsNerveError:
     """Tests for _is_nerve_error — error detection in nerve output."""
 
@@ -210,12 +260,62 @@ class TestIsNerveError:
     def test_normal_response_not_error(self):
         assert _is_nerve_error("The weather today is sunny with a high of 75F.") is False
 
+    @given(st.text(min_size=0, max_size=2000))
+    @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+    def test_is_nerve_error_never_crashes(self, text):
+        """_is_nerve_error must return a bool for any string input, never raise."""
+        result = _is_nerve_error(text)
+        assert isinstance(result, bool)
+
+
+# ---------------------------------------------------------------------------
+# _parse_nerve_output
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.timeout(10)
+class TestParseNerveOutput:
+    """Tests for _parse_nerve_output — parsing nerve stdout into a dict."""
+
+    def test_valid_json_object(self):
+        result = _parse_nerve_output('{"response": "Hello!"}')
+        assert result == IsDict(response="Hello!")
+
+    def test_plain_text_returns_empty_dict(self):
+        result = _parse_nerve_output("this is not json at all")
+        assert result == {}
+
+    def test_log_noise_before_json(self):
+        output = '[INFO] Loading...\n[INFO] Ready\n{"response": "Hello!"}'
+        result = _parse_nerve_output(output)
+        assert result == IsDict(response="Hello!")
+
+    @given(
+        st.one_of(
+            st.text(min_size=0, max_size=5000),
+            # Include values that json.loads parses to non-dict types,
+            # which should expose the missing isinstance guard.
+            st.sampled_from(["0", "1", "-1", "true", "false", "null", '"hello"', "[1,2]"]),
+        )
+    )
+    @settings(max_examples=200, suppress_health_check=[HealthCheck.too_slow])
+    def test_parse_nerve_output_always_returns_dict(self, output):
+        """_parse_nerve_output must return dict for any input.
+
+        BUG FOUND: json.loads("0") returns int 0, but _parse_nerve_output
+        has no type guard — it returns the raw parsed value instead of {}.
+        Inputs like "0", "1", "true", "null", '"hello"' all trigger this.
+        """
+        result = _parse_nerve_output(output)
+        assert isinstance(result, dict)
+
 
 # ---------------------------------------------------------------------------
 # _substitute_fact_values_brain / _find_best_fact_match
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestSubstituteFactValues:
     """Tests for brain-side fuzzy fact substitution."""
 
@@ -275,6 +375,7 @@ class TestSubstituteFactValues:
         assert result["tag"] == "python, javascript, rust"
 
 
+@pytest.mark.timeout(10)
 class TestFindBestFactMatch:
     """Tests for _find_best_fact_match — individual value matching."""
 

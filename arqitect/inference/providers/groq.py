@@ -8,6 +8,6 @@ class GroqProvider(OpenAICompatProvider):
         super().__init__(
             api_key=api_key or get_secret("groq_api_key"),
             base_url="https://api.groq.com/openai/v1",
-            default_model="llama-3.3-70b-versatile",
+            default_model="",
             **kwargs,
         )

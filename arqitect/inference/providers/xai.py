@@ -10,6 +10,6 @@ class XAIProvider(OpenAICompatProvider):
         super().__init__(
             api_key=api_key or get_secret("xai_api_key"),
             base_url="https://api.x.ai/v1",
-            default_model="grok-2",
+            default_model="",
             **kwargs,
         )

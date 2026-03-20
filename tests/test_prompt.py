@@ -1,9 +1,10 @@
 """Tests for arqitect.brain.prompt — system prompt construction."""
 
 import json
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
+from dirty_equals import IsStr
 
 from arqitect.types import RedisKey
 
@@ -12,11 +13,12 @@ from arqitect.types import RedisKey
 # _build_calibration_prompt_section
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestBuildCalibrationPromptSection:
     """Tests for _build_calibration_prompt_section."""
 
     def _call(self, redis_client, senses):
-        """Invoke the function under test with mocked Redis and senses."""
+        """Invoke the function under test with patched Redis and senses."""
         with patch("arqitect.brain.prompt.r", redis_client), \
              patch("arqitect.brain.prompt.CORE_SENSES", senses):
             from arqitect.brain.prompt import _build_calibration_prompt_section
@@ -92,25 +94,42 @@ class TestBuildCalibrationPromptSection:
         touch_pos = result.index("touch")
         assert awareness_pos < touch_pos
 
+    def test_calibration_snapshot(self, test_redis, snapshot):
+        """Snapshot the calibration section structure for regression detection."""
+        cal = {
+            "status": "calibrated",
+            "capabilities": {
+                "camera": {"available": True},
+                "lidar": {"available": False},
+            },
+        }
+        test_redis.hset(RedisKey.SENSE_CALIBRATION, "sight", json.dumps(cal))
+
+        result = self._call(test_redis, ["sight"])
+
+        assert result == snapshot
+
 
 # ---------------------------------------------------------------------------
 # _build_session_info
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestBuildSessionInfo:
     """Tests for _build_session_info."""
 
-    def _call(self, session_data):
-        """Invoke with a mock memory manager returning the given session."""
-        mock_mem = MagicMock()
-        mock_mem.hot.get_session.return_value = session_data
-        with patch("arqitect.brain.prompt.mem", mock_mem):
+    def _call(self, memory_manager, session_data):
+        """Invoke with a real MemoryManager after seeding session data."""
+        if session_data:
+            memory_manager.hot.set_session(session_data)
+
+        with patch("arqitect.brain.prompt.mem", memory_manager):
             from arqitect.brain.prompt import _build_session_info
             return _build_session_info()
 
-    def test_full_session(self):
+    def test_full_session(self, mem):
         """City, country, and timezone all present."""
-        result = self._call({
+        result = self._call(mem, {
             "city": "Tel Aviv",
             "country": "Israel",
             "timezone": "Asia/Jerusalem",
@@ -121,34 +140,46 @@ class TestBuildSessionInfo:
         assert "Asia/Jerusalem" in result
         assert "KNOWN USER CONTEXT" in result
 
-    def test_no_city_returns_empty(self):
+    def test_no_city_returns_empty(self, mem):
         """No city key means no session block."""
-        result = self._call({})
+        result = self._call(mem, {})
 
         assert result == ""
 
-    def test_city_empty_string_returns_empty(self):
+    def test_city_empty_string_returns_empty(self, mem):
         """Empty-string city is falsy, so no session block."""
-        result = self._call({"city": ""})
+        result = self._call(mem, {"city": ""})
 
         assert result == ""
 
-    def test_missing_country_and_timezone(self):
+    def test_missing_country_and_timezone(self, mem):
         """City present but country/timezone missing fall back to '?'."""
-        result = self._call({"city": "London"})
+        result = self._call(mem, {"city": "London"})
 
         assert "London" in result
         assert "?" in result
+
+    def test_session_info_snapshot(self, mem, snapshot):
+        """Snapshot the session info structure for regression detection."""
+        result = self._call(mem, {
+            "city": "Berlin",
+            "country": "Germany",
+            "timezone": "Europe/Berlin",
+        })
+
+        assert result == snapshot
 
 
 # ---------------------------------------------------------------------------
 # _build_few_shot_section
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestBuildFewShotSection:
     """Tests for _build_few_shot_section."""
 
     def _call(self, examples):
+        """Invoke the function under test."""
         from arqitect.brain.prompt import _build_few_shot_section
         return _build_few_shot_section(examples)
 
@@ -191,22 +222,29 @@ class TestBuildFewShotSection:
         assert "Examples:" in result
         assert "User:" not in result
 
+    def test_few_shot_snapshot(self, snapshot):
+        """Snapshot the few-shot section structure for regression detection."""
+        examples = [
+            {"input": "hi", "output": "hello"},
+            {"input": "bye", "output": "goodbye"},
+        ]
+        result = self._call(examples)
+
+        assert result == snapshot
+
 
 # ---------------------------------------------------------------------------
 # get_system_prompt
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetSystemPrompt:
     """Tests for get_system_prompt."""
 
-    def test_adapter_found_with_all_sections(self, test_redis):
+    def test_adapter_found_with_all_sections(self, test_redis, mem):
         """Full prompt includes calibration, few-shot, and session sections."""
-        mock_mem = MagicMock()
-        mock_mem.hot.get_session.return_value = {
-            "city": "Paris",
-            "country": "France",
-            "timezone": "Europe/Paris",
-        }
+        mem.hot.set_session({"city": "Paris", "country": "France", "timezone": "Europe/Paris"})
+
         adapter = {
             "system_prompt": "You are the brain.",
             "few_shot_examples": [
@@ -220,7 +258,7 @@ class TestGetSystemPrompt:
         test_redis.hset(RedisKey.SENSE_CALIBRATION, "hearing", json.dumps(cal))
 
         with patch("arqitect.brain.prompt.r", test_redis), \
-             patch("arqitect.brain.prompt.mem", mock_mem), \
+             patch("arqitect.brain.prompt.mem", mem), \
              patch("arqitect.brain.prompt.CORE_SENSES", ["hearing"]), \
              patch("arqitect.brain.adapters.resolve_prompt", return_value=adapter):
             from arqitect.brain.prompt import get_system_prompt
@@ -231,43 +269,86 @@ class TestGetSystemPrompt:
         assert "Paris" in result
         assert '"hi"' in result
 
-    def test_adapter_missing_raises(self, test_redis):
+    def test_adapter_missing_raises(self, test_redis, mem):
         """RuntimeError when resolve_prompt returns None."""
-        mock_mem = MagicMock()
-        mock_mem.hot.get_session.return_value = {}
-
         with patch("arqitect.brain.prompt.r", test_redis), \
-             patch("arqitect.brain.prompt.mem", mock_mem), \
+             patch("arqitect.brain.prompt.mem", mem), \
              patch("arqitect.brain.prompt.CORE_SENSES", []), \
              patch("arqitect.brain.adapters.resolve_prompt", return_value=None):
             from arqitect.brain.prompt import get_system_prompt
             with pytest.raises(RuntimeError, match="Brain adapter not found"):
                 get_system_prompt()
 
-    def test_adapter_empty_system_prompt_raises(self, test_redis):
+    def test_adapter_empty_system_prompt_raises(self, test_redis, mem):
         """RuntimeError when adapter has no system_prompt."""
-        mock_mem = MagicMock()
-        mock_mem.hot.get_session.return_value = {}
-
         with patch("arqitect.brain.prompt.r", test_redis), \
-             patch("arqitect.brain.prompt.mem", mock_mem), \
+             patch("arqitect.brain.prompt.mem", mem), \
              patch("arqitect.brain.prompt.CORE_SENSES", []), \
              patch("arqitect.brain.adapters.resolve_prompt", return_value={"system_prompt": ""}):
             from arqitect.brain.prompt import get_system_prompt
             with pytest.raises(RuntimeError):
                 get_system_prompt()
 
-    def test_no_calibration_no_session(self, test_redis):
+    def test_no_calibration_no_session(self, test_redis, mem):
         """Prompt with empty calibration and no session still works."""
-        mock_mem = MagicMock()
-        mock_mem.hot.get_session.return_value = {}
         adapter = {"system_prompt": "Base prompt."}
 
         with patch("arqitect.brain.prompt.r", test_redis), \
-             patch("arqitect.brain.prompt.mem", mock_mem), \
+             patch("arqitect.brain.prompt.mem", mem), \
              patch("arqitect.brain.prompt.CORE_SENSES", []), \
              patch("arqitect.brain.adapters.resolve_prompt", return_value=adapter):
             from arqitect.brain.prompt import get_system_prompt
             result = get_system_prompt()
 
         assert result == "Base prompt."
+
+    def test_full_prompt_snapshot(self, test_redis, mem, snapshot):
+        """Snapshot the full composed prompt for regression detection."""
+        mem.hot.set_session({"city": "Tokyo", "country": "Japan", "timezone": "Asia/Tokyo"})
+
+        adapter = {
+            "system_prompt": "You are Sentient.",
+            "few_shot_examples": [
+                {"input": "greet", "output": "Hello!"},
+            ],
+        }
+        cal = {
+            "status": "calibrated",
+            "capabilities": {"camera": {"available": True}},
+        }
+        test_redis.hset(RedisKey.SENSE_CALIBRATION, "sight", json.dumps(cal))
+
+        with patch("arqitect.brain.prompt.r", test_redis), \
+             patch("arqitect.brain.prompt.mem", mem), \
+             patch("arqitect.brain.prompt.CORE_SENSES", ["sight"]), \
+             patch("arqitect.brain.adapters.resolve_prompt", return_value=adapter):
+            from arqitect.brain.prompt import get_system_prompt
+            result = get_system_prompt()
+
+        assert result == snapshot
+
+    def test_prompt_contains_all_sections(self, test_redis, mem):
+        """The composed prompt contains all expected structural sections."""
+        mem.hot.set_session({"city": "NYC", "country": "US", "timezone": "America/New_York"})
+
+        adapter = {
+            "system_prompt": "Core identity.",
+            "few_shot_examples": [
+                {"input": "test", "output": "response"},
+            ],
+        }
+        cal = {"status": "ok", "capabilities": {"sensor": {"available": True}}}
+        test_redis.hset(RedisKey.SENSE_CALIBRATION, "touch", json.dumps(cal))
+
+        with patch("arqitect.brain.prompt.r", test_redis), \
+             patch("arqitect.brain.prompt.mem", mem), \
+             patch("arqitect.brain.prompt.CORE_SENSES", ["touch"]), \
+             patch("arqitect.brain.adapters.resolve_prompt", return_value=adapter):
+            from arqitect.brain.prompt import get_system_prompt
+            result = get_system_prompt()
+
+        # Verify structural sections are present using dirty_equals
+        assert result == IsStr(regex="(?s).*Core identity\\..*")
+        assert result == IsStr(regex="(?s).*Core senses.*calibration.*")
+        assert result == IsStr(regex="(?s).*Examples:.*")
+        assert result == IsStr(regex="(?s).*KNOWN USER CONTEXT.*")

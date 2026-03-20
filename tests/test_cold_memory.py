@@ -1,24 +1,49 @@
 """Tests for arqitect.memory.cold — ColdMemory with SQLite backend."""
 
+import itertools
 import json
 import time
-from unittest.mock import patch
 
 import pytest
+from dirty_equals import IsInstance, IsPositiveInt, IsStr
+from hypothesis import given, settings, assume, HealthCheck
+from hypothesis import strategies as st
+
+from arqitect.memory.cold import ColdMemory
+
+# Counter for generating unique names in hypothesis tests that share a fixture
+_counter = itertools.count()
+
+
+# ── Fixtures ────────────────────────────────────────────────────────────────
 
 
 @pytest.fixture
-def cold(tmp_path):
-    """Create a ColdMemory backed by a temporary SQLite database."""
-    db_path = str(tmp_path / "knowledge.db")
-    with patch("arqitect.memory.cold._DB_PATH", db_path):
-        from arqitect.memory.cold import ColdMemory
-        return ColdMemory()
+def cold(tmp_memory_dir):
+    """Create a ColdMemory backed by the tmp_memory_dir fixture from conftest."""
+    return ColdMemory()
+
+
+# ── Strategies for hypothesis ───────────────────────────────────────────────
+
+# Keys/values that are safe for SQLite text columns (non-empty, no NUL bytes)
+safe_text = st.text(
+    alphabet=st.characters(blacklist_categories=("Cs",), blacklist_characters=("\x00",)),
+    min_size=1,
+    max_size=100,
+)
+
+safe_name = st.text(
+    alphabet=st.characters(whitelist_categories=("L", "N"), whitelist_characters=("_", "-")),
+    min_size=1,
+    max_size=50,
+)
 
 
 # ── Facts ────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestFacts:
     def test_set_and_get_fact(self, cold):
         cold.set_fact("env", "timezone", "UTC")
@@ -57,10 +82,26 @@ class TestFacts:
         assert cold.get_user_facts("u1") == {"language": "Hebrew"}
         assert cold.get_user_facts("u2") == {"language": "English"}
 
+    @given(category=safe_name, key=safe_name, value=safe_text)
+    @settings(max_examples=30, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_roundtrip_random_facts(self, cold, category, key, value):
+        """Any category/key/value triple should survive a set/get roundtrip."""
+        cold.set_fact(category, key, value)
+        assert cold.get_fact(category, key) == value
+
+    @given(category=safe_name, key=safe_name, v1=safe_text, v2=safe_text)
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_upsert_overwrites_with_random_values(self, cold, category, key, v1, v2):
+        """The last value written for a (category, key) pair wins."""
+        cold.set_fact(category, key, v1)
+        cold.set_fact(category, key, v2)
+        assert cold.get_fact(category, key) == v2
+
 
 # ── Nerve Registry ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestNerveRegistry:
     def test_register_and_get_nerve(self, cold):
         cold.register_nerve("weather", "fetch weather data")
@@ -177,10 +218,32 @@ class TestNerveRegistry:
         assert meta["description"] == "new desc"
         assert meta["system_prompt"] == "keep me"
 
+    @given(name=safe_name, description=safe_text)
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_register_nerve_roundtrip_random(self, cold, name, description):
+        """Any name/description pair should survive registration and retrieval."""
+        cold.register_nerve(name, description)
+        info = cold.get_nerve_info(name)
+        assert info is not None
+        assert info["name"] == name
+        assert info["description"] == description
+        assert info["origin"] == "local"
+        assert info["total_invocations"] == 0
+
+    def test_register_nerve_upsert_preserves_invocation_stats(self, cold):
+        """Re-registering a nerve should not reset invocation counters."""
+        cold.register_nerve("calc", "calculator v1")
+        cold.record_nerve_invocation("calc", success=True)
+        cold.register_nerve("calc", "calculator v2")
+        info = cold.get_nerve_info("calc")
+        assert info["description"] == "calculator v2"
+        assert info["total_invocations"] == 1
+
 
 # ── Senses ───────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestSenses:
     def test_register_sense_and_check(self, cold):
         cold.register_sense("sight", "visual perception")
@@ -210,6 +273,7 @@ class TestSenses:
 # ── Test Bank ────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestTestBank:
     def test_set_and_get_test_bank(self, cold):
         tests = [{"input": "2+2", "expected": "4"}]
@@ -227,6 +291,7 @@ class TestTestBank:
 # ── Tool Stats ───────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestToolStats:
     def test_record_tool_call(self, cold):
         cold.record_tool_call("scrape", success=True)
@@ -239,10 +304,33 @@ class TestToolStats:
         assert row["successes"] == 2
         assert row["failures"] == 1
 
+    @given(
+        successes=st.integers(min_value=0, max_value=50),
+        failures=st.integers(min_value=0, max_value=50),
+    )
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_tool_stats_counts_are_consistent(self, cold, successes, failures):
+        """Total calls should always equal successes + failures."""
+        assume(successes + failures > 0)
+        # Use a unique name per example to avoid accumulation across hypothesis runs
+        name = f"tool_{next(_counter)}"
+        for _ in range(successes):
+            cold.record_tool_call(name, success=True)
+        for _ in range(failures):
+            cold.record_tool_call(name, success=False)
+        row = cold.conn.execute(
+            "SELECT total_calls, successes, failures FROM tool_stats WHERE name=?",
+            (name,),
+        ).fetchone()
+        assert row["total_calls"] == successes + failures
+        assert row["successes"] == successes
+        assert row["failures"] == failures
+
 
 # ── Nerve Tools ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestNerveTools:
     def test_add_and_get_nerve_tools(self, cold):
         cold.add_nerve_tool("weather", "http_get")
@@ -277,6 +365,7 @@ class TestNerveTools:
 # ── Qualifications ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestQualifications:
     def test_record_and_get_qualification(self, cold):
         cold.record_qualification("nerve", "calc", True, 0.95, 2, 10, 9, '{"notes":"good"}')
@@ -330,10 +419,17 @@ class TestQualifications:
         assert q["qualified"] is True
         assert q["score"] == 0.95
 
+    def test_qualification_timestamp_is_set(self, cold):
+        """Qualification records should have a timestamp."""
+        cold.record_qualification("nerve", "ts_check", True, 1.0, 1, 5, 5)
+        q = cold.get_qualification("nerve", "ts_check")
+        assert q["timestamp"] == IsStr()
+
 
 # ── Personality ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestPersonality:
     def test_append_and_get_signals(self, cold):
         cold.append_personality_signal({"tone": "friendly"})
@@ -407,10 +503,11 @@ class TestPersonality:
 # ── Users ────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestUsers:
     def test_create_user_with_email_and_resolve(self, cold):
         user_id = cold.create_user_with_email("alice@example.com", "slack", "S123")
-        assert user_id
+        assert user_id == IsStr()
         resolved = cold.resolve_user("slack", "S123")
         assert resolved == user_id
 
@@ -496,6 +593,7 @@ class TestUsers:
 # ── Verification ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestVerification:
     def test_store_and_verify_code_success(self, cold):
         cold.store_verification_code("slack", "S1", "a@b.com", "123456")
@@ -547,6 +645,7 @@ class TestVerification:
 # ── Bulk Data ────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestBulkData:
     def test_get_all_nerve_data(self, cold):
         cold.register_nerve_rich("calc", "calculator", role="tool")
@@ -565,3 +664,67 @@ class TestBulkData:
 
     def test_get_all_nerve_data_empty(self, cold):
         assert cold.get_all_nerve_data() == {}
+
+    def test_get_all_nerve_data_snapshot(self, cold, snapshot):
+        """Snapshot the shape of get_all_nerve_data() for regression detection."""
+        cold.register_nerve_rich(
+            "summarize", "summarize text",
+            system_prompt="Be concise.",
+            examples_json='[{"input":"long text","output":"short"}]',
+            role="tool",
+        )
+        cold.add_nerve_tool("summarize", "text_splitter")
+        cold.add_nerve_tool("summarize", "llm_call")
+        cold.record_qualification(
+            "nerve", "summarize", True, 0.92, 3, 10, 9, '{"notes":"good"}'
+        )
+        cold.record_nerve_invocation("summarize", success=True)
+        cold.record_nerve_invocation("summarize", success=True)
+        cold.record_nerve_invocation("summarize", success=False)
+
+        data = cold.get_all_nerve_data()
+        # Redact the timestamp since it varies per run
+        if data["summarize"]["qualification"]:
+            data["summarize"]["qualification"]["timestamp"] = "<REDACTED>"
+        assert data == snapshot
+
+    def test_get_all_nerve_data_contains_expected_keys(self, cold):
+        """Every nerve in get_all_nerve_data should have the full set of keys."""
+        cold.register_nerve("a", "alpha")
+        cold.register_nerve_rich("b", "beta", role="creative")
+        data = cold.get_all_nerve_data()
+        expected_keys = {
+            "description", "is_sense", "total_invocations", "successes",
+            "failures", "system_prompt", "examples", "role", "origin",
+            "tools", "qualification",
+        }
+        for name, nerve in data.items():
+            assert set(nerve.keys()) == expected_keys, (
+                f"Nerve '{name}' has unexpected key set: {set(nerve.keys())}"
+            )
+
+
+# ── Hypothesis: Nerve Invocation Counters ────────────────────────────────────
+
+
+@pytest.mark.timeout(30)
+class TestNerveInvocationProperty:
+    @given(
+        successes=st.integers(min_value=0, max_value=30),
+        failures=st.integers(min_value=0, max_value=30),
+    )
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_invocation_counts_always_consistent(self, cold, successes, failures):
+        """Nerve invocation counters must always sum correctly."""
+        assume(successes + failures > 0)
+        # Use a unique name per example to avoid accumulation across hypothesis runs
+        name = f"nerve_{next(_counter)}"
+        cold.register_nerve(name, "property test nerve")
+        for _ in range(successes):
+            cold.record_nerve_invocation(name, success=True)
+        for _ in range(failures):
+            cold.record_nerve_invocation(name, success=False)
+        info = cold.get_nerve_info(name)
+        assert info["total_invocations"] == successes + failures
+        assert info["successes"] == successes
+        assert info["failures"] == failures

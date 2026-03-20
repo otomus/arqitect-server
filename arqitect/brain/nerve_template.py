@@ -18,6 +18,7 @@ from arqitect.senses.sense_runtime import (
     check_awareness, express, call_sense,
 )
 from arqitect.matching import match_tools as _match_tools
+from arqitect.types import Action
 
 NERVE_NAME = "{{NERVE_NAME}}"
 NERVE_ROLE = "{{NERVE_ROLE}}"
@@ -127,21 +128,39 @@ def build_planner_prompt(meta):
 
 
 def parse_json(raw):
-    """Extract first JSON object from a string."""
+    """Extract first JSON object from a string.
+
+    Uses brace-depth counting while skipping over characters inside
+    JSON string literals so that braces embedded in string values
+    (e.g. ``{"response": "{"}``) do not confuse the boundary detection.
+    """
     start = raw.find("{")
     if start == -1:
         return None
     depth = 0
-    for i in range(start, len(raw)):
-        if raw[i] == "{":
-            depth += 1
-        elif raw[i] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(raw[start:i + 1])
-                except json.JSONDecodeError:
-                    return None
+    in_string = False
+    i = start
+    while i < len(raw):
+        ch = raw[i]
+        if in_string:
+            if ch == "\\" :
+                i += 2  # skip escaped character
+                continue
+            if ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[start:i + 1])
+                    except json.JSONDecodeError:
+                        return None
+        i += 1
     return None
 
 
@@ -284,7 +303,7 @@ def main():
 
     # Normalize: small models sometimes put tool name in "action" instead of using "call"
     # e.g. {"action":"weather_tool","args":{...}} instead of {"action":"call","tool":"weather_tool","args":{...}}
-    if action and action not in ("call", "answer", "use_sense", "acquire", "fabricate", "needs"):
+    if action and action not in ("call", "answer", Action.USE_SENSE, "acquire", "fabricate", "needs"):
         _all_tool_names = set(tool_info.keys()) | set(get_tool_names())
         if action in _all_tool_names or match_tool_name(action, list(_all_tool_names)) in _all_tool_names:
             _matched_action = match_tool_name(action, list(_all_tool_names))

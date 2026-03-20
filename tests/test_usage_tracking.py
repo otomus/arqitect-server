@@ -8,12 +8,14 @@ Covers:
 """
 
 import json
-import os
 import subprocess
 import time
 from unittest.mock import MagicMock, patch
 
 import pytest
+from dirty_equals import IsFloat, IsInstance, IsPositiveInt, IsStr
+from hypothesis import given, settings, assume, HealthCheck
+from hypothesis import strategies as st
 
 from tests.conftest import make_nerve_file
 
@@ -23,18 +25,28 @@ from tests.conftest import make_nerve_file
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def monitoring(tmp_path):
+def monitoring(tmp_memory_dir):
     """Provide an isolated MonitoringMemory backed by a temp database."""
-    db_path = str(tmp_path / "monitoring.db")
+    db_path = str(tmp_memory_dir / "monitoring.db")
     with patch("arqitect.memory.monitoring._DB_PATH", db_path):
         from arqitect.memory.monitoring import MonitoringMemory
         yield MonitoringMemory()
+
+
+@pytest.fixture
+def community_dir(tmp_path):
+    """Create a fake community repo directory."""
+    d = tmp_path / "arqitect-community"
+    d.mkdir()
+    (d / ".git").mkdir()
+    return d
 
 
 # ---------------------------------------------------------------------------
 # MonitoringMemory — core operations
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestMonitoringMemory:
     """Dedicated monitoring database records per-call data."""
 
@@ -92,6 +104,7 @@ class TestMonitoringMemory:
         """get_usage_report(since=) only includes calls after the timestamp."""
         monitoring.record_call("nerve", "old_nerve", success=True)
         cutoff = time.time()
+        time.sleep(0.01)  # Ensure new_nerve timestamp is strictly after cutoff
         monitoring.record_call("nerve", "new_nerve", success=True)
 
         report = monitoring.get_usage_report(since=cutoff)
@@ -155,11 +168,52 @@ class TestMonitoringMemory:
         errors = monitoring.get_error_details("tool", "verbose_tool")
         assert len(errors[0]["error_message"]) == 500
 
+    @given(
+        subject_type=st.sampled_from(["nerve", "tool", "mcp"]),
+        name=st.text(min_size=1, max_size=50, alphabet=st.characters(
+            whitelist_categories=("L", "N"), whitelist_characters="_-/"
+        )),
+        successes=st.integers(min_value=0, max_value=10),
+        failures=st.integers(min_value=0, max_value=10),
+    )
+    @settings(max_examples=20, deadline=5000, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_report_entry_shape(self, subject_type, name, successes, failures, tmp_memory_dir):
+        """Every report entry has the expected keys and value types."""
+        assume(successes + failures > 0)
+        import uuid
+        db_path = str(tmp_memory_dir / f"monitoring_{uuid.uuid4().hex[:8]}.db")
+        with patch("arqitect.memory.monitoring._DB_PATH", db_path):
+            from arqitect.memory.monitoring import MonitoringMemory
+            mon = MonitoringMemory()
+
+            for _ in range(successes):
+                mon.record_call(subject_type, name, success=True, latency_ms=10.0)
+            for _ in range(failures):
+                mon.record_call(subject_type, name, success=False, latency_ms=20.0,
+                                error_message="err")
+
+            report = mon.get_usage_report()
+
+            # Find the correct bucket
+            bucket_key = {"nerve": "nerves", "tool": "tools", "mcp": "mcps"}[subject_type]
+            entries = report[bucket_key]
+            assert len(entries) == 1
+
+            entry = entries[0]
+            assert entry["name"] == name
+            assert entry["total"] == successes + failures
+            assert entry["successes"] == successes
+            assert entry["failures"] == failures
+            assert entry["error_rate"] == IsFloat(ge=0.0, le=1.0)
+            assert entry["avg_latency_ms"] == IsFloat(ge=0.0)
+            assert entry["last_called_at"] == IsFloat(gt=0.0)
+
 
 # ---------------------------------------------------------------------------
 # Nerve invocation tracking via invoke_nerve()
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestNerveInvocationTracking:
     """invoke_nerve records calls in the monitoring database."""
 
@@ -183,7 +237,7 @@ class TestNerveInvocationTracking:
         nerve = report["nerves"][0]
         assert nerve["name"] == "tracker_nerve"
         assert nerve["successes"] == 1
-        assert nerve["avg_latency_ms"] >= 0
+        assert nerve["avg_latency_ms"] == IsFloat(ge=0.0)
 
     def test_failed_invocation_recorded(self, nerves_dir, sandbox_dir, mem, monitoring):
         """A nerve that exits non-zero records a failure in monitoring."""
@@ -247,6 +301,7 @@ class TestNerveInvocationTracking:
 # Tool call tracking via MCP server
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestToolCallTracking:
     """_record_tool_usage persists stats in monitoring database."""
 
@@ -297,16 +352,9 @@ class TestToolCallTracking:
 # Dream state — usage report generation
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestDreamUsageReport:
     """Dream state reads from monitoring.db and writes reports to community."""
-
-    @pytest.fixture
-    def community_dir(self, tmp_path):
-        """Create a fake community repo directory."""
-        d = tmp_path / "arqitect-community"
-        d.mkdir()
-        (d / ".git").mkdir()
-        return d
 
     def test_writes_report_to_community(self, mem, monitoring, community_dir):
         """_dream_usage_report writes a JSON file to community reports/."""
@@ -339,8 +387,8 @@ class TestDreamUsageReport:
         assert report["nerves"][0]["avg_latency_ms"] == 100.0
         assert report["tools"][0]["name"] == "test_tool"
         assert report["tools"][0]["error_rate"] == 0.5
-        assert "generated_at" in report
-        assert "instance_id" in report
+        assert report["generated_at"] == IsStr()
+        assert report["instance_id"] == IsStr()
 
     def test_skips_when_no_community_dir(self, mem):
         """No error when community repo is not found."""

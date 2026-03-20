@@ -1,9 +1,9 @@
 """Flow-based tests for the dreamstate pipeline.
 
 Tests the desired end-to-end flow:
-  nerve invocation → dream state entry → prioritized hydration →
-  template detection → real test generation → qualification →
-  test bank expansion to min_training_examples → LoRA fine-tuning →
+  nerve invocation -> dream state entry -> prioritized hydration ->
+  template detection -> real test generation -> qualification ->
+  test bank expansion to min_training_examples -> LoRA fine-tuning ->
   adapter creation.
 
 These tests validate the invariants that were broken in production,
@@ -14,16 +14,32 @@ import json
 import threading
 import time
 from datetime import datetime, timedelta
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+from dirty_equals import IsInstance, IsPositive
+from hypothesis import given, settings, assume
+from hypothesis import strategies as st
 
 from arqitect.types import NerveRole
 
 
-# ── 1. Role validation — invalid roles must never leak into the pipeline ──────
+# ---------------------------------------------------------------------------
+# Helper for provenance ranking (used by TestTestCaseProvenance)
+# ---------------------------------------------------------------------------
+
+_SIZE_RANK = {"community": 0, "tinylm": 1, "small": 2, "medium": 3, "large": 4}
 
 
+def _size_rank(size: str | None) -> int:
+    """Rank a size class for provenance comparison. Higher = stronger model."""
+    return _SIZE_RANK.get(size or "", 0)
+
+
+# -- 1. Role validation -- invalid roles must never leak into the pipeline ---
+
+
+@pytest.mark.timeout(10)
 class TestRoleValidation:
     """Nerves must only have roles: tool, creative, code.
 
@@ -31,25 +47,31 @@ class TestRoleValidation:
     and would break the adapter resolution chain.
     """
 
-    def test_validate_nerve_role_accepts_valid_roles(self):
+    @pytest.mark.parametrize("role", ["tool", "creative", "code"])
+    def test_validate_nerve_role_accepts_valid_roles(self, role):
         from arqitect.brain.routing import validate_nerve_role
 
-        for role in ("tool", "creative", "code"):
-            assert validate_nerve_role(role) == role
+        assert validate_nerve_role(role) == role
 
-    def test_validate_nerve_role_clamps_system_roles_to_tool(self):
+    @pytest.mark.parametrize("bad_role", [
+        "brain", "awareness", "communication", "nerve", "coder",
+    ])
+    def test_validate_nerve_role_clamps_system_roles_to_tool(self, bad_role):
         from arqitect.brain.routing import validate_nerve_role
 
-        for bad_role in ("brain", "awareness", "communication", "nerve", "coder"):
-            assert validate_nerve_role(bad_role) == NerveRole.TOOL, (
-                f"System role '{bad_role}' leaked through validation"
-            )
+        assert validate_nerve_role(bad_role) == NerveRole.TOOL, (
+            f"System role '{bad_role}' leaked through validation"
+        )
 
-    def test_validate_nerve_role_clamps_garbage_to_tool(self):
+    @given(garbage=st.text(min_size=0, max_size=50).filter(
+        lambda s: s not in ("tool", "creative", "code")
+    ))
+    @settings(max_examples=20)
+    def test_validate_nerve_role_clamps_arbitrary_strings_to_tool(self, garbage):
+        """Any string that isn't a valid role must clamp to tool."""
         from arqitect.brain.routing import validate_nerve_role
 
-        for garbage in ("", "unknown", "super_agent", "123"):
-            assert validate_nerve_role(garbage) == NerveRole.TOOL
+        assert validate_nerve_role(garbage) == NerveRole.TOOL
 
     def test_classify_nerve_role_only_returns_valid_roles(self):
         """Even if the LLM hallucinates a system role, classify must clamp it."""
@@ -90,7 +112,7 @@ class TestRoleValidation:
 
         bundle = {
             "description": "self-reflection",
-            "role": "brain",  # invalid — should be clamped
+            "role": "brain",  # invalid -- should be clamped
             "default": {"system_prompt": "reflect", "examples": []},
         }
 
@@ -106,19 +128,20 @@ class TestRoleValidation:
         call_kwargs = cold.register_nerve_rich.call_args
         registered_role = call_kwargs.kwargs.get("role") or call_kwargs[1].get("role")
         if registered_role is None:
-            # positional args: name, desc, prompt, examples, role=...
-            # Check keyword args
-            registered_role = call_kwargs[1].get("role", call_kwargs[0][4] if len(call_kwargs[0]) > 4 else None)
+            registered_role = call_kwargs[1].get(
+                "role", call_kwargs[0][4] if len(call_kwargs[0]) > 4 else None
+            )
         assert registered_role != "brain"
 
 
-# ── 2. Template test bank detection ──────────────────────────────────────────
+# -- 2. Template test bank detection ----------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestTemplateDetection:
     """Community bundles ship template test cases with placeholder outputs.
 
-    These must be detected and regenerated — treating them as real tests
+    These must be detected and regenerated -- treating them as real tests
     causes the reconciler to skip test generation and score against garbage.
     """
 
@@ -160,12 +183,12 @@ class TestTemplateDetection:
 
         template_tests = [
             {"input": f"test_{i}", "output": '{"args": {}}'}
-            for i in range(MAX_RETEST_CASES + 5)  # enough to pass length check
+            for i in range(MAX_RETEST_CASES + 5)
         ]
         real_tests = [{"input": "reflect on today", "output": "A pattern of curiosity..."}]
         generate_fn = MagicMock(return_value=real_tests)
 
-        with patch("arqitect.brain.consolidate.mem") as mock_mem:
+        with patch("arqitect.brain.consolidate.mem"):
             result = _ensure_test_bank("reflect_nerve", "self-reflection", template_tests, generate_fn)
 
         generate_fn.assert_called_once()
@@ -196,16 +219,17 @@ class TestTemplateDetection:
         new_tests = [{"input": f"gen_{i}", "output": f"output_{i}"} for i in range(5)]
         generate_fn = MagicMock(return_value=new_tests)
 
-        with patch("arqitect.brain.consolidate.mem") as mock_mem:
+        with patch("arqitect.brain.consolidate.mem"):
             result = _ensure_test_bank("reflect_nerve", "self-reflection", few_tests, generate_fn)
 
         generate_fn.assert_called_once()
         assert result == new_tests
 
 
-# ── 3. Work queue prioritization — recently-used nerves first ────────────────
+# -- 3. Work queue prioritization -- recently-used nerves first --------------
 
 
+@pytest.mark.timeout(10)
 class TestWorkQueuePrioritization:
     """The dream state must prioritize nerves the user actually uses.
 
@@ -218,15 +242,14 @@ class TestWorkQueuePrioritization:
 
         now = datetime.now()
         recent = now.isoformat()
-        assert _ts_key(recent) > 0
+        assert _ts_key(recent) == IsPositive
         assert _ts_key(None) == 0.0
 
-    def test_ts_key_handles_invalid_timestamps(self):
+    @pytest.mark.parametrize("bad_ts", ["not-a-date", "", None])
+    def test_ts_key_handles_invalid_timestamps(self, bad_ts):
         from arqitect.brain.consolidate import _ts_key
 
-        assert _ts_key("not-a-date") == 0.0
-        assert _ts_key("") == 0.0
-        assert _ts_key(None) == 0.0
+        assert _ts_key(bad_ts) == 0.0
 
     def test_build_work_queue_puts_used_nerves_first(self):
         """Nerves with last_invoked_at must appear before those without."""
@@ -269,7 +292,7 @@ class TestWorkQueuePrioritization:
 
         names = [item["name"] for item in queue]
 
-        # Never-invoked nerves are excluded — no point reconciling nerves nobody used
+        # Never-invoked nerves are excluded
         assert "unused_nerve" not in names, (
             "Never-invoked nerve should be excluded from reconciliation queue"
         )
@@ -300,9 +323,10 @@ class TestWorkQueuePrioritization:
         assert set(names[2:]) == {"never_used", "also_never_used"}
 
 
-# ── 4. Tuner importability — no module-level side effects ────────────────────
+# -- 4. Tuner importability -- no module-level side effects ------------------
 
 
+@pytest.mark.timeout(10)
 class TestTunerImportability:
     """The tuner module must be importable without triggering config resolution.
 
@@ -323,7 +347,6 @@ class TestTunerImportability:
         """_nerves_dir() must not be called at import time."""
         from arqitect.inference.tuner import _nerves_dir
 
-        # It's a function, not a pre-resolved string
         assert callable(_nerves_dir)
 
     def test_models_dir_is_lazy(self):
@@ -333,9 +356,10 @@ class TestTunerImportability:
         assert callable(_models_dir)
 
 
-# ── 5. Training data threshold — must reach min_training_examples ────────────
+# -- 5. Training data threshold -- must reach min_training_examples ----------
 
 
+@pytest.mark.timeout(10)
 class TestTrainingDataThreshold:
     """Fine-tuning must not start until min_training_examples is reached.
 
@@ -398,9 +422,10 @@ class TestTrainingDataThreshold:
         assert "reflect on today" in inputs
 
 
-# ── 6. Test bank expansion — batched generation until threshold ──────────────
+# -- 6. Test bank expansion -- batched generation until threshold ------------
 
 
+@pytest.mark.timeout(10)
 class TestTestBankExpansion:
     """The test bank must be expanded in batches until min_training_examples.
 
@@ -427,7 +452,7 @@ class TestTestBankExpansion:
                     {"input": "existing_q", "output": "dup"},
                     {"input": "new_q_1", "output": "new_a_1"},
                 ]
-            # Subsequent rounds: all duplicates — should stop
+            # Subsequent rounds: all duplicates -- should stop
             return [{"input": "existing_q", "output": "dup again"}]
 
         with patch("arqitect.brain.consolidate.mem") as mock_mem:
@@ -450,9 +475,10 @@ class TestTestBankExpansion:
         assert round_count == 2, f"Expected 2 rounds but got {round_count}"
 
 
-# ── 7. Reconciliation flow — template detection → real test gen → scoring ────
+# -- 7. Reconciliation flow -- template detection -> real test gen -> scoring
 
 
+@pytest.mark.timeout(10)
 class TestReconciliationFlow:
     """Reconciliation must detect template tests, regenerate, then score.
 
@@ -495,17 +521,17 @@ class TestReconciliationFlow:
                 _improve_one_nerve("reflect_nerve", "self-reflection", 0.0, interrupted)
 
         mock_ensure.assert_called()
-        # The first arg is the nerve name
         assert mock_ensure.call_args[0][0] == "reflect_nerve"
 
 
-# ── 8. Dream phase ordering — the pipeline must flow correctly ───────────────
+# -- 8. Dream phase ordering -- the pipeline must flow correctly -------------
 
 
+@pytest.mark.timeout(10)
 class TestDreamPhaseOrdering:
     """Dream phases must execute in correct order:
-    community sync → consolidation → MCP fanout → reconciliation →
-    upgrade → fine-tuning → contribution → personality.
+    community sync -> consolidation -> MCP fanout -> reconciliation ->
+    upgrade -> fine-tuning -> contribution -> personality.
 
     Fine-tuning depends on reconciliation (generates training data).
     MCP fanout must happen before reconciliation (nerves need tools first).
@@ -575,9 +601,10 @@ class TestDreamPhaseOrdering:
         assert "finetune" not in call_order, "Fine-tuning should not run after interrupt"
 
 
-# ── 9. Fine-tuning gate — only qualified nerves with enough data ─────────────
+# -- 9. Fine-tuning gate -- only qualified nerves with enough data -----------
 
 
+@pytest.mark.timeout(10)
 class TestFineTuningGate:
     """Fine-tuning must only proceed for nerves that are:
     1. Qualified (passed reconciliation)
@@ -596,7 +623,7 @@ class TestFineTuningGate:
             mock_mem.cold.conn.execute.return_value.fetchall.return_value = [
                 ("reflect_nerve", "self-reflection", "creative"),
             ]
-            mock_mem.cold.is_qualified.return_value = False  # Not qualified yet
+            mock_mem.cold.is_qualified.return_value = False
 
             with patch("arqitect.inference.tuner.collect_training_data") as mock_collect:
                 with patch("arqitect.brain.adapters.get_tuning_config", return_value={
@@ -606,7 +633,6 @@ class TestFineTuningGate:
                     with patch("arqitect.critic.qualify_nerve.generate_test_cases"):
                         ds._expand_test_banks_for_training()
 
-            # collect_training_data should not be called for unqualified nerves
             mock_collect.assert_not_called()
 
     def test_finetune_imports_gracefully(self):
@@ -617,37 +643,32 @@ class TestFineTuningGate:
         ds._interrupted = threading.Event()
 
         with patch("arqitect.brain.consolidate.mem"):
-            # Simulate missing training deps
             with patch.dict("sys.modules", {"arqitect.inference.tuner": None}):
-                # Should not raise — just log and return
+                # Should not raise -- just log and return
                 ds._dream_finetune()
 
 
-# ── 10. Adapter resolution — role maps to correct tuning config ──────────────
+# -- 10. Adapter resolution -- role maps to correct tuning config ------------
 
 
+@pytest.mark.timeout(10)
 class TestAdapterResolution:
     """The adapter resolver must map nerve roles to correct community configs.
 
-    tool → nerve adapter (structured I/O)
-    creative → creative adapter (generative)
-    code → code adapter (syntax-focused)
+    tool -> nerve adapter (structured I/O)
+    creative -> creative adapter (generative)
+    code -> code adapter (syntax-focused)
     """
 
-    def test_tool_role_maps_to_nerve_adapter(self):
+    @pytest.mark.parametrize("role,expected", [
+        ("tool", "nerve"),
+        ("creative", "creative"),
+        ("code", "code"),
+    ])
+    def test_role_maps_to_expected_adapter(self, role, expected):
         from arqitect.brain.adapters import _resolve_adapter_role
 
-        assert _resolve_adapter_role("tool") == "nerve"
-
-    def test_creative_role_maps_to_creative_adapter(self):
-        from arqitect.brain.adapters import _resolve_adapter_role
-
-        assert _resolve_adapter_role("creative") == "creative"
-
-    def test_code_role_maps_to_code_adapter(self):
-        from arqitect.brain.adapters import _resolve_adapter_role
-
-        assert _resolve_adapter_role("code") == "code"
+        assert _resolve_adapter_role(role) == expected
 
     def test_unknown_role_falls_back_to_nerve(self):
         from arqitect.brain.adapters import _resolve_adapter_role
@@ -655,19 +676,11 @@ class TestAdapterResolution:
         assert _resolve_adapter_role("unknown_role") == "nerve"
 
     def test_tuning_config_has_required_fields_with_community(self):
-        """Every role's tuning config must include min_training_examples and test_cases_per_batch.
-
-        GAP FOUND: Without community meta.json, get_tuning_config only returns
-        architecture-level ROLE_TUNING_OVERRIDES which lack these fields.
-        The pipeline (consolidate, tuner) does `cfg["min_training_examples"]`
-        which would KeyError if community is unreachable. This test verifies
-        the gap exists — the fix should add defaults to get_tuning_config.
-        """
+        """Every role's tuning config must include min_training_examples and test_cases_per_batch."""
         from arqitect.brain.adapters import get_tuning_config
 
         required_fields = {"min_training_examples", "test_cases_per_batch"}
 
-        # With community meta providing the fields
         community_meta = {
             "tuning": {
                 "min_training_examples": 200,
@@ -685,7 +698,7 @@ class TestAdapterResolution:
                         )
 
     def test_tuning_config_missing_fields_without_community(self):
-        """GAP: Without community meta, required fields are absent — pipeline would KeyError.
+        """GAP: Without community meta, required fields are absent -- pipeline would KeyError.
 
         This documents a real gap: if the community cache is empty or unreachable,
         get_tuning_config returns only ROLE_TUNING_OVERRIDES which don't include
@@ -698,15 +711,16 @@ class TestAdapterResolution:
             with patch("arqitect.brain.adapters.resolve_prompt", return_value=None):
                 cfg = get_tuning_config("tool")
 
-        # This documents the gap — these fields are missing without community
+        # This documents the gap -- these fields are missing without community
         assert "min_training_examples" not in cfg, (
-            "If this passes, the gap has been fixed — update this test"
+            "If this passes, the gap has been fixed -- update this test"
         )
 
 
-# ── 11. Coverage gating — scores require sufficient test coverage ────────────
+# -- 11. Coverage gating -- scores require sufficient test coverage ----------
 
 
+@pytest.mark.timeout(10)
 class TestCoverageGating:
     """Qualification scores must only be recorded when enough tests ran.
 
@@ -714,17 +728,17 @@ class TestCoverageGating:
     and should not be saved. MIN_TEST_COVERAGE (80%) must be enforced.
     """
 
-    def test_has_sufficient_coverage_rejects_low_coverage(self):
+    @pytest.mark.parametrize("results,total", [(1, 10), (3, 5)])
+    def test_has_sufficient_coverage_rejects_low_coverage(self, results, total):
         from arqitect.brain.consolidate import _has_sufficient_coverage
 
-        assert _has_sufficient_coverage(1, 10) is False  # 10% coverage
-        assert _has_sufficient_coverage(3, 5) is False   # 60% coverage
+        assert _has_sufficient_coverage(results, total) is False
 
-    def test_has_sufficient_coverage_accepts_high_coverage(self):
+    @pytest.mark.parametrize("results,total", [(4, 5), (5, 5)])
+    def test_has_sufficient_coverage_accepts_high_coverage(self, results, total):
         from arqitect.brain.consolidate import _has_sufficient_coverage
 
-        assert _has_sufficient_coverage(4, 5) is True    # 80% coverage
-        assert _has_sufficient_coverage(5, 5) is True    # 100% coverage
+        assert _has_sufficient_coverage(results, total) is True
 
     def test_has_sufficient_coverage_handles_zero_tests(self):
         from arqitect.brain.consolidate import _has_sufficient_coverage
@@ -735,19 +749,20 @@ class TestCoverageGating:
         """Plateau detection must stop reconciliation when scores stop improving."""
         from arqitect.brain.consolidate import _detect_plateau
 
-        # Scores stuck at 0.6 — should detect plateau
+        # Scores stuck at 0.6 -- should detect plateau
         assert _detect_plateau([0.60, 0.61]) is True
 
-        # Scores improving — should not detect plateau
+        # Scores improving -- should not detect plateau
         assert _detect_plateau([0.50, 0.70]) is False
 
-        # Not enough data — should not detect
+        # Not enough data -- should not detect
         assert _detect_plateau([0.60]) is False
 
 
-# ── 12. Dreamstate entry — idle threshold enforcement ────────────────────────
+# -- 12. Dreamstate entry -- idle threshold enforcement ----------------------
 
 
+@pytest.mark.timeout(10)
 class TestDreamstateEntry:
     """The brain must wait IDLE_THRESHOLD (120s) before entering dream state.
 
@@ -758,13 +773,13 @@ class TestDreamstateEntry:
         from arqitect.brain.consolidate import Dreamstate, IDLE_THRESHOLD
 
         ds = Dreamstate.__new__(Dreamstate)
-        ds._last_activity = time.time()  # just now — not idle
+        ds._last_activity = time.time()  # just now -- not idle
         ds._worker_thread = None
         ds._interrupted = threading.Event()
         ds._lock = threading.Lock()
         ds._timer = None
 
-        # Should not enter — brain just had activity
+        # Should not enter -- brain just had activity
         ds._enter_dreamstate()
         assert ds._worker_thread is None, "Should not dream when brain was just active"
 
@@ -787,97 +802,48 @@ class TestDreamstateEntry:
         assert ds._interrupted.is_set(), "wake() must set the interrupted event"
 
 
-# ── 13. Size class mapping — fractional params and edge cases ────────────────
+# -- 13. Size class mapping -- fractional params and edge cases --------------
 
 
+@pytest.mark.timeout(10)
 class TestSizeClassMapping:
-    """Model name → size class mapping must handle fractional param counts,
+    """Model name -> size class mapping must handle fractional param counts,
     unusual naming, cloud models, and missing info gracefully."""
 
-    def test_integer_param_counts(self):
+    @pytest.mark.parametrize("model,expected", [
+        ("qwen2.5-coder-7b", "medium"),
+        ("llama-3-70b", "large"),
+        ("smollm-1.5b", "tinylm"),
+        ("llama-3-3b", "small"),
+        ("phi-3-mini-3.8b", "small"),
+        ("qwen2-0.5b-instruct", "tinylm"),
+        ("deepseek-coder-1.3b", "tinylm"),
+        ("codellama-13b-instruct", "medium"),
+        ("codellama-34b", "large"),
+        # Case insensitivity
+        ("Qwen2.5-Coder-7B", "medium"),
+        ("LLAMA-3-70B", "large"),
+    ])
+    def test_model_to_size_class(self, model, expected):
         from arqitect.brain.adapters import _model_to_size_class
 
-        assert _model_to_size_class("qwen2.5-coder-7b") == "medium"
-        assert _model_to_size_class("llama-3-70b") == "large"
-        assert _model_to_size_class("smollm-1.5b") == "tinylm"
-        assert _model_to_size_class("llama-3-3b") == "small"
+        assert _model_to_size_class(model) == expected
 
-    def test_fractional_3_8b_maps_to_small(self):
-        """3.8B params is small tier (3-8B). '8b' substring must not match medium."""
+    @pytest.mark.parametrize("model", ["mystery-model", "", None])
+    def test_unknown_or_empty_model_returns_none(self, model):
         from arqitect.brain.adapters import _model_to_size_class
 
-        assert _model_to_size_class("phi-3-mini-3.8b") == "small"
+        assert _model_to_size_class(model) is None
 
-    def test_fractional_0_5b_maps_to_tinylm(self):
-        from arqitect.brain.adapters import _model_to_size_class
+    # -- Cloud model classification via provider category ---
 
-        assert _model_to_size_class("qwen2-0.5b-instruct") == "tinylm"
-
-    def test_fractional_1_3b_maps_to_tinylm(self):
-        from arqitect.brain.adapters import _model_to_size_class
-
-        assert _model_to_size_class("deepseek-coder-1.3b") == "tinylm"
-
-    def test_13b_maps_to_medium(self):
-        from arqitect.brain.adapters import _model_to_size_class
-
-        assert _model_to_size_class("codellama-13b-instruct") == "medium"
-
-    def test_34b_maps_to_large(self):
-        from arqitect.brain.adapters import _model_to_size_class
-
-        assert _model_to_size_class("codellama-34b") == "large"
-
-    def test_unknown_model_returns_none(self):
-        from arqitect.brain.adapters import _model_to_size_class
-
-        assert _model_to_size_class("mystery-model") is None
-
-    def test_empty_string_returns_none(self):
-        from arqitect.brain.adapters import _model_to_size_class
-
-        assert _model_to_size_class("") is None
-
-    def test_none_returns_none(self):
-        from arqitect.brain.adapters import _model_to_size_class
-
-        assert _model_to_size_class(None) is None
-
-    def test_case_insensitive(self):
-        from arqitect.brain.adapters import _model_to_size_class
-
-        assert _model_to_size_class("Qwen2.5-Coder-7B") == "medium"
-        assert _model_to_size_class("LLAMA-3-70B") == "large"
-
-    # ── Cloud model classification via provider category ──────────
-
-    def test_cloud_model_opus4_maps_to_large(self):
-        """Cloud models without param counts in name must resolve to 'large'
-        via provider category, not substring matching."""
+    @pytest.mark.parametrize("model_name", [
+        "claude-opus-4", "gpt-4o", "gemini-2.0-flash", "deepseek-chat",
+    ])
+    def test_cloud_model_maps_to_large(self, model_name):
         from arqitect.brain.adapters import get_model_size_class
 
-        with patch("arqitect.brain.adapters._get_model_file_for_role", return_value="claude-opus-4"):
-            with patch("arqitect.brain.adapters._is_cloud_provider", return_value=True):
-                assert get_model_size_class("brain") == "large"
-
-    def test_cloud_model_gpt4o_maps_to_large(self):
-        from arqitect.brain.adapters import get_model_size_class
-
-        with patch("arqitect.brain.adapters._get_model_file_for_role", return_value="gpt-4o"):
-            with patch("arqitect.brain.adapters._is_cloud_provider", return_value=True):
-                assert get_model_size_class("brain") == "large"
-
-    def test_cloud_model_gemini_maps_to_large(self):
-        from arqitect.brain.adapters import get_model_size_class
-
-        with patch("arqitect.brain.adapters._get_model_file_for_role", return_value="gemini-2.0-flash"):
-            with patch("arqitect.brain.adapters._is_cloud_provider", return_value=True):
-                assert get_model_size_class("brain") == "large"
-
-    def test_cloud_model_deepseek_chat_maps_to_large(self):
-        from arqitect.brain.adapters import get_model_size_class
-
-        with patch("arqitect.brain.adapters._get_model_file_for_role", return_value="deepseek-chat"):
+        with patch("arqitect.brain.adapters._get_model_file_for_role", return_value=model_name):
             with patch("arqitect.brain.adapters._is_cloud_provider", return_value=True):
                 assert get_model_size_class("brain") == "large"
 
@@ -888,7 +854,6 @@ class TestSizeClassMapping:
 
         with patch("arqitect.brain.adapters._get_model_file_for_role",
                    return_value="llama-3.3-70b-versatile"):
-            # Even though Groq is cloud, 70b is extractable → large via params
             assert get_model_size_class("brain") == "large"
 
     def test_groq_hosted_small_model_not_forced_large(self):
@@ -900,7 +865,7 @@ class TestSizeClassMapping:
             assert get_model_size_class("brain") == "medium"
 
     def test_local_unknown_model_returns_none(self):
-        """A local model with no param count and local provider → None."""
+        """A local model with no param count and local provider -> None."""
         from arqitect.brain.adapters import get_model_size_class
 
         with patch("arqitect.brain.adapters._get_model_file_for_role", return_value="custom-model"):
@@ -908,9 +873,10 @@ class TestSizeClassMapping:
                 assert get_model_size_class("brain") is None
 
 
-# ── 14. Training data must be sliced per size class ──────────────────────────
+# -- 14. Training data must be sliced per size class -------------------------
 
 
+@pytest.mark.timeout(10)
 class TestTrainingDataPerSizeClass:
     """Each size class must train on a subset of the canonical test bank.
 
@@ -927,46 +893,31 @@ class TestTrainingDataPerSizeClass:
             "collect_training_data must accept size_class to slice the test bank"
         )
 
-    def test_tinylm_gets_at_most_50(self):
+    def _make_full_bank(self, count=500):
+        """Generate a test bank with the given number of entries."""
+        return [{"input": f"q{i}", "output": f"a{i}"} for i in range(count)]
+
+    @pytest.mark.parametrize("size_class,max_expected", [
+        ("tinylm", 50),
+        ("small", 100),
+        ("medium", 200),
+    ])
+    def test_size_class_respects_upper_bound(self, size_class, max_expected):
         from arqitect.inference.tuner import collect_training_data
 
-        full_bank = [{"input": f"q{i}", "output": f"a{i}"} for i in range(500)]
+        full_bank = self._make_full_bank()
 
         with patch("arqitect.memory.cold.ColdMemory") as MockCold:
             mock_cold = MockCold.return_value
             mock_cold.get_test_bank.return_value = full_bank
-            data = collect_training_data("reflect_nerve", size_class="tinylm")
+            data = collect_training_data("reflect_nerve", size_class=size_class)
 
-        assert len(data) <= 50
-
-    def test_small_gets_at_most_100(self):
-        from arqitect.inference.tuner import collect_training_data
-
-        full_bank = [{"input": f"q{i}", "output": f"a{i}"} for i in range(500)]
-
-        with patch("arqitect.memory.cold.ColdMemory") as MockCold:
-            mock_cold = MockCold.return_value
-            mock_cold.get_test_bank.return_value = full_bank
-            data = collect_training_data("reflect_nerve", size_class="small")
-
-        assert len(data) <= 100
-
-    def test_medium_gets_at_most_200(self):
-        from arqitect.inference.tuner import collect_training_data
-
-        full_bank = [{"input": f"q{i}", "output": f"a{i}"} for i in range(500)]
-
-        with patch("arqitect.memory.cold.ColdMemory") as MockCold:
-            mock_cold = MockCold.return_value
-            mock_cold.get_test_bank.return_value = full_bank
-            data = collect_training_data("reflect_nerve", size_class="medium")
-
-        assert len(data) <= 200
+        assert len(data) <= max_expected
 
     def test_large_gets_more_than_medium(self):
         from arqitect.inference.tuner import collect_training_data
 
-        full_bank = [{"input": f"q{i}", "output": f"a{i}"} for i in range(500)]
+        full_bank = self._make_full_bank()
 
         with patch("arqitect.memory.cold.ColdMemory") as MockCold:
             mock_cold = MockCold.return_value
@@ -980,7 +931,7 @@ class TestTrainingDataPerSizeClass:
         """Each tier must get strictly more data than the tier below it."""
         from arqitect.inference.tuner import collect_training_data
 
-        full_bank = [{"input": f"q{i}", "output": f"a{i}"} for i in range(500)]
+        full_bank = self._make_full_bank()
 
         with patch("arqitect.memory.cold.ColdMemory") as MockCold:
             mock_cold = MockCold.return_value
@@ -1005,7 +956,6 @@ class TestTrainingDataPerSizeClass:
             tinylm_data = collect_training_data("n", size_class="tinylm")
             large_data = collect_training_data("n", size_class="large")
 
-        # With only 2 cases, both tiers get the same (everything available)
         assert len(tinylm_data) == len(large_data) == 2
 
     def test_empty_bank_returns_empty(self):
@@ -1019,10 +969,10 @@ class TestTrainingDataPerSizeClass:
         assert data == []
 
     def test_slices_are_prefix_of_full_bank(self):
-        """Every tier's slice must be a prefix — same ordering, not random."""
+        """Every tier's slice must be a prefix -- same ordering, not random."""
         from arqitect.inference.tuner import collect_training_data
 
-        full_bank = [{"input": f"q{i}", "output": f"a{i}"} for i in range(500)]
+        full_bank = self._make_full_bank()
 
         with patch("arqitect.memory.cold.ColdMemory") as MockCold:
             mock_cold = MockCold.return_value
@@ -1038,7 +988,7 @@ class TestTrainingDataPerSizeClass:
         """When size_class is None (backward compat), return everything."""
         from arqitect.inference.tuner import collect_training_data
 
-        full_bank = [{"input": f"q{i}", "output": f"a{i}"} for i in range(500)]
+        full_bank = self._make_full_bank()
 
         with patch("arqitect.memory.cold.ColdMemory") as MockCold:
             mock_cold = MockCold.return_value
@@ -1048,9 +998,10 @@ class TestTrainingDataPerSizeClass:
         assert len(data) == 500
 
 
-# ── 15. Only medium/large brain can generate test cases ──────────────────────
+# -- 15. Only medium/large brain can generate test cases ---------------------
 
 
+@pytest.mark.timeout(10)
 class TestBrainSizeGate:
     """Test generation and reconciliation must only run when the brain
     model is medium or large. tinylm/small produce garbage critic output.
@@ -1064,55 +1015,30 @@ class TestBrainSizeGate:
             "few_shot_limit": 10,
         })
 
-    def test_generate_returns_empty_for_tinylm_brain(self):
+    @pytest.mark.parametrize("size", ["tinylm", "small", None])
+    def test_generate_returns_empty_for_insufficient_brain(self, size):
+        """tinylm, small, or unknown brain sizes must produce no test cases."""
         from arqitect.critic.qualify_nerve import generate_test_cases
 
-        with patch("arqitect.brain.adapters.get_model_size_class", return_value="tinylm"):
+        with patch("arqitect.brain.adapters.get_model_size_class", return_value=size):
             with self._mock_config():
                 cases = generate_test_cases("reflect_nerve", "self-reflection")
         assert cases == []
 
-    def test_generate_returns_empty_for_small_brain(self):
+    @pytest.mark.parametrize("size", ["medium", "large"])
+    def test_generate_works_for_sufficient_brain(self, size):
         from arqitect.critic.qualify_nerve import generate_test_cases
 
-        with patch("arqitect.brain.adapters.get_model_size_class", return_value="small"):
-            with self._mock_config():
-                cases = generate_test_cases("reflect_nerve", "self-reflection")
-        assert cases == []
-
-    def test_generate_works_for_medium_brain(self):
-        from arqitect.critic.qualify_nerve import generate_test_cases
-
-        with patch("arqitect.brain.adapters.get_model_size_class", return_value="medium"):
+        with patch("arqitect.brain.adapters.get_model_size_class", return_value=size):
             with self._mock_config():
                 with patch("arqitect.critic.qualify_nerve._llm", return_value=json.dumps([
                     {"input": "reflect", "output": "thought", "category": "core"}
                 ])):
                     cases = generate_test_cases("reflect_nerve", "self-reflection")
         assert len(cases) >= 1
-
-    def test_generate_works_for_large_brain(self):
-        from arqitect.critic.qualify_nerve import generate_test_cases
-
-        with patch("arqitect.brain.adapters.get_model_size_class", return_value="large"):
-            with self._mock_config():
-                with patch("arqitect.critic.qualify_nerve._llm", return_value=json.dumps([
-                    {"input": "reflect", "output": "thought", "category": "core"}
-                ])):
-                    cases = generate_test_cases("reflect_nerve", "self-reflection")
-        assert len(cases) >= 1
-
-    def test_generate_returns_empty_when_brain_size_unknown(self):
-        """If brain model can't be classified, err on the side of caution."""
-        from arqitect.critic.qualify_nerve import generate_test_cases
-
-        with patch("arqitect.brain.adapters.get_model_size_class", return_value=None):
-            with self._mock_config():
-                cases = generate_test_cases("reflect_nerve", "self-reflection")
-        assert cases == []
 
     def test_suggest_improvements_returns_noop_for_small_brain(self):
-        """Small brain can't produce useful improvements — should return unchanged."""
+        """Small brain can't produce useful improvements -- should return unchanged."""
         from arqitect.critic.qualify_nerve import suggest_improvements
 
         original_prompt = "You are a reflection agent."
@@ -1175,12 +1101,13 @@ class TestBrainSizeGate:
         mock_gen.assert_not_called()
 
 
-# ── 16. Test case provenance — tag with generating model ─────────────────────
+# -- 16. Test case provenance -- tag with generating model -------------------
 
 
+@pytest.mark.timeout(10)
 class TestTestCaseProvenance:
     """Each test case must be tagged with the model that generated it.
-    The tag is the actual model name — size class is derivable from it.
+    The tag is the actual model name -- size class is derivable from it.
     """
 
     def test_generated_cases_include_model_name(self):
@@ -1195,7 +1122,6 @@ class TestTestCaseProvenance:
                     cases = generate_test_cases("reflect_nerve", "self-reflection")
 
         assert len(cases) >= 1
-        assert "generated_by" in cases[0]
         assert cases[0]["generated_by"] == "qwen2.5-coder-7b"
 
     def test_all_cases_in_batch_get_same_model_tag(self):
@@ -1220,7 +1146,7 @@ class TestTestCaseProvenance:
             assert tc["generated_by"] == "llama-3-70b"
 
     def test_provenance_tag_survives_storage_round_trip(self):
-        """generated_by must persist through set_test_bank → get_test_bank."""
+        """generated_by must persist through set_test_bank -> get_test_bank."""
         from arqitect.memory.cold import ColdMemory
 
         cases = [
@@ -1312,13 +1238,32 @@ class TestTestCaseProvenance:
         assert len(upgradeable) == 1
 
 
-# ── 17. Prompt alignment review after reconciliation iterations ──────────────
+# -- 17. Prompt alignment review after reconciliation iterations -------------
 
 
+@pytest.mark.timeout(10)
 class TestPromptAlignmentReview:
     """After reconciliation iterations, the system must review whether
     system_prompt, name, and description are still aligned and coherent.
     """
+
+    def _make_mock_llm(self, responses):
+        """Build a callable that returns responses in order.
+
+        Args:
+            responses: List of string responses to return sequentially.
+
+        Returns:
+            A side_effect-compatible callable.
+        """
+        call_count = {"n": 0}
+
+        def _mock_llm(prompt, **kwargs):
+            idx = min(call_count["n"], len(responses) - 1)
+            call_count["n"] += 1
+            return responses[idx]
+
+        return _mock_llm
 
     def test_consolidation_after_5_plus_rules(self):
         """With 5+ appended rules, the prompt must be consolidated into
@@ -1329,25 +1274,17 @@ class TestPromptAlignmentReview:
             f"Rule: Always include aspect {i} in reflections" for i in range(10)
         )
 
-        # _llm is called twice: once for improvement suggestion, once for consolidation.
-        # The consolidation call should return a rewritten prompt.
         llm_responses = [
             json.dumps({
                 "rule": "Always mention emotional patterns",
                 "examples": [],
                 "description": "",
             }),
-            # Consolidation rewrite — coherent prompt with no "Rule:" lines
             "You are a reflection agent that always includes aspects 0-9 and emotional patterns in reflections.",
         ]
-        call_count = {"n": 0}
 
-        def _mock_llm(prompt, **kwargs):
-            idx = min(call_count["n"], len(llm_responses) - 1)
-            call_count["n"] += 1
-            return llm_responses[idx]
-
-        with patch("arqitect.critic.qualify_nerve._llm", side_effect=_mock_llm):
+        with patch("arqitect.critic.qualify_nerve._llm",
+                   side_effect=self._make_mock_llm(llm_responses)):
             with patch("arqitect.brain.adapters.get_model_size_class", return_value="medium"):
                 result = suggest_improvements(
                     "reflect_nerve", "self-reflection", long_prompt, [], [],
@@ -1372,30 +1309,23 @@ class TestPromptAlignmentReview:
                 "examples": [],
                 "description": "",
             }),
-            # Consolidation rewrite preserving "reflection"
             "You are a reflection agent that follows rules 0-8 and the new rule.",
         ]
-        call_count = {"n": 0}
 
-        def _mock_llm(prompt, **kwargs):
-            idx = min(call_count["n"], len(llm_responses) - 1)
-            call_count["n"] += 1
-            return llm_responses[idx]
-
-        with patch("arqitect.critic.qualify_nerve._llm", side_effect=_mock_llm):
+        with patch("arqitect.critic.qualify_nerve._llm",
+                   side_effect=self._make_mock_llm(llm_responses)):
             with patch("arqitect.brain.adapters.get_model_size_class", return_value="medium"):
                 result = suggest_improvements(
                     "reflect_nerve", "self-reflection", prompt, [], [],
                     [{"input": "test", "issue": "bad", "score": 0.3}],
                 )
 
-        # Must still mention reflection somewhere
         assert "reflect" in result["system_prompt"].lower(), (
             "Consolidation must preserve the nerve's core identity"
         )
 
     def test_no_consolidation_with_few_rules(self):
-        """With < 5 rules, just append normally — no rewrite needed."""
+        """With < 5 rules, just append normally -- no rewrite needed."""
         from arqitect.critic.qualify_nerve import suggest_improvements
 
         short_prompt = "You are a reflection agent.\nRule: Be thoughtful about temporal patterns"
@@ -1414,7 +1344,6 @@ class TestPromptAlignmentReview:
                         [{"input": "test", "issue": "bad format", "score": 0.3}],
                     )
 
-        # With only 2 rules, normal append is fine
         assert "temporal patterns" in result["system_prompt"]
         assert "bullet points" in result["system_prompt"]
 
@@ -1436,12 +1365,7 @@ class TestPromptAlignmentReview:
                     role="tool",
                 )
 
-        import yaml
-        with open("/Users/oronmozes/Documents/projects/sentient-server/arqitect/config/size_classes.yaml") as f:
-            classes = yaml.safe_load(f)
-
-        # For any size class, prompt must respect that class's max_system_tokens
-        # At minimum, the prompt must not grow beyond 4096 (largest cap)
+        # For any size class, prompt must not grow beyond 4096 (largest cap)
         assert len(result["system_prompt"]) <= 4096
 
     def test_prompt_cap_is_not_hardcoded_800(self):
@@ -1470,41 +1394,45 @@ class TestPromptAlignmentReview:
                 )
 
         new_desc = result.get("description", "")
-        # "math computations" is completely unrelated to "self-reflection"
-        # The guard should reject this
         assert "math" not in new_desc.lower(), (
-            "Description drifted from 'self-reflection' to 'math' — "
+            "Description drifted from 'self-reflection' to 'math' -- "
             "the alignment guard should have blocked this"
         )
 
 
-# ── 18. Smart hydration — only hydrate nerves that need work ──────────────────
+# -- 18. Smart hydration -- only hydrate nerves that need work ---------------
 
 
+@pytest.mark.timeout(10)
 class TestSmartHydration:
     """Community sync must not blindly hydrate all ~100 nerves.
 
     Decision matrix for hydration (all require _needs_hydration=True, i.e. no system_prompt):
-    ┌─────────────┬────────────┬───────────┬─────────┬──────────┐
-    │ last_invoked │ has_qual   │ score     │ adapter │ result   │
-    ├─────────────┼────────────┼───────────┼─────────┼──────────┤
-    │ yes         │ yes        │ < 95%     │ any     │ HYDRATE  │
-    │ yes         │ no (=0%)   │ n/a       │ yes     │ HYDRATE  │
-    │ yes         │ no (=0%)   │ n/a       │ no      │ HYDRATE  │
-    │ yes         │ yes        │ >= 95%    │ yes     │ SKIP     │
-    │ yes         │ yes        │ >= 95%    │ no      │ HYDRATE  │
-    │ yes         │ yes        │ == 95%    │ yes     │ SKIP     │
-    │ no          │ any        │ any       │ no      │ HYDRATE  │
-    │ no          │ any        │ any       │ yes     │ SKIP     │
-    │ (sense)     │ any        │ any       │ any     │ SKIP     │
-    │ (hydrated)  │ any        │ any       │ any     │ SKIP     │
-    │ (community overlap with local) │    │         │          │ HYDRATE  │
-    └─────────────┴────────────┴───────────┴─────────┴──────────┘
+    - Invoked + low score -> HYDRATE
+    - Invoked + no qual + adapter -> HYDRATE
+    - Invoked + high score + adapter -> SKIP
+    - Invoked + high score + no adapter -> HYDRATE
+    - Never invoked + no adapter -> HYDRATE
+    - Never invoked + adapter + no overlap -> SKIP
+    - Sense -> SKIP
+    - Already hydrated -> SKIP
     """
 
     def _mock_cold(self, nerves, qualifications=None, origins=None,
                    last_invoked=None, system_prompts=None, senses=None):
-        """Build a mock cold memory with configurable nerve state."""
+        """Build a mock cold memory with configurable nerve state.
+
+        Args:
+            nerves: Dict of name->description.
+            qualifications: Dict of name->qualification record.
+            origins: Dict of name->origin string.
+            last_invoked: Dict of name->ISO timestamp or None.
+            system_prompts: Dict of name->prompt string.
+            senses: Set of nerve names that are senses.
+
+        Returns:
+            Configured MagicMock for cold memory.
+        """
         qualifications = qualifications or {}
         origins = origins or {}
         last_invoked = last_invoked or {}
@@ -1526,13 +1454,13 @@ class TestSmartHydration:
         cold.get_nerve_origin.side_effect = lambda n: origins.get(n, "local")
         return cold
 
-    # ── Hydration: invoked nerves ─────────────────────────────────────────
+    # -- Hydration: invoked nerves ---
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=False)
     def test_invoked_with_low_score_selected(self, mock_adapter, mock_community, mock_mem):
-        """Invoked + qualification score <95% → hydrate."""
+        """Invoked + qualification score <95% -> hydrate."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"weak_nerve": "does something"}
@@ -1550,7 +1478,7 @@ class TestSmartHydration:
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=True)
     def test_invoked_no_qualification_record_selected(self, mock_adapter, mock_community, mock_mem):
-        """Invoked + no qualification row + adapter exists → hydrate.
+        """Invoked + no qualification row + adapter exists -> hydrate.
 
         Reproduces the reflect_nerve production bug: nerve was invoked but
         had no qualification row yet. No record = 0% score, not 'skip'.
@@ -1567,14 +1495,14 @@ class TestSmartHydration:
 
         names = [c[0] for c in _select_hydration_candidates()]
         assert "reflect_nerve" in names, (
-            "No qualification record means 0% score — must be hydrated"
+            "No qualification record means 0% score -- must be hydrated"
         )
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=True)
     def test_invoked_high_score_with_adapter_skipped(self, mock_adapter, mock_community, mock_mem):
-        """Invoked + score >=95% + adapter exists → skip."""
+        """Invoked + score >=95% + adapter exists -> skip."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"good_nerve": "works great"}
@@ -1592,7 +1520,7 @@ class TestSmartHydration:
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=False)
     def test_invoked_high_score_no_adapter_selected(self, mock_adapter, mock_community, mock_mem):
-        """Invoked + score >=95% but no adapter → hydrate (needs tuning)."""
+        """Invoked + score >=95% but no adapter -> hydrate (needs tuning)."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"tuned_elsewhere": "works on other model"}
@@ -1605,14 +1533,14 @@ class TestSmartHydration:
 
         names = [c[0] for c in _select_hydration_candidates()]
         assert "tuned_elsewhere" in names, (
-            "High score but no adapter for current model — needs hydration for tuning"
+            "High score but no adapter for current model -- needs hydration for tuning"
         )
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=True)
     def test_exact_95_percent_boundary_skipped(self, mock_adapter, mock_community, mock_mem):
-        """Score at exactly 95% with adapter → skip (threshold is <95, not <=)."""
+        """Score at exactly 95% with adapter -> skip (threshold is <95, not <=)."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"boundary_nerve": "right at threshold"}
@@ -1626,13 +1554,13 @@ class TestSmartHydration:
         names = [c[0] for c in _select_hydration_candidates()]
         assert "boundary_nerve" not in names, "Exactly 95% should not be hydrated"
 
-    # ── Hydration: never-invoked nerves ───────────────────────────────────
+    # -- Hydration: never-invoked nerves ---
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=False)
     def test_never_invoked_no_adapter_selected(self, mock_adapter, mock_community, mock_mem):
-        """Never invoked + no adapter → hydrate (adapter gap, not score)."""
+        """Never invoked + no adapter -> hydrate (adapter gap, not score)."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"fresh_nerve": "brand new"}
@@ -1646,7 +1574,7 @@ class TestSmartHydration:
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=True)
     def test_never_invoked_with_adapter_no_overlap_skipped(self, mock_adapter, mock_community, mock_mem):
-        """Never invoked + adapter exists + no local overlap → skip."""
+        """Never invoked + adapter exists + no local overlap -> skip."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"unused_nerve": "some unique capability"}
@@ -1659,13 +1587,13 @@ class TestSmartHydration:
         names = [c[0] for c in _select_hydration_candidates()]
         assert "unused_nerve" not in names
 
-    # ── Hydration: guards ─────────────────────────────────────────────────
+    # -- Hydration: guards ---
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=True)
     def test_already_hydrated_skipped(self, mock_adapter, mock_community, mock_mem):
-        """Nerve with system_prompt already set → skip (already hydrated)."""
+        """Nerve with system_prompt already set -> skip (already hydrated)."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"hydrated_nerve": "already has prompt"}
@@ -1682,7 +1610,7 @@ class TestSmartHydration:
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=False)
     def test_already_hydrated_even_low_score_skipped(self, mock_adapter, mock_community, mock_mem):
-        """Hydrated nerve at 0% → skip hydration (already has bundle, needs reconciliation not re-download)."""
+        """Hydrated nerve at 0% -> skip hydration (needs reconciliation not re-download)."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {"has_prompt_nerve": "already hydrated but bad score"}
@@ -1698,7 +1626,7 @@ class TestSmartHydration:
             "Already-hydrated nerve should not be re-downloaded even with low score"
         )
 
-    # ── Hydration: consolidation overlap ──────────────────────────────────
+    # -- Hydration: consolidation overlap ---
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
@@ -1706,7 +1634,7 @@ class TestSmartHydration:
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=True)
     def test_community_overlapping_local_selected(self, mock_adapter, mock_threshold,
                                                   mock_community, mock_mem):
-        """Community nerve overlapping a local fabricated nerve → hydrate for consolidation."""
+        """Community nerve overlapping a local fabricated nerve -> hydrate for consolidation."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {
@@ -1721,9 +1649,8 @@ class TestSmartHydration:
 
         names = [c[0] for c in _select_hydration_candidates()]
         assert "translate_text" in names
-        # The local nerve should NOT be in hydration candidates
         assert "text_translator" not in names, (
-            "Local nerve should not be hydrated — it's already local"
+            "Local nerve should not be hydrated -- it's already local"
         )
 
     @patch("arqitect.brain.consolidate.mem")
@@ -1732,7 +1659,7 @@ class TestSmartHydration:
     @patch("arqitect.brain.adapters.has_model_specific_adapter", return_value=True)
     def test_community_no_overlap_with_local_skipped(self, mock_adapter, mock_threshold,
                                                      mock_community, mock_mem):
-        """Community nerve with no local overlap → skip."""
+        """Community nerve with no local overlap -> skip."""
         from arqitect.brain.consolidate import _select_hydration_candidates
 
         nerves = {
@@ -1750,7 +1677,7 @@ class TestSmartHydration:
             "Community nerve with no local overlap should be skipped"
         )
 
-    # ── Hydration: sort order ─────────────────────────────────────────────
+    # -- Hydration: sort order ---
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
@@ -1775,7 +1702,7 @@ class TestSmartHydration:
             "Recently used nerve must sort before older nerve"
         )
 
-    # ── Hydration: full scenario ──────────────────────────────────────────
+    # -- Hydration: full scenario ---
 
     @patch("arqitect.brain.consolidate.mem")
     @patch("arqitect.brain.consolidate._get_community_nerve_names")
@@ -1808,14 +1735,15 @@ class TestSmartHydration:
 
         names = [c[0] for c in _select_hydration_candidates()]
 
-        assert "invoked_weak" in names, "Invoked + low score → hydrate"
-        assert "invoked_no_qual" in names, "Invoked + no qualification → hydrate"
-        assert "invoked_strong" not in names, "Invoked + high score + adapter → skip"
-        assert "never_used" not in names, "Never invoked + adapter exists → skip"
-        assert "already_hydrated" not in names, "Already has system_prompt → skip"
+        assert "invoked_weak" in names, "Invoked + low score -> hydrate"
+        assert "invoked_no_qual" in names, "Invoked + no qualification -> hydrate"
+        assert "invoked_strong" not in names, "Invoked + high score + adapter -> skip"
+        assert "never_used" not in names, "Never invoked + adapter exists -> skip"
+        assert "already_hydrated" not in names, "Already has system_prompt -> skip"
         assert len(names) == 2, f"Expected exactly 2 candidates, got {len(names)}: {names}"
 
 
+@pytest.mark.timeout(10)
 class TestReconciliationWorkQueue:
     """_build_work_queue must only include nerves worth reconciling.
 
@@ -1829,7 +1757,17 @@ class TestReconciliationWorkQueue:
     def _patch_work_queue(self, mock_mem, nerves, qualifications=None,
                           last_invoked=None, senses=None,
                           core_senses=frozenset(), threshold=0.95):
-        """Configure mocks for _build_work_queue tests."""
+        """Configure mocks for _build_work_queue tests.
+
+        Args:
+            mock_mem: The patched mem module mock.
+            nerves: Dict of name->description.
+            qualifications: List of qualification dicts.
+            last_invoked: Dict of name->ISO timestamp.
+            senses: Set of nerve names that are senses.
+            core_senses: Frozenset of core sense names.
+            threshold: Improvement threshold score.
+        """
         mock_mem.cold.list_qualifications.return_value = qualifications or []
         mock_mem.cold.list_nerves.return_value = nerves
         senses = senses or set()
@@ -1946,13 +1884,3 @@ class TestReconciliationWorkQueue:
         names = [item["name"] for item in queue]
         assert "invoked_a" in names
         assert "invoked_b" in names
-
-
-# ── Helper for provenance ranking ────────────────────────────────────────────
-
-_SIZE_RANK = {"community": 0, "tinylm": 1, "small": 2, "medium": 3, "large": 4}
-
-
-def _size_rank(size: str | None) -> int:
-    """Rank a size class for provenance comparison. Higher = stronger model."""
-    return _SIZE_RANK.get(size or "", 0)

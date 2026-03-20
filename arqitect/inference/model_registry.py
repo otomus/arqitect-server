@@ -1,70 +1,152 @@
-"""Model Registry — maps logical model names to GGUF files and HuggingFace sources.
+"""Model Registry — built from arqitect.yaml, zero hardcoded model knowledge.
 
-Each entry defines:
-  - file: expected GGUF filename in the models/ directory
-  - n_ctx: context window size
-  - source: HuggingFace repo ID for downloading
-  - chat_handler: optional special handler (e.g. moondream for vision)
+The registry maps logical role names to model config (file, source, handler).
+All model information comes from ``inference.models`` in arqitect.yaml.
+Defaults live in ``arqitect/config/defaults.py`` — not here.
 
-Logical names match the role system in nerve_runtime.py:
-  brain       -> Qwen2.5-Coder-7B (routing, reasoning, judging)
-  nerve       -> Qwen2.5-Coder-7B (shared — tool calling, structured queries)
-  coder       -> Qwen2.5-Coder-7B (shared — code generation, tool fabrication)
-  creative    -> Qwen2.5-Coder-7B (shared — writing, humor, summaries)
-  communication -> Qwen2.5-Coder-7B (shared — tone rewriting, expression)
-  vision      -> moondream2 (image analysis)
+Context window (n_ctx) is NOT stored here — it comes from the community
+adapter meta.json → capabilities.max_context, the single source of truth.
 """
 
-MODEL_REGISTRY = {
-    "brain": {
-        "file": "Qwen2.5-Coder-7B.gguf",
-        "n_ctx": 4096,
-        "source": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-    },
-    "nerve": {
-        "file": "Qwen2.5-Coder-7B.gguf",
-        "n_ctx": 4096,
-        "source": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-    },
-    "coder": {
-        "file": "Qwen2.5-Coder-7B.gguf",
-        "n_ctx": 4096,
-        "source": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-    },
-    "creative": {
-        "file": "Qwen2.5-Coder-7B.gguf",
-        "n_ctx": 4096,
-        "source": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-    },
-    "communication": {
-        "file": "Qwen2.5-Coder-7B.gguf",
-        "n_ctx": 4096,
-        "source": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-    },
-    "vision": {
-        "file": "moondream2-text-model-f16.gguf",
-        "n_ctx": 2048,
-        "source": "moondream/moondream2-gguf",
-        "chat_handler": "moondream",
-        "mmproj": "moondream2-mmproj-f16.gguf",
-    },
-    "image_gen": {
-        "file": "stable-diffusion-v2-1-turbo-Q4_0.gguf",
-        "source": "gpustack/stable-diffusion-v2-1-turbo-GGUF",
-        "backend": "stable_diffusion",
-    },
+# ── Named constants ──────────────────────────────────────────────────────
+# Handler/backend identifiers used for comparison — not model opinions.
+
+CHAT_HANDLER_MOONDREAM = "moondream"
+BACKEND_STABLE_DIFFUSION = "stable_diffusion"
+
+# ── Registry roles ───────────────────────────────────────────────────────
+
+_REGISTRY_ROLES = (
+    "brain", "nerve", "coder", "creative", "communication",
+    "vision", "embedding", "image_gen",
+)
+
+# ── Lazy-built registry ──────────────────────────────────────────────────
+
+_MODEL_REGISTRY: dict[str, dict] | None = None
+
+
+def _build_registry() -> dict[str, dict]:
+    """Build MODEL_REGISTRY from arqitect.yaml config.
+
+    Reads ``inference.models.<role>`` for each role. Each entry can be
+    a string (filename only) or a dict (file, source, chat_handler, etc.).
+    """
+    from arqitect.config.loader import get_model_config
+
+    registry: dict[str, dict] = {}
+    for role in _REGISTRY_ROLES:
+        config = get_model_config(role)
+        if config and config.get("file"):
+            registry[role] = config
+    return registry
+
+
+def _get_registry() -> dict[str, dict]:
+    """Get or build the model registry (lazy singleton)."""
+    global _MODEL_REGISTRY
+    if _MODEL_REGISTRY is None:
+        _MODEL_REGISTRY = _build_registry()
+    return _MODEL_REGISTRY
+
+
+class _RegistryProxy(dict):
+    """Dict-like proxy that builds the registry on first access."""
+
+    def _ensure_built(self):
+        if not super().__len__():
+            super().update(_get_registry())
+
+    def __getitem__(self, key):
+        self._ensure_built()
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        self._ensure_built()
+        return super().__contains__(key)
+
+    def get(self, key, default=None):
+        self._ensure_built()
+        return super().get(key, default)
+
+    def keys(self):
+        self._ensure_built()
+        return super().keys()
+
+    def values(self):
+        self._ensure_built()
+        return super().values()
+
+    def items(self):
+        self._ensure_built()
+        return super().items()
+
+    def __iter__(self):
+        self._ensure_built()
+        return super().__iter__()
+
+    def __len__(self):
+        self._ensure_built()
+        return super().__len__()
+
+    def __repr__(self):
+        self._ensure_built()
+        return super().__repr__()
+
+
+MODEL_REGISTRY = _RegistryProxy()
+
+# Alias roles that differ between subsystems (adapters use "code",
+# inference/config use "coder").
+ROLE_TO_REGISTRY_KEY: dict[str, str] = {
+    "tool": "nerve",
+    "code": "coder",
+    "awareness": "brain",
+    "scheduler": "nerve",
+    "generative": "creative",
 }
 
-# Map old Ollama model names to logical names (used during migration)
-OLLAMA_NAME_MAP = {
-    "phi4-mini": "brain",
-    "phi4-mini:latest": "brain",
-    "qwen2.5:1.5b": "nerve",
-    "qwen2.5-coder:1.5b": "coder",
-    "llama3.2:3b": "creative",
-    "gemma3:1b": "communication",
-    "glm-4.7-flash": "brain",
-    "glm-4.7-flash:latest": "brain",
-    "moondream": "vision",
-    "moondream2": "vision",
-}
+
+def resolve_registry_key(role: str) -> str:
+    """Translate a runtime role name to its MODEL_REGISTRY key.
+
+    Returns the role unchanged when no alias exists.
+    """
+    return ROLE_TO_REGISTRY_KEY.get(role, role)
+
+
+def find_registry_entry_by_file(filename: str) -> dict | None:
+    """Find a MODEL_REGISTRY entry whose 'file' field matches a filename.
+
+    Args:
+        filename: GGUF filename to match (e.g. 'model-file.gguf').
+
+    Returns:
+        The first matching registry entry, or None.
+    """
+    for entry in MODEL_REGISTRY.values():
+        if entry.get("file") == filename:
+            return entry
+    return None
+
+
+def resolve_model_path(name: str, models_dir: str) -> str | None:
+    """Resolve a model name to a GGUF file path.
+
+    Checks absolute paths first, then looks for the filename in models_dir.
+
+    Args:
+        name: Model name — can be an absolute path or a filename.
+        models_dir: Directory containing GGUF model files.
+
+    Returns:
+        Resolved file path, or None if not found.
+    """
+    import os
+
+    if os.path.isabs(name) and os.path.exists(name):
+        return name
+    candidate = os.path.join(models_dir, name)
+    if os.path.exists(candidate):
+        return candidate
+    return None

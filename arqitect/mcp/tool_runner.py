@@ -1,6 +1,6 @@
-"""Tool Runner — bridges legacy bare Python tools to the stdio JSON-RPC protocol.
+"""Tool Runner — bridges bare Python tools to the stdio JSON-RPC protocol.
 
-Wraps existing mcp_tools/*.py files that define a run() function (or named function)
+Wraps mcp_tools/*.py files that define a named function (or run() fallback)
 so they can be called as subprocess-based tools via stdin/stdout JSON-RPC.
 
 Usage:
@@ -16,7 +16,7 @@ def _load_tool_module(filepath: str) -> tuple[str, callable]:
     """Load a Python tool module and return (tool_name, callable).
 
     Finds the primary callable: either a named function matching the filename,
-    or a legacy run() function.
+    or a run() function.
 
     Args:
         filepath: Absolute path to the .py tool file.

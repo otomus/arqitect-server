@@ -1,10 +1,13 @@
-"""Tests for permission checks — nerve access and synthesis gating.
+"""Tests for permission checks -- nerve access and synthesis gating.
 
-TDD: these tests define the expected behavior for synthesis permission
-enforcement. Anon users can use existing nerves but cannot fabricate new ones.
+Covers:
+- can_use_nerve access control by role
+- can_synthesize_nerve role gating
+- Restriction messages for denied access
 """
 
 import pytest
+from hypothesis import given, settings, strategies as st
 
 from arqitect.brain.permissions import (
     can_use_nerve,
@@ -15,9 +18,10 @@ from arqitect.brain.permissions import (
 
 
 # ---------------------------------------------------------------------------
-# Existing: can_use_nerve (sanity — ensure no regression)
+# Existing: can_use_nerve (sanity -- ensure no regression)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestCanUseNerve:
     """Existing nerve access checks must continue to work."""
 
@@ -34,11 +38,28 @@ class TestCanUseNerve:
         assert can_use_nerve("admin", "touch") is True
         assert can_use_nerve("admin", "code", "code") is True
 
+    @given(
+        nerve_name=st.from_regex(r"[a-z_]{3,15}_nerve", fullmatch=True),
+    )
+    @settings(max_examples=20)
+    def test_admin_can_always_use_any_nerve(self, nerve_name):
+        """Admin role must have unrestricted access to all nerves."""
+        assert can_use_nerve("admin", nerve_name) is True
+
+    @given(
+        nerve_name=st.from_regex(r"[a-z_]{3,15}_nerve", fullmatch=True),
+    )
+    @settings(max_examples=20)
+    def test_anon_can_use_non_restricted_nerves(self, nerve_name):
+        """Anon users can use any nerve that is not in the restricted set."""
+        assert can_use_nerve("anon", nerve_name) is True
+
 
 # ---------------------------------------------------------------------------
-# New: can_synthesize_nerve — anon cannot fabricate nerves
+# New: can_synthesize_nerve -- anon cannot fabricate nerves
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestCanSynthesizeNerve:
     """Only identified users (role >= 'user') may synthesize new nerves."""
 
@@ -61,11 +82,43 @@ class TestCanSynthesizeNerve:
     def test_garbage_role_cannot_synthesize(self):
         assert can_synthesize_nerve("superuser") is False
 
+    @given(
+        role=st.sampled_from(["user", "admin", "owner"]),
+    )
+    @settings(max_examples=10)
+    def test_identified_roles_can_always_synthesize(self, role):
+        """All identified roles must be allowed to synthesize."""
+        assert can_synthesize_nerve(role) is True
+
+    @given(
+        role=st.from_regex(r"[a-z]{5,15}", fullmatch=True).filter(
+            lambda r: r not in ("user", "admin", "owner")
+        ),
+    )
+    @settings(max_examples=15)
+    def test_unknown_roles_cannot_synthesize(self, role):
+        """Roles not in the known hierarchy are denied synthesis."""
+        assert can_synthesize_nerve(role) is False
+
 
 # ---------------------------------------------------------------------------
 # Restriction messages
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
+class TestRestrictionMessage:
+    """Denial messages must be informative."""
+
+    def test_touch_restriction_mentions_file_system(self):
+        msg = get_restriction_message("touch")
+        assert "file system" in msg.lower() or "authenticated" in msg.lower()
+
+    def test_generic_restriction_mentions_nerve_name(self):
+        msg = get_restriction_message("custom_nerve")
+        assert "custom_nerve" in msg
+
+
+@pytest.mark.timeout(10)
 class TestSynthesisRestrictionMessage:
     """Denial message must tell the user how to unblock themselves."""
 

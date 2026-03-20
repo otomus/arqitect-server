@@ -12,10 +12,13 @@ import shutil
 import urllib.request
 import urllib.error
 
-from arqitect.config.loader import get_project_root, get_mcp_tools_dir
+from arqitect.config.loader import get_config, get_project_root, get_mcp_tools_dir
 
 COMMUNITY_REPO = "otomus/sentient-community"
 COMMUNITY_RAW_URL = f"https://raw.githubusercontent.com/{COMMUNITY_REPO}/main"
+
+# Tags that lock a nerve to a specific environment
+ENV_EXCLUSIVE_TAGS = {"iot", "desktop"}
 
 
 def _cache_dir() -> str:
@@ -183,9 +186,10 @@ def apply_community_bundle(nerve_name: str, bundle: dict, cold_memory) -> dict:
     Reads system_prompt and examples from per-size-class context.json files
     (same layout as adapters/). Falls back to bundle.default for old-format bundles.
     """
+    from arqitect.brain.routing import validate_nerve_role
     mcp_tools_dir = str(get_mcp_tools_dir())
     description = bundle.get("description", "")
-    role = bundle.get("role", "tool")
+    role = validate_nerve_role(bundle.get("role", "tool"))
 
     # Resolve prompt from context.json files (new structure)
     system_prompt, examples = _resolve_bundle_prompt(nerve_name, role)
@@ -198,7 +202,7 @@ def apply_community_bundle(nerve_name: str, bundle: dict, cold_memory) -> dict:
 
     cold_memory.register_nerve_rich(
         nerve_name, description, system_prompt,
-        json.dumps(examples), role=role,
+        json.dumps(examples), role=role, origin="community",
     )
 
     bundle_dir = os.path.join(_cache_dir(), "nerves", nerve_name)
@@ -409,6 +413,26 @@ def _seed_tool_directory(name: str, info: dict, mcp_tools_dir: str) -> bool:
     return False
 
 
+def _matches_environment(tags: list[str], environment: str) -> bool:
+    """Check if a nerve's tags are compatible with the configured environment.
+
+    A nerve with no environment-exclusive tags is universal (matches all).
+    A nerve tagged with an exclusive tag (e.g. "iot", "desktop") only matches
+    when the configured environment equals that tag.
+
+    Args:
+        tags: Tag list from the manifest nerve entry.
+        environment: The configured environment (e.g. "server", "iot", "desktop").
+
+    Returns:
+        True if the nerve should be seeded in this environment.
+    """
+    exclusive = ENV_EXCLUSIVE_TAGS & set(tags)
+    if not exclusive:
+        return True
+    return environment in exclusive
+
+
 def seed_nerves() -> int:
     """Bootstrap community nerves from manifest metadata (no network).
 
@@ -434,9 +458,23 @@ def seed_nerves() -> int:
 
     from arqitect.brain.config import NERVES_DIR, mem
 
+    environment = get_config("environment", "server")
+
     bootstrapped = 0
+    pruned = 0
     for name, info in nerves.items():
-        nerve_path = os.path.join(NERVES_DIR, name, "nerve.py")
+        tags = info.get("tags", [])
+        nerve_dir = os.path.join(NERVES_DIR, name)
+        nerve_path = os.path.join(nerve_dir, "nerve.py")
+
+        if not _matches_environment(tags, environment):
+            # Remove nerves from previous seeds that no longer match
+            if os.path.isfile(nerve_path):
+                shutil.rmtree(nerve_dir, ignore_errors=True)
+                mem.cold.delete_nerve(name)
+                pruned += 1
+            continue
+
         if os.path.isfile(nerve_path):
             _rewire_nerve_tools(name, info, mem.cold)
             continue
@@ -444,6 +482,8 @@ def seed_nerves() -> int:
         _bootstrap_nerve_lightweight(name, info, NERVES_DIR, mem.cold)
         bootstrapped += 1
 
+    if pruned:
+        print(f"[COMMUNITY] Pruned {pruned} nerve(s) not matching environment '{environment}'")
     if bootstrapped:
         print(f"[COMMUNITY] Registered {bootstrapped} nerve(s) from community (bundles deferred)")
     return bootstrapped
@@ -472,7 +512,7 @@ def _bootstrap_nerve_lightweight(name: str, manifest_info: dict, nerves_dir: str
         role = classify_nerve_role(name, description)
 
     _write_nerve_file(name, role, description, nerves_dir, NERVE_TEMPLATE)
-    cold_memory.register_nerve_rich(name, description, "", "[]", role=role)
+    cold_memory.register_nerve_rich(name, description, "", "[]", role=role, origin="community")
     _rewire_nerve_tools(name, manifest_info, cold_memory)
 
     print(f"[COMMUNITY] Registered nerve: {name} (role={role})")
@@ -529,7 +569,7 @@ def _bootstrap_nerve(name: str, manifest_info: dict, nerves_dir: str,
     if bundle:
         apply_community_bundle(name, bundle, cold_memory)
     else:
-        cold_memory.register_nerve_rich(name, description, "", "[]", role=role)
+        cold_memory.register_nerve_rich(name, description, "", "[]", role=role, origin="community")
         _rewire_nerve_tools(name, manifest_info, cold_memory)
 
     print(f"[COMMUNITY] Bootstrapped nerve: {name} (role={role})")

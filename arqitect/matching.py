@@ -163,7 +163,7 @@ def match_tools(query: str, tools_dict: dict, threshold: float = 1.0) -> list[tu
 
 # Core senses get a scoring boost so they are preferred over regular nerves
 # for overlapping domains (e.g. "read file" → touch sense wins over a file_reader nerve)
-from arqitect.brain.types import Sense
+from arqitect.types import Sense
 CORE_SENSES = frozenset(Sense)
 
 
@@ -198,32 +198,16 @@ _nerve_embedding_cache = _LRUCache()
 def _get_nerve_embedding(name: str, description: str) -> list[float] | None:
     """Get or compute embedding for a nerve description. Returns None on failure.
 
-    Lookup order: in-memory LRU → cold memory (SQLite) → compute + persist.
+    Lookup order: in-memory LRU → compute fresh.
     """
     cache_key = f"{name}:{description[:80]}"
     cached = _nerve_embedding_cache.get(cache_key)
     if cached is not None:
         return cached
-    # Check cold memory for persisted embedding
-    try:
-        from arqitect.brain.config import mem
-        cold_emb = mem.cold.get_nerve_embedding(name)
-        if cold_emb:
-            _nerve_embedding_cache.put(cache_key, cold_emb)
-            return cold_emb
-    except Exception:
-        pass
-    # Compute fresh and persist
     try:
         from arqitect.inference.engine import get_engine
         emb = get_engine().embed(description)
         _nerve_embedding_cache.put(cache_key, emb)
-        # Persist to cold memory (best-effort)
-        try:
-            from arqitect.brain.config import mem as _mem
-            _mem.cold.set_nerve_embedding(name, emb)
-        except Exception:
-            pass
         return emb
     except Exception:
         return None
@@ -238,13 +222,11 @@ def match_nerves(task: str, nerve_catalog: dict, threshold: float = 1.0) -> list
     Senses with zero raw score (no keyword overlap) are excluded — the boost
     alone is not enough to constitute a real match.
     """
-    # First pass: keyword scoring
+    # First pass: keyword scoring (without sense boost — applied after blend)
     keyword_scored = {}
     max_keyword_score = 0.0
     for name, description in nerve_catalog.items():
         s = match_score(task, name, description)
-        if name in CORE_SENSES:
-            s += SENSE_BOOST
         keyword_scored[name] = s
         if s > max_keyword_score:
             max_keyword_score = s
@@ -271,6 +253,11 @@ def match_nerves(task: str, nerve_catalog: dict, threshold: float = 1.0) -> list
                     final_score = KEYWORD_WEIGHT * kw_score + EMBEDDING_WEIGHT * embed_sim * max_keyword_score
                 except Exception:
                     pass  # Keep keyword score on failure
+
+        # Apply sense boost after hybrid blend so it always ensures
+        # core senses rank above equivalently-described regular nerves
+        if name in CORE_SENSES:
+            final_score += SENSE_BOOST
 
         if final_score >= threshold:
             scored.append((name, final_score))

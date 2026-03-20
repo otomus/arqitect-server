@@ -1,10 +1,12 @@
 """Permission checks for nerve access based on user role and model capability."""
 
+from arqitect.types import NerveRole, Sense
+
 # Nerves/senses that require at least 'user' role (anon cannot use)
-_RESTRICTED_FOR_ANON = frozenset({"touch", "code"})
+_RESTRICTED_FOR_ANON = frozenset({Sense.TOUCH, NerveRole.CODE})
 
 # Nerve roles that require at least 'user' role
-_RESTRICTED_ROLES = frozenset({"code"})
+_RESTRICTED_ROLES = frozenset({NerveRole.CODE})
 
 # Role hierarchy (higher number = more permissions)
 _ROLE_LEVEL = {

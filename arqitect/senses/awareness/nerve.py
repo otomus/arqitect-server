@@ -12,12 +12,13 @@ import sys
 
 _SENSE_DIR = os.path.dirname(os.path.abspath(__file__))
 from arqitect.config.loader import get_project_root, get_sandbox_dir as _get_sandbox_dir
+from arqitect.types import Sense
 _PROJECT_ROOT = str(get_project_root())
 _RULES_PATH = os.path.join(_SENSE_DIR, "awareness_rules.json")
 _PERSONALITY_PATH = os.path.join(_PROJECT_ROOT, "personality.json")
 _COLD_DB_PATH = os.path.join(str(get_project_root()), "memory", "knowledge.db")
 
-SENSE_NAME = "awareness"
+SENSE_NAME = Sense.AWARENESS
 def _load_adapter_description() -> str:
     try:
         from arqitect.brain.adapters import get_description

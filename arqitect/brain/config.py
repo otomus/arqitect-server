@@ -8,13 +8,13 @@ from arqitect.config.loader import (
     get_mcp_tools_dir, get_redis_host_port,
 )
 from arqitect.memory import MemoryManager
-from arqitect.brain.types import Sense
+from arqitect.types import InferenceRole, Sense
 
-BRAIN_MODEL = "brain"
-NERVE_MODEL = "nerve"
-CODE_MODEL = "coder"
-COMMUNICATION_MODEL = "communication"
-CREATIVE_MODEL = "creative"
+BRAIN_MODEL = InferenceRole.BRAIN
+NERVE_MODEL = InferenceRole.NERVE
+CODE_MODEL = InferenceRole.CODER
+COMMUNICATION_MODEL = InferenceRole.COMMUNICATION
+CREATIVE_MODEL = InferenceRole.CREATIVE
 NERVES_DIR = get_nerves_dir()
 SENSES_DIR = get_senses_dir()
 SANDBOX_DIR = get_sandbox_dir()

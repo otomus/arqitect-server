@@ -1,0 +1,70 @@
+# serializer version: 1
+# name: TestSnapshotShapes.test_chain_decision_shape
+  dict({
+    'action': <Action.CHAIN_NERVES: 'chain_nerves'>,
+    'goal': 'multi-step',
+    'steps': list([
+      dict({
+        'args': 'a',
+        'nerve': 'step1',
+      }),
+      dict({
+        'args': 'b',
+        'nerve': 'step2',
+      }),
+    ]),
+  })
+# ---
+# name: TestSnapshotShapes.test_clarify_decision_shape
+  dict({
+    'action': <Action.CLARIFY: 'clarify'>,
+    'message': 'What do you mean?',
+    'suggestions': list([
+      'option A',
+      'option B',
+    ]),
+  })
+# ---
+# name: TestSnapshotShapes.test_dispatch_context_shape
+  dict({
+    'available': list([
+      'joke_nerve',
+      'awareness',
+    ]),
+    'decision': dict({
+      'action': 'invoke_nerve',
+      'args': 'tell me a joke',
+      'name': 'joke_nerve',
+    }),
+    'depth': 0,
+    'nerve_catalog': dict({
+      'awareness': 'identity',
+      'joke_nerve': 'tells jokes',
+    }),
+    'task': 'hello',
+    'user_id': '',
+  })
+# ---
+# name: TestSnapshotShapes.test_feedback_decision_shape
+  dict({
+    'action': <Action.FEEDBACK: 'feedback'>,
+    'message': 'Great!',
+    'sentiment': 'positive',
+  })
+# ---
+# name: TestSnapshotShapes.test_invoke_decision_shape
+  dict({
+    'action': <Action.INVOKE_NERVE: 'invoke_nerve'>,
+    'args': 'forecast',
+    'name': 'weather_nerve',
+  })
+# ---
+# name: TestSnapshotShapes.test_synthesize_decision_shape
+  dict({
+    'action': <Action.SYNTHESIZE_NERVE: 'synthesize_nerve'>,
+    'description': 'A tool',
+    'mcp_tools': list([
+    ]),
+    'name': 'my_tool',
+  })
+# ---

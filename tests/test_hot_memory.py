@@ -2,22 +2,24 @@
 
 import json
 
-import fakeredis
 import pytest
+from dirty_equals import IsInstance
+from hypothesis import given, settings, HealthCheck
+from hypothesis import strategies as st
 
 from arqitect.memory.hot import HotMemory, MAX_CONVO
 
 
 @pytest.fixture
-def hot():
-    """Create a HotMemory backed by a fake Redis instance."""
-    client = fakeredis.FakeRedis(decode_responses=True)
-    return HotMemory(client)
+def hot(test_redis):
+    """Create a HotMemory backed by the shared fake Redis instance."""
+    return HotMemory(test_redis)
 
 
 # ── Session ──────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestSession:
     def test_set_and_get_session(self, hot):
         hot.set_session({"timezone": "UTC", "city": "TLV"})
@@ -65,6 +67,7 @@ class TestSession:
 # ── Conversation ─────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestConversation:
     def test_add_and_get_message(self, hot):
         hot.add_message("user", "hello")
@@ -149,3 +152,148 @@ class TestConversation:
         convo = hot.get_conversation()
         contents = [m["content"] for m in convo]
         assert contents == ["first", "second", "third"]
+
+
+# ── Property-based tests ────────────────────────────────────────────────────
+
+
+@pytest.mark.timeout(10)
+class TestConversationProperties:
+    """Hypothesis-driven property tests for conversation trimming and retrieval."""
+
+    @given(num_messages=st.integers(min_value=0, max_value=MAX_CONVO * 3))
+    @settings(
+        max_examples=50,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_conversation_never_exceeds_max(self, test_redis, num_messages):
+        """No matter how many messages are added, buffer never exceeds MAX_CONVO."""
+        # flushall resets state between hypothesis iterations
+        test_redis.flushall()
+        hot = HotMemory(test_redis)
+
+        for i in range(num_messages):
+            hot.add_message("user", f"msg {i}")
+
+        convo = hot.get_conversation()
+        assert len(convo) <= MAX_CONVO
+        for msg in convo:
+            assert msg == IsInstance[dict]
+
+    @given(num_messages=st.integers(min_value=1, max_value=MAX_CONVO * 3))
+    @settings(
+        max_examples=50,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_trimming_preserves_most_recent(self, test_redis, num_messages):
+        """After trimming, the most recent message is always the last one added."""
+        test_redis.flushall()
+        hot = HotMemory(test_redis)
+
+        for i in range(num_messages):
+            hot.add_message("user", f"msg {i}")
+
+        convo = hot.get_conversation()
+        assert len(convo) >= 1
+        assert convo[-1]["content"] == f"msg {num_messages - 1}"
+
+    @given(num_messages=st.integers(min_value=0, max_value=MAX_CONVO * 3))
+    @settings(
+        max_examples=50,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_stored_count_matches_expectation(self, test_redis, num_messages):
+        """Stored message count equals min(num_messages, MAX_CONVO)."""
+        test_redis.flushall()
+        hot = HotMemory(test_redis)
+
+        for i in range(num_messages):
+            hot.add_message("user", f"msg {i}")
+
+        convo = hot.get_conversation()
+        assert len(convo) == min(num_messages, MAX_CONVO)
+
+
+@pytest.mark.timeout(10)
+class TestContextStorageProperties:
+    """Hypothesis-driven property tests for session/context storage."""
+
+    @given(
+        data=st.dictionaries(
+            keys=st.text(min_size=1, max_size=20, alphabet=st.characters(
+                whitelist_categories=("L", "N"),
+            )),
+            values=st.text(min_size=0, max_size=100),
+            min_size=1,
+            max_size=10,
+        ),
+    )
+    @settings(
+        max_examples=50,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_session_roundtrip_with_random_payloads(self, test_redis, data):
+        """Any string-valued dict survives a set/get roundtrip."""
+        test_redis.flushall()
+        hot = HotMemory(test_redis)
+
+        hot.set_session(data)
+        result = hot.get_session()
+        assert result == data
+
+    @given(
+        initial=st.dictionaries(
+            keys=st.text(min_size=1, max_size=10, alphabet=st.characters(
+                whitelist_categories=("L", "N"),
+            )),
+            values=st.text(min_size=0, max_size=50),
+            min_size=1,
+            max_size=5,
+        ),
+        updates=st.dictionaries(
+            keys=st.text(min_size=1, max_size=10, alphabet=st.characters(
+                whitelist_categories=("L", "N"),
+            )),
+            values=st.text(min_size=0, max_size=50),
+            min_size=1,
+            max_size=5,
+        ),
+    )
+    @settings(
+        max_examples=50,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_update_session_merges_correctly(self, test_redis, initial, updates):
+        """update_session merges keys: all initial keys remain, update keys overwrite."""
+        test_redis.flushall()
+        hot = HotMemory(test_redis)
+
+        hot.set_session(initial)
+        hot.update_session(updates)
+        result = hot.get_session()
+
+        # Every key from initial should still exist
+        for key in initial:
+            assert key in result
+
+        # Every key from updates should reflect the updated value
+        for key, value in updates.items():
+            assert result[key] == value
+
+    @given(
+        content=st.text(min_size=1, max_size=200),
+        role=st.sampled_from(["user", "assistant", "system"]),
+    )
+    @settings(
+        max_examples=50,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_message_content_survives_roundtrip(self, test_redis, content, role):
+        """Any message content survives JSON serialization roundtrip in Redis."""
+        test_redis.flushall()
+        hot = HotMemory(test_redis)
+
+        hot.add_message(role, content)
+        convo = hot.get_conversation()
+        assert len(convo) == 1
+        assert convo[0] == {"role": role, "content": content}

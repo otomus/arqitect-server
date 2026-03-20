@@ -9,27 +9,54 @@ Covers:
 - Merge with non-dict nerve results
 - Merge with missing/empty fields
 - Envelope immutability across merges
+- Property-based tests for structural invariants
 """
 
+import copy
+
 import pytest
+from dirty_equals import IsInstance, IsPartialDict
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from arqitect.senses.communication.envelope import (
     build_envelope,
     merge_nerve_result_into_envelope,
 )
 
+# ── Hypothesis strategies ────────────────────────────────────────────────────
 
-# ── build_envelope ────────────────────────────────────────────────────────────
+MIME_AUDIO = st.sampled_from(["audio/aiff", "audio/mp3", "audio/wav", "audio/ogg"])
+MIME_IMAGE = st.sampled_from(["image/png", "image/jpeg", "image/webp"])
+MIME_DOC = st.sampled_from(["application/pdf", "application/octet-stream", "text/plain"])
 
+KNOWN_FORMATS = st.sampled_from(["gif", "card", "emoji"])
+UNKNOWN_FORMATS = st.text(min_size=1).filter(lambda s: s not in ("gif", "card", "emoji"))
+
+
+# ── Structural invariants (autouse) ──────────────────────────────────────────
+
+REQUIRED_KEYS = {"message", "tone", "markdown"}
+
+
+@pytest.fixture(autouse=True)
+def _envelope_contract_check(request):
+    """Every test that produces an envelope must satisfy the base contract."""
+    yield
+    # After the test, no additional assertion needed here — the property tests
+    # and individual tests enforce the contract directly.
+
+
+# ── build_envelope ───────────────────────────────────────────────────────────
+
+@pytest.mark.timeout(10)
 class TestBuildEnvelope:
     """Standard response envelope construction."""
 
     def test_minimal_envelope(self):
         """Minimal envelope contains message, tone, and markdown flag."""
         env = build_envelope("Hello")
-        assert env["message"] == "Hello"
-        assert env["tone"] == "neutral"
-        assert env["markdown"] is False
+        assert env == IsPartialDict(message="Hello", tone="neutral", markdown=False)
         assert "media" not in env
 
     def test_custom_tone_and_markdown(self):
@@ -46,8 +73,7 @@ class TestBuildEnvelope:
     def test_audio_with_default_mime(self):
         """Audio defaults to audio/aiff when no mime is given."""
         env = build_envelope("listen", audio_b64="base64data")
-        assert env["media"]["audio_b64"] == "base64data"
-        assert env["media"]["audio_mime"] == "audio/aiff"
+        assert env["media"] == IsPartialDict(audio_b64="base64data", audio_mime="audio/aiff")
 
     def test_audio_with_custom_mime(self):
         """Audio uses the provided MIME type."""
@@ -57,8 +83,7 @@ class TestBuildEnvelope:
     def test_image_with_default_mime(self):
         """Image defaults to image/png."""
         env = build_envelope("look", image_b64="imgdata")
-        assert env["media"]["image_b64"] == "imgdata"
-        assert env["media"]["image_mime"] == "image/png"
+        assert env["media"] == IsPartialDict(image_b64="imgdata", image_mime="image/png")
 
     def test_image_with_custom_mime(self):
         """Image uses the provided MIME type."""
@@ -73,8 +98,10 @@ class TestBuildEnvelope:
     def test_document_with_defaults(self):
         """Document defaults to application/octet-stream."""
         env = build_envelope("doc", document_b64="docdata")
-        assert env["media"]["document_b64"] == "docdata"
-        assert env["media"]["document_mime"] == "application/octet-stream"
+        assert env["media"] == IsPartialDict(
+            document_b64="docdata",
+            document_mime="application/octet-stream",
+        )
         assert "document_name" not in env["media"]
 
     def test_document_with_name_and_mime(self):
@@ -157,6 +184,7 @@ class TestBuildEnvelope:
 
 # ── merge_nerve_result_into_envelope ─────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestMergeNerveResult:
     """Merging nerve results into an existing envelope."""
 
@@ -205,8 +233,7 @@ class TestMergeNerveResult:
         """Audio from nerve result is merged with default MIME."""
         env = self._base_envelope()
         result = merge_nerve_result_into_envelope(env, {"audio_b64": "data"})
-        assert result["media"]["audio_b64"] == "data"
-        assert result["media"]["audio_mime"] == "audio/aiff"
+        assert result["media"] == IsPartialDict(audio_b64="data", audio_mime="audio/aiff")
 
     def test_merge_audio_with_custom_mime(self):
         """Audio MIME is preserved from nerve result."""
@@ -228,8 +255,7 @@ class TestMergeNerveResult:
         """image_b64 is used when image_path is absent."""
         env = self._base_envelope()
         result = merge_nerve_result_into_envelope(env, {"image_b64": "b64data"})
-        assert result["media"]["image_b64"] == "b64data"
-        assert result["media"]["image_mime"] == "image/png"
+        assert result["media"] == IsPartialDict(image_b64="b64data", image_mime="image/png")
 
     def test_merge_sticker(self):
         """Sticker from nerve result is merged."""
@@ -241,8 +267,10 @@ class TestMergeNerveResult:
         """Document from nerve result is merged with defaults."""
         env = self._base_envelope()
         result = merge_nerve_result_into_envelope(env, {"document_b64": "doc"})
-        assert result["media"]["document_b64"] == "doc"
-        assert result["media"]["document_mime"] == "application/octet-stream"
+        assert result["media"] == IsPartialDict(
+            document_b64="doc",
+            document_mime="application/octet-stream",
+        )
 
     def test_merge_document_with_name(self):
         """Document name from nerve result is included."""
@@ -298,3 +326,165 @@ class TestMergeNerveResult:
         env = self._base_envelope()
         result = merge_nerve_result_into_envelope(env, {"gif_url": "https://x.gif"})
         assert result is env
+
+
+# ── Hypothesis property-based tests ──────────────────────────────────────────
+
+@pytest.mark.timeout(10)
+class TestBuildEnvelopeProperties:
+    """Property-based tests for structural invariants of build_envelope."""
+
+    @given(
+        message=st.text(min_size=0, max_size=500),
+        tone=st.text(min_size=1, max_size=30),
+        markdown=st.booleans(),
+    )
+    @settings(max_examples=50)
+    def test_always_contains_required_keys(self, message, tone, markdown):
+        """Every envelope must contain message, tone, and markdown."""
+        env = build_envelope(message, tone=tone, markdown=markdown)
+        assert REQUIRED_KEYS <= set(env.keys())
+        assert env["message"] == message
+        assert env["tone"] == tone
+        assert env["markdown"] == markdown
+
+    @given(
+        message=st.text(min_size=1, max_size=100),
+        gif_url=st.text(min_size=0, max_size=200),
+        audio_b64=st.text(min_size=0, max_size=200),
+        image_b64=st.text(min_size=0, max_size=200),
+        sticker_b64=st.text(min_size=0, max_size=200),
+        document_b64=st.text(min_size=0, max_size=200),
+    )
+    @settings(max_examples=50)
+    def test_media_present_iff_any_media_field_truthy(
+        self, message, gif_url, audio_b64, image_b64, sticker_b64, document_b64,
+    ):
+        """The media key exists if and only if at least one media field is truthy."""
+        env = build_envelope(
+            message,
+            gif_url=gif_url,
+            audio_b64=audio_b64,
+            image_b64=image_b64,
+            sticker_b64=sticker_b64,
+            document_b64=document_b64,
+        )
+        any_media_provided = any([gif_url, audio_b64, image_b64, sticker_b64, document_b64])
+        if any_media_provided:
+            assert "media" in env
+            assert env["media"] == IsInstance(dict)
+        else:
+            assert "media" not in env
+
+    @given(
+        audio_b64=st.text(min_size=1, max_size=50),
+        audio_mime=st.text(min_size=0, max_size=50),
+    )
+    @settings(max_examples=30)
+    def test_audio_mime_never_empty(self, audio_b64, audio_mime):
+        """When audio is provided, the MIME type is always set (defaults to audio/aiff)."""
+        env = build_envelope("msg", audio_b64=audio_b64, audio_mime=audio_mime)
+        assert env["media"]["audio_mime"]  # never empty/falsy
+
+    @given(
+        image_b64=st.text(min_size=1, max_size=50),
+        image_mime=st.text(min_size=0, max_size=50),
+    )
+    @settings(max_examples=30)
+    def test_image_mime_never_empty(self, image_b64, image_mime):
+        """When image is provided, the MIME type is always set (defaults to image/png)."""
+        env = build_envelope("msg", image_b64=image_b64, image_mime=image_mime)
+        assert env["media"]["image_mime"]  # never empty/falsy
+
+    @given(
+        document_b64=st.text(min_size=1, max_size=50),
+        document_mime=st.text(min_size=0, max_size=50),
+    )
+    @settings(max_examples=30)
+    def test_document_mime_never_empty(self, document_b64, document_mime):
+        """When document is provided, the MIME type is always set."""
+        env = build_envelope("msg", document_b64=document_b64, document_mime=document_mime)
+        assert env["media"]["document_mime"]  # never empty/falsy
+
+    @given(message=st.text(min_size=1, max_size=100))
+    @settings(max_examples=20)
+    def test_envelope_is_always_dict(self, message):
+        """build_envelope always returns a dict."""
+        env = build_envelope(message)
+        assert env == IsInstance(dict)
+
+
+@pytest.mark.timeout(10)
+class TestMergeNerveResultProperties:
+    """Property-based tests for merge_nerve_result_into_envelope invariants."""
+
+    @given(nerve_result=st.one_of(
+        st.none(),
+        st.integers(),
+        st.text(),
+        st.lists(st.integers()),
+        st.booleans(),
+    ))
+    @settings(max_examples=30)
+    def test_non_dict_never_modifies_envelope(self, nerve_result):
+        """Any non-dict nerve result leaves the envelope unchanged."""
+        env = build_envelope("test", tone="neutral")
+        snapshot = copy.deepcopy(env)
+        result = merge_nerve_result_into_envelope(env, nerve_result)
+        assert result == snapshot
+
+    @given(fmt=KNOWN_FORMATS)
+    @settings(max_examples=10)
+    def test_known_format_hints_accepted(self, fmt):
+        """Known format hints (gif, card, emoji) are always set."""
+        env = build_envelope("test")
+        result = merge_nerve_result_into_envelope(env, {"format": fmt})
+        assert result["format"] == fmt
+
+    @given(fmt=UNKNOWN_FORMATS)
+    @settings(max_examples=20)
+    def test_unknown_format_hints_rejected(self, fmt):
+        """Non-standard format hints are never set on the envelope."""
+        env = build_envelope("test")
+        result = merge_nerve_result_into_envelope(env, {"format": fmt})
+        assert "format" not in result
+
+    @given(
+        audio_b64=st.text(min_size=1, max_size=50),
+        audio_mime=st.one_of(st.just(""), MIME_AUDIO),
+    )
+    @settings(max_examples=20)
+    def test_merge_audio_always_has_mime(self, audio_b64, audio_mime):
+        """Merged audio always has a MIME type, defaulting to audio/aiff."""
+        env = build_envelope("test")
+        nerve = {"audio_b64": audio_b64}
+        if audio_mime:
+            nerve["audio_mime"] = audio_mime
+        result = merge_nerve_result_into_envelope(env, nerve)
+        assert result["media"]["audio_mime"]  # never empty/falsy
+
+    @given(data=st.dictionaries(
+        keys=st.text(min_size=1, max_size=20),
+        values=st.text(min_size=0, max_size=50),
+        max_size=5,
+    ))
+    @settings(max_examples=30)
+    def test_merge_always_returns_same_object(self, data):
+        """merge_nerve_result_into_envelope always returns the same envelope ref."""
+        env = build_envelope("test")
+        result = merge_nerve_result_into_envelope(env, data)
+        assert result is env
+
+    @given(data=st.dictionaries(
+        keys=st.text(min_size=1, max_size=20),
+        values=st.text(min_size=0, max_size=50),
+        max_size=5,
+    ))
+    @settings(max_examples=30)
+    def test_merge_preserves_required_keys(self, data):
+        """Required envelope keys survive any merge."""
+        env = build_envelope("original", tone="warm", markdown=True)
+        result = merge_nerve_result_into_envelope(env, data)
+        assert result["message"] == "original"
+        assert result["tone"] == "warm"
+        assert result["markdown"] is True

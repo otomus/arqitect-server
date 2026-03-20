@@ -1,10 +1,10 @@
 """Tests for arqitect.brain.adapters — model sizing, prompt resolution, and tuning config."""
 
-import json
-import os
 from unittest.mock import patch
 
 import pytest
+from dirty_equals import IsDict, IsInstance, IsPartialDict
+from hypothesis import given, strategies as st
 
 from arqitect.brain.adapters import (
     _extract_param_billions,
@@ -19,12 +19,14 @@ from arqitect.brain.adapters import (
     get_tuning_config,
     resolve_meta,
     resolve_prompt,
+    SIZE_CLASSES,
 )
 
 
 # ── _extract_param_billions ───────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestExtractParamBillions:
     """Tests for regex-based parameter count extraction from model names."""
 
@@ -52,10 +54,32 @@ class TestExtractParamBillions:
     def test_plain_name_no_extension(self):
         assert _extract_param_billions("llama-13b") == 13.0
 
+    @given(
+        param_count=st.floats(min_value=0.1, max_value=500.0, allow_nan=False, allow_infinity=False),
+        prefix=st.from_regex(r"[a-z][a-z\-]{0,20}", fullmatch=True),
+        suffix=st.sampled_from([".gguf", ".bin", ".safetensors", ""]),
+    )
+    def test_roundtrip_extraction(self, param_count, prefix, suffix):
+        """Any model name with a valid '{N}b' token should extract that number.
+
+        The prefix is restricted to letters and hyphens so it cannot contain
+        a digit-b sequence that the regex would match first.
+        """
+        formatted = f"{param_count:.1f}"
+        model_name = f"{prefix}-{formatted}b{suffix}"
+        result = _extract_param_billions(model_name)
+        assert result == pytest.approx(float(formatted), abs=1e-6)
+
+    @given(name=st.from_regex(r"[a-z][a-z\-]{0,20}\.(gguf|bin)", fullmatch=True))
+    def test_no_param_token_returns_none(self, name):
+        """Model names without a '{N}b' pattern should return None."""
+        assert _extract_param_billions(name) is None
+
 
 # ── _params_to_size_class ────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestParamsToSizeClass:
     """Tests for parameter count to size class boundary mapping."""
 
@@ -83,10 +107,27 @@ class TestParamsToSizeClass:
     def test_tiny_model(self):
         assert _params_to_size_class(0.5) == "tinylm"
 
+    @given(billions=st.floats(min_value=0.01, max_value=1000.0, allow_nan=False, allow_infinity=False))
+    def test_always_returns_valid_size_class(self, billions):
+        """Every positive param count must map to a valid size class."""
+        result = _params_to_size_class(billions)
+        assert result in SIZE_CLASSES
+
+    @given(billions=st.floats(min_value=32.0, max_value=1000.0, allow_nan=False, allow_infinity=False))
+    def test_large_models_always_large(self, billions):
+        """Anything at or above the medium boundary is always 'large'."""
+        assert _params_to_size_class(billions) == "large"
+
+    @given(billions=st.floats(min_value=0.01, max_value=2.99, allow_nan=False, allow_infinity=False))
+    def test_tiny_models_always_tinylm(self, billions):
+        """Anything below 3B is always 'tinylm'."""
+        assert _params_to_size_class(billions) == "tinylm"
+
 
 # ── _model_slug ───────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestModelSlug:
     """Tests for model filename to directory-safe slug conversion."""
 
@@ -111,10 +152,30 @@ class TestModelSlug:
     def test_preserves_numbers(self):
         assert _model_slug("vision-model-f16.gguf") == "vision-model-f16"
 
+    @given(
+        base=st.from_regex(r"[A-Za-z][A-Za-z0-9\- ]{0,30}", fullmatch=True),
+        ext=st.sampled_from([".gguf", ".bin", ".safetensors", ""]),
+    )
+    def test_slug_is_always_lowercase_no_spaces(self, base, ext):
+        """Slugs must be lowercase and never contain spaces."""
+        slug = _model_slug(base + ext)
+        assert slug == slug.lower()
+        assert " " not in slug
+
+    @given(
+        base=st.from_regex(r"[A-Za-z][A-Za-z0-9\-]{0,20}", fullmatch=True),
+        ext=st.sampled_from([".gguf", ".bin", ".safetensors"]),
+    )
+    def test_slug_never_contains_extension(self, base, ext):
+        """Known extensions must be stripped from the slug."""
+        slug = _model_slug(base + ext)
+        assert not slug.endswith(ext)
+
 
 # ── get_model_size_class ──────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestGetModelSizeClass:
     """Tests for size class resolution from model file or cloud provider."""
 
@@ -142,6 +203,7 @@ class TestGetModelSizeClass:
 # ── resolve_prompt ────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestResolvePrompt:
     """Tests for prompt resolution with model-specific and size-class fallback."""
 
@@ -153,7 +215,7 @@ class TestResolvePrompt:
         mock_load.side_effect = lambda role, *parts: model_ctx if len(parts) == 2 else None
 
         result = resolve_prompt("nerve")
-        assert result == model_ctx
+        assert result == IsDict(temperature=0.3, system_prompt=IsInstance(str))
 
     @patch("arqitect.brain.adapters.get_model_name_for_role", return_value="llama-7b")
     @patch("arqitect.brain.adapters.get_model_size_class", return_value="medium")
@@ -164,7 +226,7 @@ class TestResolvePrompt:
         mock_load.side_effect = lambda role, *parts: size_ctx if len(parts) == 1 else None
 
         result = resolve_prompt("nerve")
-        assert result == size_ctx
+        assert result == IsDict(temperature=0.5)
 
     @patch("arqitect.brain.adapters.get_model_name_for_role", return_value=None)
     @patch("arqitect.brain.adapters.get_model_size_class", return_value=None)
@@ -177,6 +239,7 @@ class TestResolvePrompt:
 # ── resolve_meta ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestResolveMeta:
     """Tests for meta.json resolution with deep merge behavior."""
 
@@ -190,10 +253,11 @@ class TestResolveMeta:
 
         result = resolve_meta("nerve")
 
-        assert result["tuning"]["lora_rank"] == 16  # overridden
-        assert result["tuning"]["lora_lr"] == 1e-4  # kept from base
-        assert result["description"] == "base"  # kept from base
-        assert result["version"] == "2"  # added from specific
+        assert result == IsDict(
+            tuning=IsDict(lora_rank=16, lora_lr=1e-4),
+            description="base",
+            version="2",
+        )
 
     @patch("arqitect.brain.adapters.get_model_name_for_role", return_value=None)
     @patch("arqitect.brain.adapters.get_active_variant", return_value="medium")
@@ -203,7 +267,7 @@ class TestResolveMeta:
         mock_load_meta.return_value = base
 
         result = resolve_meta("nerve")
-        assert result == base
+        assert result == IsDict(description="base only")
 
     @patch("arqitect.brain.adapters.get_model_name_for_role", return_value="llama-7b")
     @patch("arqitect.brain.adapters.get_active_variant", return_value="medium")
@@ -213,7 +277,7 @@ class TestResolveMeta:
         mock_load_meta.side_effect = lambda role, *parts: specific if len(parts) == 2 else None
 
         result = resolve_meta("nerve")
-        assert result == specific
+        assert result == IsDict(version="model-only")
 
     @patch("arqitect.brain.adapters.get_model_name_for_role", return_value="llama-7b")
     @patch("arqitect.brain.adapters.get_active_variant", return_value="medium")
@@ -223,10 +287,42 @@ class TestResolveMeta:
 
         assert resolve_meta("nerve") is None
 
+    @given(
+        base_keys=st.dictionaries(
+            keys=st.sampled_from(["description", "provider", "model", "has_lora"]),
+            values=st.text(min_size=1, max_size=10),
+            min_size=1,
+            max_size=3,
+        ),
+        override_keys=st.dictionaries(
+            keys=st.sampled_from(["description", "provider", "version"]),
+            values=st.text(min_size=1, max_size=10),
+            min_size=1,
+            max_size=2,
+        ),
+    )
+    @patch("arqitect.brain.adapters.get_model_name_for_role", return_value="llama-7b")
+    @patch("arqitect.brain.adapters.get_active_variant", return_value="medium")
+    @patch("arqitect.brain.adapters._load_meta")
+    def test_merge_specific_overrides_base(self, mock_load_meta, _mock_variant, _mock_name, base_keys, override_keys):
+        """Model-specific keys must override base keys; base-only keys survive."""
+        mock_load_meta.side_effect = lambda role, *parts: override_keys if len(parts) == 2 else base_keys
+
+        result = resolve_meta("nerve")
+
+        # Every key from the override must appear with its override value
+        for key, val in override_keys.items():
+            assert result[key] == val
+        # Base-only keys must survive the merge
+        for key, val in base_keys.items():
+            if key not in override_keys:
+                assert result[key] == val
+
 
 # ── Convenience getters ───────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestConvenienceGetters:
     """Tests for get_temperature, get_max_tokens, and other convenience wrappers."""
 
@@ -284,6 +380,7 @@ class TestConvenienceGetters:
 # ── get_tuning_config ─────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestGetTuningConfig:
     """Tests for 4-layer tuning config resolution."""
 
@@ -295,8 +392,10 @@ class TestGetTuningConfig:
 
         result = get_tuning_config(NerveRole.CODE)
 
-        assert result["lora_target_modules"] == ROLE_TUNING_OVERRIDES[NerveRole.CODE]["lora_target_modules"]
-        assert result["default_temperature"] == 0.2
+        assert result == IsPartialDict(
+            lora_target_modules=ROLE_TUNING_OVERRIDES[NerveRole.CODE]["lora_target_modules"],
+            default_temperature=0.2,
+        )
 
     @patch("arqitect.brain.adapters.resolve_prompt")
     @patch("arqitect.brain.adapters.resolve_meta", return_value=None)
@@ -305,8 +404,7 @@ class TestGetTuningConfig:
 
         result = get_tuning_config("brain")
 
-        assert result["default_temperature"] == 0.9
-        assert result["default_max_tokens"] == 8192
+        assert result == IsPartialDict(default_temperature=0.9, default_max_tokens=8192)
 
     @patch("arqitect.brain.adapters.resolve_prompt", return_value=None)
     @patch("arqitect.brain.adapters.resolve_meta")
@@ -317,8 +415,7 @@ class TestGetTuningConfig:
 
         result = get_tuning_config("brain")
 
-        assert result["lora_rank"] == 32
-        assert result["lora_epochs"] == 5
+        assert result == IsPartialDict(lora_rank=32, lora_epochs=5)
 
     @patch("arqitect.brain.adapters.resolve_prompt", return_value=None)
     @patch("arqitect.brain.adapters.resolve_meta", return_value=None)
@@ -337,4 +434,11 @@ class TestGetTuningConfig:
     @patch("arqitect.brain.adapters.resolve_meta", return_value=None)
     def test_unknown_role_returns_empty_base(self, _mock_meta, _mock_prompt):
         result = get_tuning_config("totally_unknown_role_xyz")
+        assert result == IsInstance(dict)
+
+    @patch("arqitect.brain.adapters.resolve_prompt", return_value=None)
+    @patch("arqitect.brain.adapters.resolve_meta", return_value=None)
+    def test_tuning_config_always_returns_dict(self, _mock_meta, _mock_prompt):
+        """Contract: get_tuning_config never returns None."""
+        result = get_tuning_config("brain")
         assert isinstance(result, dict)

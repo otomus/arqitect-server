@@ -1,11 +1,9 @@
 """Per-role inference router — central entry point for all LLM text generation.
 
 Each role (brain, nerve, coder, creative, communication) can independently
-use any provider (gguf, anthropic, groq, ollama, openai). Configuration lives
+use any provider (gguf, anthropic, groq, openai, etc.). Configuration lives
 in ``inference.roles.<role>.provider`` and ``inference.roles.<role>.model``
-in arqitect.yaml.
-
-Backward compatible: falls back to flat ``inference.provider`` / ``inference.models.*``
+in arqitect.yaml. Falls back to ``inference.provider`` / ``inference.models.*``
 when per-role config is not set.
 
 No silent fallback: if a role is configured for a cloud provider, it uses that
@@ -26,9 +24,10 @@ from arqitect.config.loader import (
 )
 from arqitect.inference.providers import get_provider, PROVIDER_META, PROVIDER_REGISTRY
 from arqitect.inference.providers.base import InferenceProvider
+from arqitect.types import InferenceRole
 
 # Valid role names that the router recognises.
-VALID_ROLES = frozenset({"brain", "nerve", "coder", "creative", "communication"})
+VALID_ROLES = frozenset(InferenceRole)
 
 # ── Provider cache ────────────────────────────────────────────────────────
 
@@ -81,11 +80,9 @@ def _build_provider_kwargs(provider_name: str) -> dict:
             kwarg_name = _config_key_to_kwarg(key)
             kwargs[kwarg_name] = value
 
-    # GGUF needs models_dir, Ollama needs host — both from inference config
+    # GGUF needs models_dir from inference config
     if provider_name == "gguf":
         kwargs["models_dir"] = get_models_dir()
-    elif provider_name == "ollama" and "host" not in kwargs:
-        kwargs["host"] = get_config("inference.ollama_host", "http://localhost:11434")
 
     return kwargs
 
@@ -93,10 +90,10 @@ def _build_provider_kwargs(provider_name: str) -> dict:
 def _config_key_to_kwarg(key: str) -> str:
     """Map a config key name to the provider constructor kwarg name.
 
-    Examples: openai_base_url → base_url, ollama_host → host.
+    Examples: openai_base_url → base_url.
     """
     # Strip known provider prefixes to get the constructor parameter name
-    prefixes = ("openai_", "ollama_", "azure_openai_")
+    prefixes = ("openai_", "azure_openai_")
     for prefix in prefixes:
         if key.startswith(prefix):
             return key[len(prefix):]
@@ -184,23 +181,24 @@ def generate_for_role(
     role: str,
     prompt: str,
     system: str = "",
-    max_tokens: int = 2048,
-    temperature: float = 0.7,
-    json_mode: bool = False,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    json_mode: Optional[bool] = None,
     lora_path: Optional[str] = None,
 ) -> str:
     """Generate text for a specific role using its configured provider.
 
-    This is the single entry point that replaces all ``get_engine().generate()``
-    calls for text generation.
+    This is the single entry point for all LLM text generation. Parameters
+    not explicitly passed are resolved from the community adapter config
+    for this role (temperature, max_tokens, json_mode).
 
     Args:
         role: Logical role name (brain, nerve, coder, creative, communication).
         prompt: User prompt text.
         system: System prompt.
-        max_tokens: Maximum tokens to generate.
-        temperature: Sampling temperature.
-        json_mode: Request JSON output format.
+        max_tokens: Maximum tokens to generate (default: from community adapter).
+        temperature: Sampling temperature (default: from community adapter).
+        json_mode: Request JSON output format (default: from community adapter).
         lora_path: Path to a LoRA adapter (only used by GGUF provider).
 
     Returns:
@@ -208,6 +206,21 @@ def generate_for_role(
     """
     provider_name, model = _resolve_role_config(role)
     provider = _get_or_create_provider(provider_name)
+
+    # Resolve unset parameters from community adapter config.
+    # Lazy import to avoid circular dependency (adapters → config → inference).
+    if max_tokens is None or temperature is None or json_mode is None:
+        from arqitect.brain.adapters import (
+            get_max_tokens as _get_maxt,
+            get_temperature as _get_temp,
+            get_json_mode as _get_jm,
+        )
+        if max_tokens is None:
+            max_tokens = _get_maxt(role)
+        if temperature is None:
+            temperature = _get_temp(role)
+        if json_mode is None:
+            json_mode = _get_jm(role)
 
     kwargs: dict = {
         "model": model,

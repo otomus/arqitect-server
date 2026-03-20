@@ -16,7 +16,7 @@ from arqitect.brain.config import (
     BRAIN_MODEL, COMMUNICATION_MODEL, CORE_SENSES,
     r, mem,
 )
-from arqitect.brain.types import Action, Channel, NerveStatus
+from arqitect.types import Action, Channel, NerveStatus
 from arqitect.brain.helpers import (
     llm_generate, _is_nerve_error, _graceful_failure_message,
 )
@@ -378,7 +378,7 @@ def resolve_synthesize_redirect(
     if action != Action.SYNTHESIZE_NERVE:
         return action, decision
 
-    name = re.sub(r"[^a-z0-9_]", "_", decision.get("name", "").lower()).strip("_")
+    name = re.sub(r"[^a-z0-9_]", "_", decision.get("name", "").lower())
     desc = decision.get("description", "")
 
     # Exact match (case-insensitive)
@@ -500,7 +500,7 @@ def _handle_synthesize(ctx: DispatchContext) -> str:
     fabricate new nerves.
     """
     decision = ctx.decision
-    name = re.sub(r"[^a-z0-9_]", "_", decision.get("name", "").lower()).strip("_")
+    name = re.sub(r"[^a-z0-9_]", "_", decision.get("name", "").lower())
     desc = decision.get("description", "")
 
     # Model capability gate: only medium/large models can fabricate
@@ -700,7 +700,7 @@ def _handle_chain(ctx: DispatchContext) -> str:
     last_nerve_result = {}
 
     for i, chain_step in enumerate(steps):
-        nerve_name = re.sub(r"[^a-z0-9_]", "_", chain_step.get("nerve", "").lower()).strip("_")
+        nerve_name = re.sub(r"[^a-z0-9_]", "_", chain_step.get("nerve", "").lower())
         step_args = chain_step.get("args", ctx.task)
 
         if nerve_name in CORE_SENSES:
@@ -839,15 +839,20 @@ def _build_chain_response(
 def _parse_nerve_output(output: str) -> dict:
     """Parse nerve stdout into a dict, handling engine log noise."""
     try:
-        return json.loads(output)
+        parsed = json.loads(output)
+        if isinstance(parsed, dict):
+            return parsed
     except (json.JSONDecodeError, TypeError):
-        for line in reversed(output.strip().splitlines()):
-            line = line.strip()
-            if line.startswith("{"):
-                try:
-                    return json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    continue
+        pass
+    for line in reversed(output.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, TypeError):
+                continue
     return {}
 
 

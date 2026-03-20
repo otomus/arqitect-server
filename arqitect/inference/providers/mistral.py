@@ -10,6 +10,6 @@ class MistralProvider(OpenAICompatProvider):
         super().__init__(
             api_key=api_key or get_secret("mistral_api_key"),
             base_url="https://api.mistral.ai/v1",
-            default_model="mistral-large-latest",
+            default_model="",
             **kwargs,
         )

@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 from arqitect.brain.config import CORE_SENSES, NERVES_DIR, SENSES_DIR, SANDBOX_DIR, mem
-from arqitect.brain.types import RedisKey
+from arqitect.types import RedisKey
 
 logger = logging.getLogger(__name__)
 

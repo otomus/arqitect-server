@@ -255,6 +255,46 @@ def captured_events():
 
 
 # ---------------------------------------------------------------------------
+# Flow recorder — structured trace capture for flow testing
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def flow_recorder():
+    """Provide a FlowRecorder that intercepts all publish_event calls.
+
+    Patches publish_event at ALL import sites so no events are missed.
+    Also patches publish_response / publish_memory_state / publish_nerve_status
+    to prevent Redis errors.
+
+    Yields the recorder. After the test, call ``recorder.trace()`` for
+    the full structured trace.
+
+    Note: Do NOT combine with ``captured_events`` — they conflict.
+    """
+    from arqitect.tracing import FlowRecorder, PUBLISH_EVENT_SITES
+
+    recorder = FlowRecorder()
+    patches = [patch(site, side_effect=recorder.intercept) for site in PUBLISH_EVENT_SITES]
+    # Also silence publish_response / publish_memory_state / publish_nerve_status
+    silence_patches = [
+        patch("arqitect.brain.brain.publish_response"),
+        patch("arqitect.brain.brain.publish_memory_state"),
+        patch("arqitect.brain.brain.publish_nerve_status"),
+        patch("arqitect.brain.dispatch.publish_response"),
+        patch("arqitect.brain.dispatch.publish_memory_state"),
+        patch("arqitect.brain.consolidate.publish_nerve_status"),
+    ]
+
+    for p in patches + silence_patches:
+        p.start()
+
+    yield recorder
+
+    for p in patches + silence_patches:
+        p.stop()
+
+
+# ---------------------------------------------------------------------------
 # Shared brain test helpers — used by routing, chain, and security tests
 # ---------------------------------------------------------------------------
 

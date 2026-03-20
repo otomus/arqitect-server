@@ -1,17 +1,26 @@
-"""P5 — Memory integration tests: episode recording, context building, facts.
+"""Memory integration tests: episode recording, context building, facts.
 
-All episode data is produced by typed factories.
+Covers:
+- get_context_for_task returns session, episodes, and facts
+- Conversation history via hot memory
+- Episode recording and recall
+- User fact storage and scoping
+- Environment variable construction for nerve invocation
 """
 
 import json
-from unittest.mock import patch
 
 import pytest
+
+from hypothesis import given, settings, strategies as st, HealthCheck
 
 from tests.factories import EpisodeFactory, as_dict
 
 
+@pytest.mark.timeout(10)
 class TestContextForTask:
+    """Context building for task processing."""
+
     def test_returns_session_episodes_facts(self, mem):
         """get_context_for_task should return session, episodes, and facts."""
         context = mem.get_context_for_task("hello", user_id="user1")
@@ -29,8 +38,17 @@ class TestContextForTask:
         assert "user" in roles
         assert "assistant" in roles
 
+    def test_context_keys_are_strings(self, mem):
+        """All context values should be serializable types."""
+        context = mem.get_context_for_task("test", user_id="u1")
+        for key, value in context.items():
+            assert isinstance(key, str), f"Context key {key!r} is not a string"
 
+
+@pytest.mark.timeout(10)
 class TestEpisodeRecording:
+    """Episode storage in warm memory."""
+
     def test_record_episode_stores_in_warm(self, mem):
         """record_episode should store the episode in warm memory."""
         episode = EpisodeFactory.build(
@@ -50,8 +68,20 @@ class TestEpisodeRecording:
         episode = EpisodeFactory.build(task="tell joke", nerve="joke_nerve")
         mem.record_episode(as_dict(episode))
 
+    @given(
+        task=st.text(min_size=1, max_size=100, alphabet=st.characters(whitelist_categories=("L", "N", "P", "Z"))),
+    )
+    @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_episode_recording_accepts_arbitrary_tasks(self, mem, task):
+        """Episodes with any reasonable task text should be recordable."""
+        episode = EpisodeFactory.build(task=task, nerve="test_nerve")
+        mem.record_episode(as_dict(episode))
 
+
+@pytest.mark.timeout(10)
 class TestFactStorage:
+    """User fact storage and retrieval."""
+
     def test_set_and_get_user_fact(self, mem):
         """User facts should be storable and retrievable."""
         mem.cold.set_user_fact("user1", "city", "Tel Aviv", confidence=1.0)
@@ -68,8 +98,23 @@ class TestFactStorage:
         assert facts1["city"] == "Tel Aviv"
         assert facts2["city"] == "London"
 
+    @given(
+        user_id=st.from_regex(r"user_[0-9]{1,5}", fullmatch=True),
+        key=st.from_regex(r"[a-z_]{3,10}", fullmatch=True),
+        value=st.text(min_size=1, max_size=50, alphabet=st.characters(whitelist_categories=("L", "N"))),
+    )
+    @settings(max_examples=15, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_arbitrary_facts_roundtrip(self, mem, user_id, key, value):
+        """Any fact key/value pair should survive a set/get roundtrip."""
+        mem.cold.set_user_fact(user_id, key, value, confidence=1.0)
+        facts = mem.cold.get_user_facts(user_id)
+        assert facts[key] == value
 
+
+@pytest.mark.timeout(10)
 class TestEnvForNerve:
+    """Environment variable construction for nerve subprocess invocation."""
+
     def test_env_contains_required_keys(self, mem):
         """get_env_for_nerve should produce all SYNAPSE_* env vars."""
         env = mem.get_env_for_nerve("test_nerve", "do something", user_id="user1")
@@ -96,3 +141,13 @@ class TestEnvForNerve:
                     json.loads(env[key])
                 except json.JSONDecodeError:
                     pytest.fail(f"{key} is not valid JSON: {env[key][:100]}")
+
+    def test_nerve_name_matches_input(self, mem):
+        """SYNAPSE_NERVE_NAME must match the nerve name passed in."""
+        env = mem.get_env_for_nerve("my_nerve", "task", user_id="u1")
+        assert env["SYNAPSE_NERVE_NAME"] == "my_nerve"
+
+    def test_user_id_in_env(self, mem):
+        """SYNAPSE_USER_ID must reflect the calling user."""
+        env = mem.get_env_for_nerve("n", "t", user_id="alice")
+        assert env["SYNAPSE_USER_ID"] == "alice"

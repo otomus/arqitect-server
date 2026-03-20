@@ -1,0 +1,36 @@
+# serializer version: 1
+# name: TestBulkData.test_get_all_nerve_data_snapshot
+  dict({
+    'summarize': dict({
+      'description': 'summarize text',
+      'examples': list([
+        dict({
+          'input': 'long text',
+          'output': 'short',
+        }),
+      ]),
+      'failures': 1,
+      'is_sense': False,
+      'origin': 'local',
+      'qualification': dict({
+        'details': dict({
+          'notes': 'good',
+        }),
+        'iterations': 3,
+        'pass_count': 9,
+        'qualified': True,
+        'score': 0.92,
+        'test_count': 10,
+        'timestamp': '<REDACTED>',
+      }),
+      'role': 'tool',
+      'successes': 2,
+      'system_prompt': 'Be concise.',
+      'tools': list([
+        'text_splitter',
+        'llm_call',
+      ]),
+      'total_invocations': 3,
+    }),
+  })
+# ---

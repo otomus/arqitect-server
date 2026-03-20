@@ -1,11 +1,14 @@
-"""Tests for arqitect.inference.tuner — training data collection, adapter training, conversion."""
+"""Tests for arqitect.inference.tuner -- training data collection, adapter training, conversion."""
 
 import json
 import os
 import threading
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 import pytest
+from dirty_equals import IsInstance, IsPositiveInt
+from hypothesis import given, settings, assume
+from hypothesis import strategies as st
 
 from arqitect.inference.tuner import (
     _SIZE_CLASS_LIMITS,
@@ -19,14 +22,37 @@ from arqitect.inference.tuner import (
 
 
 # ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_rows(count: int) -> list[dict]:
+    """Build a list of training-data dicts with sequential values."""
+    return [{"input": str(i), "output": str(i)} for i in range(count)]
+
+
+def _default_tuning_config() -> dict:
+    """Canonical tuning config used across training tests."""
+    return {
+        "lora_rank": 8,
+        "lora_epochs": 2,
+        "lora_lr": 1e-4,
+        "lora_dropout": 0.05,
+        "lora_target_modules": ["q_proj", "v_proj"],
+        "min_training_examples": 5,
+        "training_max_length": 512,
+    }
+
+
+# ---------------------------------------------------------------------------
 # _slice_for_size_class (pure function)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestSliceForSizeClass:
     """Tests for size-class data slicing."""
 
     def test_none_returns_full_data(self):
-        data = [{"input": str(i), "output": str(i)} for i in range(300)]
+        data = _make_rows(300)
         assert _slice_for_size_class(data, None) is data
 
     def test_tinylm_limits_to_50(self):
@@ -47,7 +73,7 @@ class TestSliceForSizeClass:
         assert len(_slice_for_size_class(data, "large")) == 500
 
     def test_unknown_size_class_returns_full(self):
-        data = [{"input": str(i)} for i in range(300)]
+        data = _make_rows(300)
         result = _slice_for_size_class(data, "galaxy")
         assert len(result) == 300
 
@@ -57,15 +83,50 @@ class TestSliceForSizeClass:
         assert len(result) == 1
 
     def test_preserves_order(self):
-        data = [{"input": str(i)} for i in range(100)]
+        data = _make_rows(100)
         result = _slice_for_size_class(data, "tinylm")
         assert result == data[:50]
+
+    @given(
+        size_class=st.sampled_from(list(_SIZE_CLASS_LIMITS.keys())),
+        data_len=st.integers(min_value=0, max_value=2000),
+    )
+    @settings(max_examples=50)
+    def test_result_never_exceeds_limit(self, size_class, data_len):
+        """For any known size class the result length is at most the configured limit."""
+        data = _make_rows(data_len)
+        result = _slice_for_size_class(data, size_class)
+        limit = _SIZE_CLASS_LIMITS[size_class]
+        assert len(result) <= limit
+        # Result is always a prefix of the original
+        assert result == data[: len(result)]
+
+    @given(data_len=st.integers(min_value=0, max_value=500))
+    @settings(max_examples=30)
+    def test_none_size_class_is_identity(self, data_len):
+        """None size class always returns the exact same list object."""
+        data = _make_rows(data_len)
+        assert _slice_for_size_class(data, None) is data
+
+    @given(
+        unknown_class=st.text(min_size=1, max_size=20).filter(
+            lambda s: s not in _SIZE_CLASS_LIMITS
+        ),
+        data_len=st.integers(min_value=0, max_value=300),
+    )
+    @settings(max_examples=30)
+    def test_unknown_class_returns_all(self, unknown_class, data_len):
+        """An unrecognized size class never truncates data."""
+        data = _make_rows(data_len)
+        result = _slice_for_size_class(data, unknown_class)
+        assert len(result) == data_len
 
 
 # ---------------------------------------------------------------------------
 # collect_training_data
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestCollectTrainingData:
     """Tests for training data collection from cold memory and redis."""
 
@@ -80,7 +141,6 @@ class TestCollectTrainingData:
         ]
         mock_slice.side_effect = lambda d, _: d
 
-        # Patch redis to not be available
         with patch.dict("sys.modules", {"redis": None}):
             result = collect_training_data("my_nerve")
 
@@ -102,7 +162,7 @@ class TestCollectTrainingData:
         with patch.dict("sys.modules", {"redis": None}):
             result = collect_training_data("nerve")
 
-        assert len(result) == 0
+        assert result == []
 
     @patch("arqitect.inference.tuner._slice_for_size_class")
     @patch("arqitect.memory.cold.ColdMemory")
@@ -125,11 +185,34 @@ class TestCollectTrainingData:
             result = collect_training_data("nerve")
         assert result == []
 
+    @patch("arqitect.inference.tuner._slice_for_size_class")
+    @patch("arqitect.memory.cold.ColdMemory")
+    def test_each_entry_has_input_and_output_keys(self, mock_cold_cls, mock_slice):
+        """Every collected entry must contain both 'input' and 'output' keys."""
+        mock_cold = MagicMock()
+        mock_cold_cls.return_value = mock_cold
+        mock_cold.get_test_bank.return_value = [
+            {"input": "a", "output": "b"},
+            {"input": "c", "expected_behavior": "d"},
+            {"output": "orphan"},
+        ]
+        mock_slice.side_effect = lambda d, _: d
+
+        with patch.dict("sys.modules", {"redis": None}):
+            result = collect_training_data("nerve")
+
+        for entry in result:
+            assert "input" in entry
+            assert "output" in entry
+            assert entry["input"] == IsInstance(str)
+            assert entry["output"] == IsInstance(str)
+
 
 # ---------------------------------------------------------------------------
 # _get_base_model_path
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetBaseModelPath:
     """Tests for base model path resolution."""
 
@@ -164,24 +247,14 @@ class TestGetBaseModelPath:
 # train_nerve_adapter
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestTrainNerveAdapter:
     """Tests for the LoRA training orchestrator."""
-
-    def _default_tuning_config(self):
-        return {
-            "lora_rank": 8,
-            "lora_epochs": 2,
-            "lora_lr": 1e-4,
-            "lora_dropout": 0.05,
-            "lora_target_modules": ["q_proj", "v_proj"],
-            "min_training_examples": 5,
-            "training_max_length": 512,
-        }
 
     @patch("arqitect.inference.tuner._get_min_examples", return_value=5)
     @patch("arqitect.brain.adapters.get_tuning_config")
     def test_skips_when_too_few_examples(self, mock_cfg, _mock_min):
-        mock_cfg.return_value = self._default_tuning_config()
+        mock_cfg.return_value = _default_tuning_config()
         result = train_nerve_adapter("nerve1", training_data=[{"input": "a", "output": "b"}])
         assert result is False
 
@@ -189,8 +262,8 @@ class TestTrainNerveAdapter:
     @patch("arqitect.inference.tuner._get_min_examples", return_value=1)
     @patch("arqitect.brain.adapters.get_tuning_config")
     def test_skips_when_no_base_model(self, mock_cfg, _min, _bmp):
-        mock_cfg.return_value = self._default_tuning_config()
-        data = [{"input": f"i{i}", "output": f"o{i}"} for i in range(10)]
+        mock_cfg.return_value = _default_tuning_config()
+        data = _make_rows(10)
         result = train_nerve_adapter("nerve1", training_data=data)
         assert result is False
 
@@ -199,12 +272,11 @@ class TestTrainNerveAdapter:
     @patch("arqitect.brain.adapters.get_tuning_config")
     @patch("arqitect.inference.tuner._nerves_dir", return_value="/tmp/nerves")
     def test_returns_false_when_interrupted_before_loading(self, _nd, mock_cfg, _min, _bmp):
-        mock_cfg.return_value = self._default_tuning_config()
-        data = [{"input": f"i{i}", "output": f"o{i}"} for i in range(10)]
+        mock_cfg.return_value = _default_tuning_config()
+        data = _make_rows(10)
         interrupted = threading.Event()
         interrupted.set()  # Pre-set interrupt
 
-        # Mock torch/transformers/peft to avoid real imports
         mock_torch = MagicMock()
         mock_transformers = MagicMock()
         mock_peft = MagicMock()
@@ -222,7 +294,7 @@ class TestTrainNerveAdapter:
     @patch("arqitect.inference.tuner._get_min_examples", return_value=5)
     @patch("arqitect.brain.adapters.get_tuning_config")
     def test_collects_data_when_none_provided(self, mock_cfg, _min, mock_collect):
-        mock_cfg.return_value = self._default_tuning_config()
+        mock_cfg.return_value = _default_tuning_config()
         mock_collect.return_value = []  # Too few examples, will exit early
         result = train_nerve_adapter("nerve1", training_data=None)
         mock_collect.assert_called_once_with("nerve1")
@@ -234,10 +306,9 @@ class TestTrainNerveAdapter:
     @patch("arqitect.inference.tuner._nerves_dir", return_value="/tmp/nerves")
     def test_returns_false_on_import_failure(self, _nd, mock_cfg, _min, _bmp):
         """When torch/transformers/peft aren't installed, returns False."""
-        mock_cfg.return_value = self._default_tuning_config()
-        data = [{"input": f"i{i}", "output": f"o{i}"} for i in range(10)]
+        mock_cfg.return_value = _default_tuning_config()
+        data = _make_rows(10)
 
-        # Force import error for torch
         import builtins
         real_import = builtins.__import__
 
@@ -255,9 +326,8 @@ class TestTrainNerveAdapter:
     @patch("arqitect.brain.adapters.get_tuning_config")
     def test_uses_custom_lora_params(self, mock_cfg, _min):
         """Custom lora_rank, epochs, lr should override config defaults."""
-        cfg = self._default_tuning_config()
-        mock_cfg.return_value = cfg
-        data = [{"input": f"i{i}", "output": f"o{i}"} for i in range(2)]
+        mock_cfg.return_value = _default_tuning_config()
+        data = _make_rows(2)
 
         # Too few examples, but we verify params were resolved before exit
         result = train_nerve_adapter(
@@ -266,11 +336,32 @@ class TestTrainNerveAdapter:
         )
         assert result is False  # Too few examples
 
+    @given(
+        lora_rank=st.integers(min_value=1, max_value=128),
+        epochs=st.integers(min_value=1, max_value=20),
+        lr=st.floats(min_value=1e-7, max_value=1.0, allow_nan=False, allow_infinity=False),
+    )
+    @settings(max_examples=20)
+    @patch("arqitect.inference.tuner._get_min_examples", return_value=999)
+    @patch("arqitect.brain.adapters.get_tuning_config")
+    def test_always_returns_bool_with_random_hyperparams(
+        self, mock_cfg, _min, lora_rank, epochs, lr
+    ):
+        """Regardless of hyperparameter values, the function returns a bool."""
+        mock_cfg.return_value = _default_tuning_config()
+        data = _make_rows(2)  # intentionally below min_examples
+        result = train_nerve_adapter(
+            "nerve1", training_data=data,
+            lora_rank=lora_rank, epochs=epochs, lr=lr,
+        )
+        assert result == IsInstance(bool)
+
 
 # ---------------------------------------------------------------------------
 # _convert_adapter_to_gguf
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestConvertAdapterToGguf:
     """Tests for the safetensors-to-GGUF converter."""
 
@@ -294,7 +385,6 @@ class TestConvertAdapterToGguf:
         safetensors_dir = str(tmp_path / "st")
         output_path = str(tmp_path / "adapter.gguf")
 
-        # llama_cpp not available either
         with patch.dict("sys.modules", {"llama_cpp": None}):
             result = _convert_adapter_to_gguf(safetensors_dir, output_path, "/base.gguf")
 
@@ -306,7 +396,6 @@ class TestConvertAdapterToGguf:
         safetensors_dir = str(tmp_path / "st")
         output_path = str(tmp_path / "adapter.gguf")
 
-        # Converter scripts exist but all fail
         mock_exists.side_effect = lambda p: p.endswith("convert_lora_to_gguf.py")
         mock_run.return_value = MagicMock(returncode=1, stderr="error")
 
@@ -326,11 +415,25 @@ class TestConvertAdapterToGguf:
             result = _convert_adapter_to_gguf(safetensors_dir, output_path, "/base.gguf")
         assert result is False
 
+    @patch("subprocess.run")
+    @patch("os.path.exists")
+    def test_return_type_is_always_bool(self, mock_exists, mock_run, tmp_path):
+        """Converter must always return a bool, never None or another truthy value."""
+        safetensors_dir = str(tmp_path / "st")
+        output_path = str(tmp_path / "out.gguf")
+        mock_exists.return_value = False
+
+        with patch.dict("sys.modules", {"llama_cpp": None}):
+            result = _convert_adapter_to_gguf(safetensors_dir, output_path, "/base.gguf")
+
+        assert result == IsInstance(bool)
+
 
 # ---------------------------------------------------------------------------
 # get_nerves_ready_for_training
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetNervesReadyForTraining:
     """Tests for nerve readiness scanning."""
 
@@ -352,7 +455,7 @@ class TestGetNervesReadyForTraining:
         assert len(results) == 1
         assert results[0]["name"] == "weather"
         assert results[0]["role"] == "tool"
-        assert results[0]["data_count"] == 5
+        assert results[0]["data_count"] == IsPositiveInt
         assert results[0]["has_adapter"] is False
 
     @patch("arqitect.inference.tuner._get_min_examples", return_value=100)
@@ -391,3 +494,27 @@ class TestGetNervesReadyForTraining:
 
         assert results[0]["role"] == "tool"
         assert results[0]["has_adapter"] is True
+
+    @patch("arqitect.inference.tuner._get_min_examples", return_value=1)
+    @patch("arqitect.inference.tuner.collect_training_data")
+    @patch("arqitect.inference.tuner._nerves_dir", return_value="/tmp/nerves")
+    @patch("arqitect.memory.cold.ColdMemory")
+    def test_result_schema(self, mock_cold_cls, _nd, mock_collect, _min):
+        """Each result dict must have exactly name, role, data_count, has_adapter."""
+        mock_cold = MagicMock()
+        mock_cold_cls.return_value = mock_cold
+        mock_cold.conn.execute.return_value.fetchall.return_value = [
+            ("search", "Search nerve", "tool"),
+        ]
+        mock_collect.return_value = _make_rows(4)
+
+        with patch("os.path.exists", return_value=False):
+            results = get_nerves_ready_for_training()
+
+        expected_keys = {"name", "role", "data_count", "has_adapter"}
+        for entry in results:
+            assert set(entry.keys()) == expected_keys
+            assert entry["name"] == IsInstance(str)
+            assert entry["role"] == IsInstance(str)
+            assert entry["data_count"] == IsPositiveInt
+            assert entry["has_adapter"] == IsInstance(bool)

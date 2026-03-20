@@ -7,7 +7,7 @@ class OpenAICompatProvider(InferenceProvider):
     def __init__(self, api_key: str = "", base_url: str = "", default_model: str = "", **kwargs):
         self.api_key = api_key or get_secret("openai_api_key")
         self.base_url = base_url or get_secret("openai_base_url", "https://api.openai.com/v1")
-        self.default_model = default_model or "gpt-4o-mini"
+        self.default_model = default_model
         self._client = None
 
     def _get_client(self):

@@ -9,6 +9,7 @@ import os
 import sqlite3
 
 from arqitect.config.loader import get_memory_dir
+from arqitect.types import NerveRole
 
 _DB_PATH = os.path.join(get_memory_dir(), "knowledge.db")
 
@@ -29,7 +30,8 @@ def _ensure_db(conn: sqlite3.Connection):
             description TEXT NOT NULL,
             total_invocations INTEGER DEFAULT 0,
             successes INTEGER DEFAULT 0,
-            failures INTEGER DEFAULT 0
+            failures INTEGER DEFAULT 0,
+            origin TEXT DEFAULT 'local'
         );
 
         CREATE TABLE IF NOT EXISTS tool_stats (
@@ -143,6 +145,11 @@ def _ensure_db(conn: sqlite3.Connection):
         conn.execute("SELECT last_invoked_at FROM nerve_registry LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE nerve_registry ADD COLUMN last_invoked_at TEXT DEFAULT NULL")
+    # Migrate: add origin column (local | community)
+    try:
+        conn.execute("SELECT origin FROM nerve_registry LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE nerve_registry ADD COLUMN origin TEXT DEFAULT 'local'")
     conn.commit()
 
 
@@ -193,60 +200,116 @@ class ColdMemory:
 
     # ── Nerve Registry ───────────────────────────────────────────────────
 
-    def register_nerve(self, name: str, description: str):
-        """Register or update a nerve."""
+    def register_nerve(self, name: str, description: str, origin: str = "local"):
+        """Register or update a nerve.
+
+        Args:
+            name: Nerve identifier.
+            description: Human-readable description.
+            origin: Provenance — 'local' for user-created, 'community' for arqitect-community.
+        """
         with self._lock:
             self.conn.execute(
-                "INSERT INTO nerve_registry (name, description) VALUES (?, ?) "
-                "ON CONFLICT(name) DO UPDATE SET description=excluded.description",
-                (name, description),
+                "INSERT INTO nerve_registry (name, description, origin) VALUES (?, ?, ?) "
+                "ON CONFLICT(name) DO UPDATE SET description=excluded.description, "
+                "origin=excluded.origin",
+                (name, description, origin),
             )
             self.conn.commit()
 
     def record_nerve_invocation(self, name: str, success: bool):
-        """Increment invocation stats and update last_invoked_at timestamp."""
+        """Increment invocation stats and update last_invoked_at timestamp.
+
+        Uses UPSERT so nerves that exist on disk but were never register_nerve'd
+        still get a row created — otherwise the UPDATE matches 0 rows and
+        last_invoked_at stays NULL, preventing dreamstate from tuning the nerve.
+        """
         col = "successes" if success else "failures"
+        other = "failures" if success else "successes"
         with self._lock:
             self.conn.execute(
-                f"UPDATE nerve_registry SET total_invocations = total_invocations + 1, "
-                f"{col} = {col} + 1, last_invoked_at = datetime('now') WHERE name=?",
+                f"INSERT INTO nerve_registry (name, description, total_invocations, "
+                f"{col}, {other}, last_invoked_at) VALUES (?, '', 1, 1, 0, datetime('now')) "
+                f"ON CONFLICT(name) DO UPDATE SET total_invocations = total_invocations + 1, "
+                f"{col} = {col} + 1, last_invoked_at = datetime('now')",
                 (name,),
             )
             self.conn.commit()
 
     def get_nerve_info(self, name: str) -> dict | None:
-        """Get nerve registry info."""
+        """Get nerve registry info including origin."""
         with self._lock:
             row = self.conn.execute("SELECT * FROM nerve_registry WHERE name=?", (name,)).fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        d.setdefault("origin", "local")
+        return d
 
     def register_nerve_rich(self, name: str, description: str, system_prompt: str = "",
-                            examples_json: str = "[]", role: str = "tool",
-                            **_kwargs):
+                            examples_json: str = "[]", role: str = NerveRole.TOOL,
+                            origin: str = "local", **_kwargs):
         """Register or update a nerve with rich metadata.
 
-        Note: model_adapters column is kept for backward compat but no longer written.
-        Per-model prompts live in community cache context.json files.
+        Routes to the appropriate persistence strategy based on origin.
+
+        Args:
+            name: Nerve identifier.
+            description: Human-readable description.
+            system_prompt: LLM system prompt (ignored for community nerves).
+            examples_json: JSON array of few-shot examples (ignored for community nerves).
+            role: Nerve role classification (tool/creative/code).
+            origin: Provenance — 'local' or 'community'.
+        """
+        if origin == "community":
+            self._register_community_nerve(name, description, role)
+        else:
+            self._register_local_nerve(name, description, system_prompt, examples_json, role)
+
+    def _register_community_nerve(self, name: str, description: str, role: str):
+        """Persist a community nerve — identity and role only, no prompts.
+
+        System prompt and examples live in the community cache
+        (.community/cache/nerves/{name}/) and are resolved at read time.
         """
         with self._lock:
             self.conn.execute(
-                "INSERT INTO nerve_registry (name, description, system_prompt, examples, role) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO nerve_registry (name, description, role, origin) "
+                "VALUES (?, ?, ?, 'community') "
+                "ON CONFLICT(name) DO UPDATE SET description=excluded.description, "
+                "role=excluded.role, origin='community'",
+                (name, description, role),
+            )
+            self.conn.commit()
+
+    def _register_local_nerve(self, name: str, description: str,
+                              system_prompt: str, examples_json: str, role: str):
+        """Persist a local nerve with full metadata including prompts."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO nerve_registry (name, description, system_prompt, examples, role, origin) "
+                "VALUES (?, ?, ?, ?, ?, 'local') "
                 "ON CONFLICT(name) DO UPDATE SET description=excluded.description, "
                 "system_prompt=excluded.system_prompt, examples=excluded.examples, "
-                "role=excluded.role",
+                "role=excluded.role, origin='local'",
                 (name, description, system_prompt, examples_json, role),
             )
             self.conn.commit()
 
     def get_nerve_metadata(self, name: str) -> dict:
-        """Get nerve metadata: system_prompt, examples, role."""
+        """Get nerve metadata: system_prompt, examples, role, origin.
+
+        For community nerves, system_prompt and examples will be empty here —
+        callers should resolve them from the community cache.
+        """
         with self._lock:
             row = self.conn.execute(
-                "SELECT description, system_prompt, examples, role FROM nerve_registry WHERE name=?", (name,)
+                "SELECT description, system_prompt, examples, role, origin "
+                "FROM nerve_registry WHERE name=?", (name,)
             ).fetchone()
         if not row:
-            return {"description": "", "system_prompt": "", "examples": [], "role": "tool"}
+            return {"description": "", "system_prompt": "", "examples": [],
+                    "role": NerveRole.TOOL, "origin": "local"}
         examples = []
         try:
             examples = json.loads(row["examples"]) if row["examples"] else []
@@ -256,7 +319,8 @@ class ColdMemory:
             "description": row["description"],
             "system_prompt": row["system_prompt"] or "",
             "examples": examples,
-            "role": row["role"] or "tool",
+            "role": row["role"] or NerveRole.TOOL,
+            "origin": row["origin"] or "local",
         }
 
     def get_test_bank(self, nerve_name: str) -> list[dict]:
@@ -292,13 +356,14 @@ class ColdMemory:
     # ── Senses (Protected Nerves) ─────────────────────────────────────────
 
     def register_sense(self, name: str, description: str, system_prompt: str = "", examples_json: str = "[]"):
-        """Register a sense (protected nerve) with is_sense=1."""
+        """Register a sense (protected nerve) with is_sense=1. Senses are always local."""
         with self._lock:
             self.conn.execute(
-                "INSERT INTO nerve_registry (name, description, system_prompt, examples, is_sense) "
-                "VALUES (?, ?, ?, ?, 1) "
+                "INSERT INTO nerve_registry (name, description, system_prompt, examples, is_sense, origin) "
+                "VALUES (?, ?, ?, ?, 1, 'local') "
                 "ON CONFLICT(name) DO UPDATE SET description=excluded.description, "
-                "system_prompt=excluded.system_prompt, examples=excluded.examples, is_sense=1",
+                "system_prompt=excluded.system_prompt, examples=excluded.examples, "
+                "is_sense=1, origin='local'",
                 (name, description, system_prompt, examples_json),
             )
             self.conn.commit()
@@ -382,43 +447,17 @@ class ColdMemory:
             self.conn.execute("DELETE FROM qualification_results WHERE subject_name=?", (name,))
             self.conn.commit()
 
-    def set_nerve_embedding(self, name: str, embedding: list[float]):
-        """Cache a nerve's description embedding in cold memory."""
-        with self._lock:
-            self.conn.execute(
-                "UPDATE nerve_registry SET embedding=? WHERE name=?",
-                (json.dumps(embedding), name),
-            )
-            self.conn.commit()
-
-    def get_nerve_embedding(self, name: str) -> list[float] | None:
-        """Retrieve a cached nerve embedding, or None if not set."""
+    def get_nerve_origin(self, name: str) -> str:
+        """Return the origin of a nerve ('local' or 'community')."""
         with self._lock:
             row = self.conn.execute(
-                "SELECT embedding FROM nerve_registry WHERE name=?", (name,)
+                "SELECT origin FROM nerve_registry WHERE name=?", (name,)
             ).fetchone()
-        if row and row["embedding"]:
-            try:
-                return json.loads(row["embedding"])
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return None
+        return row["origin"] if row and row["origin"] else "local"
 
-    def get_all_nerve_embeddings(self) -> dict[str, list[float]]:
-        """Retrieve all cached nerve embeddings as {name: embedding}."""
-        with self._lock:
-            rows = self.conn.execute(
-                "SELECT name, embedding FROM nerve_registry WHERE embedding != ''"
-            ).fetchall()
-        result = {}
-        for row in rows:
-            try:
-                emb = json.loads(row["embedding"])
-                if emb:
-                    result[row["name"]] = emb
-            except (json.JSONDecodeError, TypeError):
-                continue
-        return result
+    def is_community_nerve(self, name: str) -> bool:
+        """Check if a nerve originates from the community cache."""
+        return self.get_nerve_origin(name) == "community"
 
     # ── Qualification Results ─────────────────────────────────────────────
 
@@ -494,7 +533,7 @@ class ColdMemory:
             nerves = {}
             for row in self.conn.execute(
                 "SELECT name, description, is_sense, total_invocations, successes, failures, "
-                "system_prompt, examples, role FROM nerve_registry"
+                "system_prompt, examples, role, origin FROM nerve_registry"
             ).fetchall():
                 examples = []
                 try:
@@ -509,7 +548,8 @@ class ColdMemory:
                     "failures": row["failures"] or 0,
                     "system_prompt": row["system_prompt"] or "",
                     "examples": examples,
-                    "role": row["role"] or "tool",
+                    "role": row["role"] or NerveRole.TOOL,
+                    "origin": row["origin"] or "local",
                     "tools": [],
                     "qualification": None,
                 }

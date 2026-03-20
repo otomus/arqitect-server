@@ -10,6 +10,6 @@ class DeepSeekProvider(OpenAICompatProvider):
         super().__init__(
             api_key=api_key or get_secret("deepseek_api_key"),
             base_url="https://api.deepseek.com",
-            default_model="deepseek-chat",
+            default_model="",
             **kwargs,
         )

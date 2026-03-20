@@ -1,24 +1,31 @@
 """Tests for arqitect.critic.qualify_nerve and arqitect.critic.qualify_tool.
 
-Mocks only: LLM calls, Redis, subprocess, HTTP requests.
-Uses real logic for JSON extraction, rule filtering, description drift, etc.
+Contract-based tests: mock only LLM calls, Redis, subprocess, HTTP requests.
+Real logic for JSON extraction, rule filtering, description drift, etc.
 """
 
 import json
 import os
-import shutil
+import subprocess
 from unittest.mock import patch, MagicMock
 
 import pytest
+from dirty_equals import IsInstance, IsFloat, IsStr
+from hypothesis import given, settings, assume
+from hypothesis import strategies as st
 
 
 # ---------------------------------------------------------------------------
-# We must patch module-level Redis and config before importing
+# Patch module-level globals before importing (Redis, dirs resolve at import)
 # ---------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def _patch_module_globals(tmp_path):
-    """Patch module-level globals that fire at import time."""
+def _patch_module_globals(tmp_path, test_redis):
+    """Patch module-level globals that fire at import time.
+
+    Uses the shared test_redis fixture from conftest instead of creating
+    a standalone fakeredis instance.
+    """
     nerves = str(tmp_path / "nerves")
     sandbox = str(tmp_path / "sandbox")
     tools = str(tmp_path / "mcp_tools")
@@ -26,12 +33,9 @@ def _patch_module_globals(tmp_path):
     os.makedirs(sandbox, exist_ok=True)
     os.makedirs(tools, exist_ok=True)
 
-    import fakeredis
-    fake_redis = fakeredis.FakeRedis(decode_responses=True)
-
     with patch("arqitect.critic.qualify_nerve.NERVES_DIR", nerves), \
          patch("arqitect.critic.qualify_nerve.SANDBOX_DIR", sandbox), \
-         patch("arqitect.critic.qualify_nerve._r", fake_redis), \
+         patch("arqitect.critic.qualify_nerve._r", test_redis), \
          patch("arqitect.critic.qualify_nerve._MCP_TOOLS_DIR", tools), \
          patch("arqitect.critic.qualify_tool.MCP_TOOLS_DIR", tools), \
          patch("arqitect.critic.qualify_tool.MCP_URL", "http://localhost:9999"):
@@ -39,7 +43,7 @@ def _patch_module_globals(tmp_path):
             "nerves_dir": nerves,
             "sandbox_dir": sandbox,
             "tools_dir": tools,
-            "redis": fake_redis,
+            "redis": test_redis,
         }
 
 
@@ -47,7 +51,10 @@ def _patch_module_globals(tmp_path):
 # qualify_nerve._extract_json
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestExtractJsonNerve:
+    """Contract: _extract_json must recover JSON from noisy LLM output."""
+
     def test_plain_json_object(self):
         from arqitect.critic.qualify_nerve import _extract_json
         assert _extract_json('{"a": 1}') == {"a": 1}
@@ -64,16 +71,12 @@ class TestExtractJsonNerve:
     def test_noisy_prefix(self):
         from arqitect.critic.qualify_nerve import _extract_json
         raw = 'Here is the result:\n{"key": "val"}'
-        result = _extract_json(raw)
-        assert result == {"key": "val"}
+        assert _extract_json(raw) == {"key": "val"}
 
     def test_nested_braces(self):
         from arqitect.critic.qualify_nerve import _extract_json
-        # _extract_json tries arrays first, then objects — so if no array found,
-        # it finds the object
         raw = 'prefix {"outer": {"inner": "val"}} suffix'
-        result = _extract_json(raw)
-        assert result == {"outer": {"inner": "val"}}
+        assert _extract_json(raw) == {"outer": {"inner": "val"}}
 
     def test_returns_none_for_no_json(self):
         from arqitect.critic.qualify_nerve import _extract_json
@@ -97,17 +100,44 @@ class TestExtractJsonNerve:
         assert isinstance(result, list)
         assert len(result) == 2
 
+    @given(st.dictionaries(
+        keys=st.text(min_size=1, max_size=10, alphabet=st.characters(whitelist_categories=("L", "N"))),
+        values=st.one_of(st.integers(), st.text(min_size=1, max_size=50)),
+        min_size=1,
+        max_size=5,
+    ))
+    @settings(max_examples=30)
+    def test_roundtrips_valid_json_objects(self, data):
+        """Any valid JSON object wrapped in noise should be recoverable."""
+        from arqitect.critic.qualify_nerve import _extract_json
+        raw = f"Here is the result: {json.dumps(data)} end"
+        result = _extract_json(raw)
+        assert result == data
+
+    @given(st.lists(st.integers(), min_size=1, max_size=10))
+    @settings(max_examples=20)
+    def test_roundtrips_valid_json_arrays(self, data):
+        """Any valid JSON array wrapped in noise should be recoverable."""
+        from arqitect.critic.qualify_nerve import _extract_json
+        raw = f"prefix {json.dumps(data)} suffix"
+        result = _extract_json(raw)
+        assert result == data
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve._parse_test_case_response
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestParseTestCaseResponse:
+    """Contract: parse LLM output into test case list regardless of wrapping format."""
+
     def test_bare_array(self):
         from arqitect.critic.qualify_nerve import _parse_test_case_response
         raw = json.dumps([{"input": "hi", "output": "hello"}])
-        assert _parse_test_case_response(raw) is not None
-        assert len(_parse_test_case_response(raw)) == 1
+        result = _parse_test_case_response(raw)
+        assert result is not None
+        assert len(result) == 1
 
     def test_wrapped_object_test_cases(self):
         from arqitect.critic.qualify_nerve import _parse_test_case_response
@@ -137,12 +167,25 @@ class TestParseTestCaseResponse:
         raw = json.dumps({"something": "else"})
         assert _parse_test_case_response(raw) is None
 
+    @given(st.sampled_from(["test_cases", "tests", "cases", "data"]))
+    @settings(max_examples=4)
+    def test_all_wrapper_keys_accepted(self, key):
+        """All documented wrapper keys must extract the inner list."""
+        from arqitect.critic.qualify_nerve import _parse_test_case_response
+        payload = {key: [{"input": "x", "output": "y"}]}
+        result = _parse_test_case_response(json.dumps(payload))
+        assert result is not None
+        assert result[0]["input"] == "x"
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve._deterministic_check
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestDeterministicCheck:
+    """Contract: fast checks return a score; None means 'defer to LLM'."""
+
     def test_empty_output_scores_zero(self):
         from arqitect.critic.qualify_nerve import _deterministic_check
         assert _deterministic_check("", "some input") == 0.0
@@ -168,12 +211,22 @@ class TestDeterministicCheck:
         from arqitect.critic.qualify_nerve import _deterministic_check
         assert _deterministic_check("timed out waiting for response", "q") == 0.1
 
+    @given(st.sampled_from(["Error:", "Traceback", "timed out", "not found", "failed to"]))
+    @settings(max_examples=5)
+    def test_all_error_markers_detected(self, marker):
+        """Every documented error marker must produce a 0.1 score."""
+        from arqitect.critic.qualify_nerve import _deterministic_check
+        assert _deterministic_check(f"prefix {marker} suffix", "query") == 0.1
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve._is_junk_rule
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestIsJunkRule:
+    """Contract: metric-leak and vague-filler rules are rejected."""
+
     def test_metric_leak_detected(self):
         from arqitect.critic.qualify_nerve import _is_junk_rule
         assert _is_junk_rule("Improve embedding similarity for better results") is True
@@ -190,12 +243,25 @@ class TestIsJunkRule:
         from arqitect.critic.qualify_nerve import _is_junk_rule
         assert _is_junk_rule("Optimize cosine similarity between output and expected") is True
 
+    @given(st.sampled_from([
+        "embedding similarity", "embedding score", "cosine similarity",
+        "scoring", "low score", "high score", "improve score",
+    ]))
+    @settings(max_examples=7)
+    def test_all_metric_leak_terms_rejected(self, term):
+        """Every metric-leak term must be flagged as junk."""
+        from arqitect.critic.qualify_nerve import _is_junk_rule
+        assert _is_junk_rule(f"Use {term} to improve results") is True
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve._is_duplicate_rule
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestIsDuplicateRule:
+    """Contract: overlapping rules are flagged; novel rules pass."""
+
     def test_duplicate_detected(self):
         from arqitect.critic.qualify_nerve import _is_duplicate_rule
         existing = "Rule: Always include the unit in conversion results"
@@ -217,7 +283,10 @@ class TestIsDuplicateRule:
 # qualify_nerve._is_junk_description
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestIsJunkDescription:
+    """Contract: reconciler-jargon descriptions are rejected."""
+
     def test_junk_description_detected(self):
         from arqitect.critic.qualify_nerve import _is_junk_description
         assert _is_junk_description("Refined rule to improve scoring cases") is True
@@ -226,12 +295,26 @@ class TestIsJunkDescription:
         from arqitect.critic.qualify_nerve import _is_junk_description
         assert _is_junk_description("Solve math problems: arithmetic, algebra") is False
 
+    @given(st.sampled_from([
+        "embedding similarity", "embedding score", "refine",
+        "scoring cases", "improve score", "low scoring",
+        "high embedding", "cosine",
+    ]))
+    @settings(max_examples=8)
+    def test_all_junk_terms_detected(self, term):
+        """Every junk term must flag the description."""
+        from arqitect.critic.qualify_nerve import _is_junk_description
+        assert _is_junk_description(f"A description with {term} inside") is True
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve._is_description_drift
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestIsDescriptionDrift:
+    """Contract: <20% word overlap with original means drift."""
+
     def test_drift_detected(self):
         from arqitect.critic.qualify_nerve import _is_description_drift
         orig = "Weather forecasting for US cities"
@@ -249,12 +332,21 @@ class TestIsDescriptionDrift:
         assert _is_description_drift("", "anything") is False
         assert _is_description_drift("something", "") is False
 
+    def test_identical_descriptions_no_drift(self):
+        """Identical descriptions must never drift."""
+        from arqitect.critic.qualify_nerve import _is_description_drift
+        desc = "Real-time weather forecasting for US cities"
+        assert _is_description_drift(desc, desc) is False
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve._extract_tool_errors
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestExtractToolErrors:
+    """Contract: structured tool errors extracted from stderr patterns."""
+
     def test_pattern1_tool_call_failed(self):
         from arqitect.critic.qualify_nerve import _extract_tool_errors
         failures = [{
@@ -304,7 +396,10 @@ class TestExtractToolErrors:
 # qualify_nerve._apply_tool_fix / _rollback_tool_fix / _cleanup_bak_files
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestToolFixLifecycle:
+    """Contract: tool fixes are applied atomically with backup/rollback."""
+
     def test_apply_tool_fix_success(self, _patch_module_globals):
         from arqitect.critic.qualify_nerve import _apply_tool_fix
         tools_dir = _patch_module_globals["tools_dir"]
@@ -318,7 +413,7 @@ class TestToolFixLifecycle:
         assert result is True
         with open(tool_path) as f:
             assert "fixed" in f.read()
-        # Backup should exist
+        # Backup must exist for rollback
         assert os.path.isfile(tool_path + ".bak")
 
     def test_apply_rejects_unknown_tool(self, _patch_module_globals):
@@ -388,7 +483,10 @@ class TestToolFixLifecycle:
 # qualify_nerve.evaluate_nerve_output
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestEvaluateNerveOutput:
+    """Contract: layered evaluation -- deterministic checks first, then LLM."""
+
     def test_empty_output_fails_deterministically(self):
         from arqitect.critic.qualify_nerve import evaluate_nerve_output
         test_case = {"input": "hello", "output": "greeting"}
@@ -432,12 +530,28 @@ class TestEvaluateNerveOutput:
         assert result["passed"] is False
         assert "parse" in result["reasoning"].lower()
 
+    def test_result_always_has_required_keys(self):
+        """Contract: every result dict has passed, score, reasoning, issue."""
+        from arqitect.critic.qualify_nerve import evaluate_nerve_output
+        test_case = {"input": "hello", "output": "greeting"}
+        nerve_output = {"raw_stdout": "", "raw_stderr": "", "exit_code": 0, "timed_out": False}
+        result = evaluate_nerve_output(test_case, nerve_output)
+        assert result == {
+            "passed": IsInstance(bool),
+            "score": IsFloat,
+            "reasoning": IsStr,
+            "issue": IsStr,
+        }
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve.generate_test_cases
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGenerateTestCases:
+    """Contract: brain-size gated; returns tagged test cases or empty list."""
+
     def test_small_brain_returns_empty(self):
         """Small brains are gated from generating test cases."""
         from arqitect.critic.qualify_nerve import generate_test_cases
@@ -468,12 +582,24 @@ class TestGenerateTestCases:
             result = generate_test_cases("weather", "get weather")
         assert result == []
 
+    @given(st.sampled_from(["tiny", "tinylm", "small"]))
+    @settings(max_examples=3)
+    def test_non_medium_large_brains_gated(self, size):
+        """Only medium and large brains may generate test cases."""
+        from arqitect.critic.qualify_nerve import generate_test_cases
+        with patch("arqitect.brain.adapters.get_model_size_class", return_value=size):
+            result = generate_test_cases("weather", "get weather")
+        assert result == []
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve.run_nerve_with_input
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestRunNerveWithInput:
+    """Contract: run a nerve subprocess and return structured result dict."""
+
     def test_nerve_not_found(self, _patch_module_globals):
         from arqitect.critic.qualify_nerve import run_nerve_with_input
         mem_mgr = MagicMock()
@@ -506,7 +632,6 @@ class TestRunNerveWithInput:
 
     def test_timeout(self, _patch_module_globals):
         from arqitect.critic.qualify_nerve import run_nerve_with_input
-        import subprocess
         nerves_dir = _patch_module_globals["nerves_dir"]
         nerve_dir = os.path.join(nerves_dir, "slow")
         os.makedirs(nerve_dir)
@@ -539,12 +664,43 @@ class TestRunNerveWithInput:
         assert result["exit_code"] == -1
         assert "permission denied" in result["raw_stderr"]
 
+    def test_result_shape_on_success(self, _patch_module_globals):
+        """Contract: successful result always has all required keys."""
+        from arqitect.critic.qualify_nerve import run_nerve_with_input
+        nerves_dir = _patch_module_globals["nerves_dir"]
+        nerve_dir = os.path.join(nerves_dir, "shape_test")
+        os.makedirs(nerve_dir)
+        with open(os.path.join(nerve_dir, "nerve.py"), "w") as f:
+            f.write("print('hello')\n")
+
+        mem_mgr = MagicMock()
+        mem_mgr.get_env_for_nerve.return_value = {}
+
+        mock_result = MagicMock()
+        mock_result.stdout = "hello"
+        mock_result.stderr = ""
+        mock_result.returncode = 0
+
+        with patch("arqitect.critic.qualify_nerve.subprocess.run", return_value=mock_result):
+            result = run_nerve_with_input("shape_test", "hi", mem_mgr)
+
+        assert result == {
+            "raw_stdout": IsStr,
+            "raw_stderr": IsStr,
+            "parsed": None,  # "hello" is not valid JSON
+            "exit_code": IsInstance(int),
+            "timed_out": IsInstance(bool),
+        }
+
 
 # ---------------------------------------------------------------------------
 # qualify_nerve._consolidate_prompt
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestConsolidatePrompt:
+    """Contract: rewrite prompt or fall back to original on error."""
+
     def test_successful_consolidation(self):
         from arqitect.critic.qualify_nerve import _consolidate_prompt
         consolidated = "You are a weather assistant. Always include units."
@@ -563,7 +719,10 @@ class TestConsolidatePrompt:
 # qualify_tool._extract_json
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestExtractJsonTool:
+    """Contract: same JSON extraction semantics as qualify_nerve variant."""
+
     def test_plain_json(self):
         from arqitect.critic.qualify_tool import _extract_json
         assert _extract_json('{"a": 1}') == {"a": 1}
@@ -586,7 +745,10 @@ class TestExtractJsonTool:
 # qualify_tool.generate_tool_tests
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGenerateToolTests:
+    """Contract: produce test cases from LLM or empty list on failure."""
+
     def test_returns_parsed_tests(self):
         from arqitect.critic.qualify_tool import generate_tool_tests
         cases = [{"args": {"q": "hi"}, "expected_behavior": "greet", "category": "happy_path"}]
@@ -606,7 +768,10 @@ class TestGenerateToolTests:
 # qualify_tool.call_tool
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestCallTool:
+    """Contract: HTTP call to MCP returns structured success/failure dict."""
+
     def test_successful_call(self):
         from arqitect.critic.qualify_tool import call_tool
         import responses as responses_lib
@@ -674,12 +839,34 @@ class TestCallTool:
             result = call_tool("t", "raw string")
         assert result["success"] is True
 
+    def test_result_always_has_required_keys(self):
+        """Contract: result dict always has success, result, error, latency_ms."""
+        from arqitect.critic.qualify_tool import call_tool
+        import responses as responses_lib
+        with responses_lib.RequestsMock() as rsps:
+            rsps.add(
+                responses_lib.POST,
+                "http://localhost:9999/call/t",
+                json={"result": "ok"},
+                status=200,
+            )
+            result = call_tool("t", {"q": "x"})
+        assert result == {
+            "success": IsInstance(bool),
+            "result": IsStr | None,
+            "error": IsStr | None,
+            "latency_ms": IsInstance(int),
+        }
+
 
 # ---------------------------------------------------------------------------
 # qualify_tool.evaluate_tool_result
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestEvaluateToolResult:
+    """Contract: evaluate tool call result via LLM, with fallback on parse error."""
+
     def test_successful_evaluation(self):
         from arqitect.critic.qualify_tool import evaluate_tool_result
         tc = {"args": {"q": "hi"}, "expected_behavior": "greet", "category": "happy_path"}
@@ -704,7 +891,10 @@ class TestEvaluateToolResult:
 # qualify_tool.quarantine_tool
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestQuarantineTool:
+    """Contract: remove tool file or return empty string if missing."""
+
     def test_removes_existing_tool(self, _patch_module_globals):
         from arqitect.critic.qualify_tool import quarantine_tool
         tools_dir = _patch_module_globals["tools_dir"]
@@ -725,7 +915,10 @@ class TestQuarantineTool:
 # qualify_tool.qualify_tool (main entry)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestQualifyTool:
+    """Contract: orchestrate test generation, calling, and evaluation."""
+
     def test_no_tests_returns_unqualified(self):
         from arqitect.critic.qualify_tool import qualify_tool
         with patch("arqitect.critic.qualify_tool.generate_tool_tests", return_value=[]):
@@ -772,7 +965,6 @@ class TestQualifyTool:
              patch("arqitect.critic.qualify_tool.call_tool", return_value=call_result) as mock_call, \
              patch("arqitect.critic.qualify_tool.evaluate_tool_result", return_value=eval_result):
             qualify_tool("t", "desc", "params")
-        # The args should be wrapped
         called_args = mock_call.call_args[0][1]
         assert isinstance(called_args, dict)
         assert "query" in called_args
@@ -796,7 +988,10 @@ class TestQualifyTool:
 # qualify_nerve._get_max_system_tokens
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetMaxSystemTokens:
+    """Contract: read from yaml or fall back to default."""
+
     def test_returns_default_on_error(self):
         from arqitect.critic.qualify_nerve import _get_max_system_tokens, _DEFAULT_MAX_SYSTEM_TOKENS
         with patch("builtins.open", side_effect=FileNotFoundError):
@@ -817,14 +1012,16 @@ class TestGetMaxSystemTokens:
 # qualify_nerve._publish_progress
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestPublishProgress:
+    """Contract: publish to Redis channel; never raise on errors."""
+
     def test_publishes_to_redis(self, _patch_module_globals):
         from arqitect.critic.qualify_nerve import _publish_progress
         redis_client = _patch_module_globals["redis"]
-        # Subscribe to channel
         pubsub = redis_client.pubsub()
         pubsub.subscribe("nerve:qualification")
-        # Consume subscription message
+        # Consume the subscription confirmation message
         pubsub.get_message()
 
         _publish_progress("test_nerve", 0.85, True, ["tool1"], 2, 3)
@@ -839,5 +1036,5 @@ class TestPublishProgress:
         """Never raises even when Redis is broken."""
         from arqitect.critic.qualify_nerve import _publish_progress
         with patch.object(_patch_module_globals["redis"], "publish", side_effect=ConnectionError):
-            # Should not raise
+            # Must not raise
             _publish_progress("n", 0.5, None, [], 1, 3)

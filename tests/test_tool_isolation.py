@@ -11,11 +11,71 @@ import json
 import os
 import subprocess
 import sys
-import threading
-import time
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
+from dirty_equals import IsInstance, IsStr
+from hypothesis import given, settings, HealthCheck
+from hypothesis import strategies as st
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+TOOL_RPC_CODE = (
+    'import json, sys\n'
+    'sys.stdout.write(json.dumps({"ready": True}) + "\\n")\n'
+    'sys.stdout.flush()\n'
+    'for line in sys.stdin:\n'
+    '    line = line.strip()\n'
+    '    if not line:\n'
+    '        continue\n'
+    '    req = json.loads(line)\n'
+    '    params = req.get("params", {})\n'
+    '    try:\n'
+    '        result = str(int(params.get("a", 0)) + int(params.get("b", 0)))\n'
+    '        resp = {"id": req.get("id"), "result": result}\n'
+    '    except Exception as e:\n'
+    '        resp = {"id": req.get("id"), "error": str(e)}\n'
+    '    sys.stdout.write(json.dumps(resp) + "\\n")\n'
+    '    sys.stdout.flush()\n'
+)
+
+SIMPLE_RPC_CODE = '''\
+import json, sys
+sys.stdout.write(json.dumps({"ready": True}) + "\\n")
+sys.stdout.flush()
+for line in sys.stdin:
+    req = json.loads(line.strip())
+    sys.stdout.write(json.dumps({"id": req.get("id"), "result": "ok"}) + "\\n")
+    sys.stdout.flush()
+'''
+
+
+def _write_tool_manifest(tool_dir, name, **overrides):
+    """Write a tool.json manifest into the given directory.
+
+    Args:
+        tool_dir: pathlib.Path for the tool directory.
+        name: Tool name.
+        **overrides: Fields to override in the manifest.
+
+    Returns:
+        The written manifest dict.
+    """
+    manifest = {
+        "name": name,
+        "version": "1.0.0",
+        "description": f"Tool: {name}",
+        "params": {},
+        "runtime": "python",
+        "entry": "run.py",
+        "timeout": 10,
+        **overrides,
+    }
+    (tool_dir / "tool.json").write_text(json.dumps(manifest))
+    return manifest
 
 
 # ---------------------------------------------------------------------------
@@ -33,40 +93,15 @@ def tools_dir(tmp_path):
 
 @pytest.fixture
 def dir_tool(tools_dir):
-    """Create a directory-based tool with tool.json."""
+    """Create a directory-based tool with tool.json and an adder run.py."""
     tool_dir = tools_dir / "adder_tool"
     tool_dir.mkdir()
-
-    manifest = {
-        "name": "adder_tool",
-        "version": "1.0.0",
-        "description": "Add two numbers",
-        "params": {"a": {"type": "string"}, "b": {"type": "string"}},
-        "runtime": "python",
-        "entry": "run.py",
-        "timeout": 10,
-    }
-    (tool_dir / "tool.json").write_text(json.dumps(manifest))
-
-    # Write a stdio JSON-RPC entry point
-    code = '''import json, sys
-sys.stdout.write(json.dumps({"ready": True}) + "\\n")
-sys.stdout.flush()
-for line in sys.stdin:
-    line = line.strip()
-    if not line:
-        continue
-    req = json.loads(line)
-    params = req.get("params", {})
-    try:
-        result = str(int(params.get("a", 0)) + int(params.get("b", 0)))
-        resp = {"id": req.get("id"), "result": result}
-    except Exception as e:
-        resp = {"id": req.get("id"), "error": str(e)}
-    sys.stdout.write(json.dumps(resp) + "\\n")
-    sys.stdout.flush()
-'''
-    (tool_dir / "run.py").write_text(code)
+    _write_tool_manifest(
+        tool_dir, "adder_tool",
+        description="Add two numbers",
+        params={"a": {"type": "string"}, "b": {"type": "string"}},
+    )
+    (tool_dir / "run.py").write_text(TOOL_RPC_CODE)
     return tool_dir
 
 
@@ -77,6 +112,7 @@ for line in sys.stdin:
 class TestToolManagerScan:
     """Registry scanning discovers tools from mcp_tools/."""
 
+    @pytest.mark.timeout(10)
     def test_scans_tool_dir(self, tools_dir, dir_tool):
         """Directory-based tools with tool.json are discovered."""
         from arqitect.mcp.tool_manager import ToolManager
@@ -89,6 +125,7 @@ class TestToolManagerScan:
         assert meta is not None
         assert meta.version == "1.0.0"
 
+    @pytest.mark.timeout(10)
     def test_skips_underscore_files(self, tools_dir):
         """Files starting with _ are ignored."""
         (tools_dir / "_internal.py").write_text("def run(): pass")
@@ -100,9 +137,9 @@ class TestToolManagerScan:
 
         assert "_internal" not in mgr.list_tools()
 
+    @pytest.mark.timeout(10)
     def test_scan_ignores_bare_py(self, tools_dir, dir_tool):
         """Bare .py files are ignored, only directory-based tools are discovered."""
-        # Create a bare .py file that should be ignored
         (tools_dir / "bare_tool.py").write_text("def run(): pass")
 
         from arqitect.mcp.tool_manager import ToolManager
@@ -114,6 +151,27 @@ class TestToolManagerScan:
         assert "bare_tool" not in tools
         assert "adder_tool" in tools
 
+    @pytest.mark.timeout(10)
+    @given(name=st.from_regex(r"[a-z][a-z0-9_]{2,20}", fullmatch=True))
+    @settings(max_examples=5, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_scan_discovers_arbitrary_tool_names(self, tools_dir, name):
+        """Any valid tool name in a directory with tool.json is discovered."""
+        from arqitect.mcp.tool_manager import ToolManager
+
+        tool_dir = tools_dir / name
+        tool_dir.mkdir(exist_ok=True)
+        _write_tool_manifest(tool_dir, name)
+        (tool_dir / "run.py").write_text(SIMPLE_RPC_CODE)
+
+        mgr = ToolManager()
+        mgr.scan()
+
+        assert name in mgr.list_tools()
+        meta = mgr.get_meta(name)
+        assert meta is not None
+        assert meta.name == name
+        assert meta.version == IsStr()
+
 
 # ---------------------------------------------------------------------------
 # ToolManager — subprocess calling
@@ -122,6 +180,7 @@ class TestToolManagerScan:
 class TestToolManagerCall:
     """Calling tools via subprocess JSON-RPC."""
 
+    @pytest.mark.timeout(10)
     def test_call_dir_tool(self, tools_dir, dir_tool):
         """Directory-based tool can be spawned and called via JSON-RPC."""
         from arqitect.mcp.tool_manager import ToolManager
@@ -136,6 +195,7 @@ class TestToolManagerCall:
         assert result == "10"
         mgr.shutdown()
 
+    @pytest.mark.timeout(10)
     def test_call_unknown_tool_raises(self, tools_dir):
         """Calling a non-existent tool raises ValueError."""
         from arqitect.mcp.tool_manager import ToolManager
@@ -146,6 +206,25 @@ class TestToolManagerCall:
         with pytest.raises(ValueError, match="Unknown tool"):
             mgr.call("nonexistent", {})
 
+    @pytest.mark.timeout(10)
+    @given(
+        a=st.integers(min_value=-1000, max_value=1000),
+        b=st.integers(min_value=-1000, max_value=1000),
+    )
+    @settings(max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_call_with_arbitrary_integers(self, tools_dir, dir_tool, a, b):
+        """Adder tool returns the correct sum for arbitrary integer pairs."""
+        from arqitect.mcp.tool_manager import ToolManager
+
+        (dir_tool / ".env_version").write_text("1.0.0")
+
+        mgr = ToolManager()
+        mgr.scan()
+
+        result = mgr.call("adder_tool", {"a": str(a), "b": str(b)})
+        assert result == str(a + b)
+        mgr.shutdown()
+
 
 # ---------------------------------------------------------------------------
 # ToolManager — LRU eviction
@@ -154,6 +233,7 @@ class TestToolManagerCall:
 class TestToolManagerLRU:
     """Pool respects max size via LRU eviction."""
 
+    @pytest.mark.timeout(10)
     def test_evicts_lru_when_pool_full(self, tools_dir):
         """When pool hits max, the least recently used tool is evicted."""
         from arqitect.mcp.tool_manager import ToolManager
@@ -163,22 +243,9 @@ class TestToolManagerLRU:
             name = f"tool_{i}"
             tool_dir = tools_dir / name
             tool_dir.mkdir()
-            manifest = {
-                "name": name, "version": "1.0.0",
-                "description": f"Tool {i}", "params": {},
-                "runtime": "python", "entry": "run.py", "timeout": 5,
-            }
-            (tool_dir / "tool.json").write_text(json.dumps(manifest))
+            _write_tool_manifest(tool_dir, name, description=f"Tool {i}", timeout=5)
             (tool_dir / ".env_version").write_text("1.0.0")
-            code = '''import json, sys
-sys.stdout.write(json.dumps({"ready": True}) + "\\n")
-sys.stdout.flush()
-for line in sys.stdin:
-    req = json.loads(line.strip())
-    sys.stdout.write(json.dumps({"id": req.get("id"), "result": "ok"}) + "\\n")
-    sys.stdout.flush()
-'''
-            (tool_dir / "run.py").write_text(code)
+            (tool_dir / "run.py").write_text(SIMPLE_RPC_CODE)
 
         mgr = ToolManager(max_pool=2)
         mgr.scan()
@@ -204,6 +271,7 @@ for line in sys.stdin:
 class TestToolManagerHealth:
     """Health check removes dead processes."""
 
+    @pytest.mark.timeout(10)
     def test_removes_dead_process(self, tools_dir, dir_tool):
         """Dead processes are cleaned up by health_check."""
         from arqitect.mcp.tool_manager import ToolManager
@@ -243,6 +311,7 @@ def run(query: str) -> str:
         path.write_text(code)
         return path
 
+    @pytest.mark.timeout(10)
     def test_load_tool_module(self, tools_dir, tool_py):
         """_load_tool_module finds the run() function."""
         from arqitect.mcp.tool_runner import _load_tool_module
@@ -252,6 +321,7 @@ def run(query: str) -> str:
         assert callable(func)
         assert func(query="test") == "echo: test"
 
+    @pytest.mark.timeout(10)
     def test_load_named_function(self, tools_dir):
         """_load_tool_module finds a named function matching the filename."""
         code = '''
@@ -268,6 +338,7 @@ def greet_tool(name: str) -> str:
         assert tool_name == "greet_tool"
         assert func(name="World") == "Hello, World!"
 
+    @pytest.mark.timeout(10)
     def test_runner_subprocess(self, tools_dir, tool_py):
         """tool_runner.py works as a subprocess speaking JSON-RPC."""
         runner = os.path.join(
@@ -297,6 +368,21 @@ def greet_tool(name: str) -> str:
         proc.terminate()
         proc.wait()
 
+    @pytest.mark.timeout(10)
+    def test_load_module_without_callable_raises(self, tools_dir):
+        """_load_tool_module raises ValueError when no callable is found."""
+        code = '''
+# No run() or matching function
+DATA = 42
+'''
+        path = tools_dir / "no_func.py"
+        path.write_text(code)
+
+        from arqitect.mcp.tool_runner import _load_tool_module
+
+        with pytest.raises(ValueError, match="No callable"):
+            _load_tool_module(str(path))
+
 
 # ---------------------------------------------------------------------------
 # env_builder
@@ -305,12 +391,14 @@ def greet_tool(name: str) -> str:
 class TestEnvBuilder:
     """Environment builder manages per-tool isolated environments."""
 
+    @pytest.mark.timeout(10)
     def test_env_not_ready_without_version_file(self, tools_dir, dir_tool):
         """env_ready returns False when .env_version is missing."""
         from arqitect.mcp.env_builder import env_ready
 
         assert not env_ready(str(dir_tool))
 
+    @pytest.mark.timeout(10)
     def test_env_ready_with_matching_version(self, tools_dir, dir_tool):
         """env_ready returns True when version matches and venv exists."""
         from arqitect.mcp.env_builder import env_ready
@@ -320,6 +408,7 @@ class TestEnvBuilder:
 
         assert env_ready(str(dir_tool))
 
+    @pytest.mark.timeout(10)
     def test_env_not_ready_version_mismatch(self, tools_dir, dir_tool):
         """env_ready returns False when version doesn't match."""
         from arqitect.mcp.env_builder import env_ready
@@ -329,6 +418,28 @@ class TestEnvBuilder:
 
         assert not env_ready(str(dir_tool))
 
+    @pytest.mark.timeout(10)
+    @given(
+        installed=st.from_regex(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", fullmatch=True),
+        manifest=st.from_regex(r"[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}", fullmatch=True),
+    )
+    @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_env_ready_version_comparison_is_exact(self, tools_dir, installed, manifest):
+        """env_ready uses exact string comparison, not semver ordering."""
+        from arqitect.mcp.env_builder import env_ready
+
+        tool_dir = tools_dir / "version_test"
+        tool_dir.mkdir(exist_ok=True)
+        _write_tool_manifest(tool_dir, "version_test", version=manifest)
+        (tool_dir / ".env_version").write_text(installed)
+        (tool_dir / ".venv").mkdir(exist_ok=True)
+
+        if installed == manifest:
+            assert env_ready(str(tool_dir))
+        else:
+            assert not env_ready(str(tool_dir))
+
+    @pytest.mark.timeout(10)
     def test_cleanup_env_removes_artifacts(self, tools_dir, dir_tool):
         """cleanup_env removes venv, node_modules, and version file."""
         from arqitect.mcp.env_builder import cleanup_env
@@ -341,6 +452,7 @@ class TestEnvBuilder:
         assert not (dir_tool / ".venv").exists()
         assert not (dir_tool / ".env_version").exists()
 
+    @pytest.mark.timeout(10)
     def test_build_env_python(self, tools_dir, dir_tool):
         """build_env creates a Python venv for python runtime tools."""
         from arqitect.mcp.env_builder import build_env, env_ready
@@ -350,6 +462,7 @@ class TestEnvBuilder:
         assert (dir_tool / ".env_version").read_text() == "1.0.0"
         assert env_ready(str(dir_tool))
 
+    @pytest.mark.timeout(10)
     def test_rebuild_env(self, tools_dir, dir_tool):
         """rebuild_env tears down and recreates the environment."""
         from arqitect.mcp.env_builder import build_env, rebuild_env
@@ -366,20 +479,37 @@ class TestEnvBuilder:
         assert rebuild_env(str(dir_tool))
         assert (dir_tool / ".env_version").read_text() == "2.0.0"
 
+    @pytest.mark.timeout(10)
     def test_build_env_binary_runtime(self, tools_dir):
         """Binary runtime just checks that the entry file exists."""
         from arqitect.mcp.env_builder import build_env
 
         tool_dir = tools_dir / "bin_tool"
         tool_dir.mkdir()
-        manifest = {
-            "name": "bin_tool", "version": "1.0.0",
-            "runtime": "binary", "entry": "run",
-        }
-        (tool_dir / "tool.json").write_text(json.dumps(manifest))
+        _write_tool_manifest(tool_dir, "bin_tool", runtime="binary", entry="run")
         (tool_dir / "run").write_text("#!/bin/sh\necho ok")
 
         assert build_env(str(tool_dir))
+
+    @pytest.mark.timeout(10)
+    def test_build_env_no_manifest_returns_false(self, tools_dir):
+        """build_env returns False when tool.json is missing."""
+        from arqitect.mcp.env_builder import build_env
+
+        empty_dir = tools_dir / "empty"
+        empty_dir.mkdir()
+
+        assert not build_env(str(empty_dir))
+
+    @pytest.mark.timeout(10)
+    def test_env_ready_no_manifest_returns_false(self, tools_dir):
+        """env_ready returns False when tool.json is missing entirely."""
+        from arqitect.mcp.env_builder import env_ready
+
+        empty_dir = tools_dir / "no_manifest"
+        empty_dir.mkdir()
+
+        assert not env_ready(str(empty_dir))
 
 
 # ---------------------------------------------------------------------------
@@ -396,6 +526,7 @@ class TestSeedToolDirectories:
              patch("arqitect.brain.community.urllib.request.urlopen"):
             yield
 
+    @pytest.mark.timeout(10)
     def test_seeds_directory_tool(self, tools_dir, tmp_path):
         """Directory-based tools with version+files get a .needs_build marker."""
         manifest = {
@@ -426,6 +557,7 @@ class TestSeedToolDirectories:
         if tool_dir.exists():
             assert (tool_dir / ".needs_build").exists()
 
+    @pytest.mark.timeout(10)
     def test_skips_up_to_date_directory_tool(self, tools_dir, tmp_path):
         """Directory tools already at the manifest version are skipped."""
         manifest = {
@@ -466,7 +598,46 @@ class TestSeedToolDirectories:
 class TestToolLifecycleChannel:
     """The TOOL_LIFECYCLE channel exists in Channel enum."""
 
+    @pytest.mark.timeout(10)
     def test_channel_exists(self):
         from arqitect.types import Channel
         assert hasattr(Channel, "TOOL_LIFECYCLE")
         assert Channel.TOOL_LIFECYCLE == "tool:lifecycle"
+
+    @pytest.mark.timeout(10)
+    def test_channel_value_is_string(self):
+        from arqitect.types import Channel
+        assert str(Channel.TOOL_LIFECYCLE) == IsStr(regex=r"^tool:.+")
+
+
+# ---------------------------------------------------------------------------
+# ToolMeta dataclass contract
+# ---------------------------------------------------------------------------
+
+class TestToolMeta:
+    """ToolMeta dataclass holds expected fields from tool.json."""
+
+    @pytest.mark.timeout(10)
+    def test_get_meta_returns_correct_type(self, tools_dir, dir_tool):
+        """get_meta returns a ToolMeta with all required attributes."""
+        from arqitect.mcp.tool_manager import ToolManager, ToolMeta
+
+        mgr = ToolManager()
+        mgr.scan()
+
+        meta = mgr.get_meta("adder_tool")
+        assert meta == IsInstance(ToolMeta)
+        assert meta.name == "adder_tool"
+        assert meta.runtime == "python"
+        assert meta.entry == "run.py"
+        assert meta.tool_dir == str(dir_tool)
+
+    @pytest.mark.timeout(10)
+    def test_get_meta_unknown_returns_none(self, tools_dir):
+        """get_meta returns None for unregistered tools."""
+        from arqitect.mcp.tool_manager import ToolManager
+
+        mgr = ToolManager()
+        mgr.scan()
+
+        assert mgr.get_meta("nonexistent") is None

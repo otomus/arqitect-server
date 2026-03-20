@@ -21,27 +21,6 @@ def check_binary(name: str, install_hint: str = "") -> dict:
     }
 
 
-def check_ollama_model(model: str, url: str = "http://localhost:11434") -> dict:
-    """Check if an Ollama model is available."""
-    try:
-        import requests
-        resp = requests.get(f"{url}/api/tags", timeout=5)
-        resp.raise_for_status()
-        installed = [m["name"].split(":")[0] for m in resp.json().get("models", [])]
-        found = model in installed
-        return {
-            "installed": found,
-            "version": "latest" if found else "",
-            "install_hint": f"ollama pull {model}" if not found else "",
-        }
-    except Exception:
-        return {
-            "installed": False,
-            "version": "",
-            "install_hint": f"Start Ollama, then: ollama pull {model}",
-        }
-
-
 def check_python_module(name: str, install_hint: str = "") -> dict:
     """Check if a Python module is importable."""
     try:

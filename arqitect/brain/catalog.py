@@ -6,7 +6,7 @@ import time
 
 import requests
 
-from arqitect.config.loader import get_mcp_url
+from arqitect.config.loader import get_config, get_mcp_url
 from arqitect.brain.config import NERVES_DIR, SENSES_DIR, SENSE_DESCRIPTIONS, mem
 from arqitect.types import Sense
 
@@ -28,7 +28,17 @@ def list_nerves() -> list[str]:
 
 
 def _scan_filesystem_nerves(nerves: dict[str, str]) -> None:
-    """Register nerves found on disk but missing from the registry."""
+    """Scan NERVES_DIR for nerve directories and enrich descriptions from manifest.
+
+    Each directory containing a nerve.py is added to the result. Descriptions
+    are sourced from the community manifest cache when available, falling back
+    to any existing cold-memory description, then to the directory name.
+
+    Args:
+        nerves: Mutable dict to populate with {name: description}.
+    """
+    manifest_descs = _load_manifest_descriptions()
+
     for entry in os.listdir(NERVES_DIR):
         if entry.startswith(".") or entry == SENSES_SUBDIR:
             continue
@@ -36,14 +46,43 @@ def _scan_filesystem_nerves(nerves: dict[str, str]) -> None:
         if not os.path.isfile(nerve_py):
             continue
         if entry not in nerves:
-            mem.cold.register_nerve(entry, entry)
-            nerves[entry] = entry
+            desc = manifest_descs.get(entry) or entry
+            mem.cold.register_nerve(entry, desc)
+            nerves[entry] = desc
+
+
+def _load_manifest_descriptions() -> dict[str, str]:
+    """Load nerve descriptions from the community manifest cache.
+
+    Returns:
+        Mapping of nerve name to description string.
+    """
+    try:
+        from arqitect.brain.community import _load_cached_manifest
+        manifest = _load_cached_manifest()
+        if manifest:
+            return {
+                name: info.get("description", name)
+                for name, info in manifest.get("nerves", {}).items()
+            }
+    except ImportError:
+        pass
+    return {}
 
 
 def _ensure_core_senses(nerves: dict[str, str]) -> None:
-    """Guarantee all core senses are registered and present in the result."""
+    """Guarantee enabled core senses are registered and present in the result.
+
+    Senses disabled via ``senses.<name>.enabled: false`` in arqitect.yaml
+    are excluded from the catalog.
+
+    Args:
+        nerves: Mutable dict to populate with {name: description}.
+    """
     if os.path.isdir(SENSES_DIR):
         for entry in os.listdir(SENSES_DIR):
+            if not get_config(f"senses.{entry}.enabled", True):
+                continue
             nerve_py = os.path.join(SENSES_DIR, entry, "nerve.py")
             if os.path.isfile(nerve_py) and entry not in nerves:
                 desc = SENSE_DESCRIPTIONS.get(entry, f"Core sense: {entry}")
@@ -51,6 +90,8 @@ def _ensure_core_senses(nerves: dict[str, str]) -> None:
                 nerves[entry] = desc
 
     for sense in Sense:
+        if not get_config(f"senses.{sense}.enabled", True):
+            continue
         if sense not in nerves:
             desc = SENSE_DESCRIPTIONS.get(sense, f"Core sense: {sense}")
             mem.cold.register_sense(sense, desc)
@@ -58,21 +99,21 @@ def _ensure_core_senses(nerves: dict[str, str]) -> None:
 
 
 def discover_nerves() -> dict[str, str]:
-    """Discover ALL nerves from every source. Returns {name: description}.
+    """Discover nerves from filesystem and community manifest.
 
-    Sources (in priority order):
-      1. Cold memory registry (SQLite)
-      2. Filesystem scan (NERVES_DIR)
-      3. Core senses (SENSES_DIR + SENSE_DESCRIPTIONS)
+    Sources:
+      1. Filesystem (NERVES_DIR) — already filtered at seed time
+      2. Community manifest — for descriptions
+      3. Core senses (SENSES_DIR) — only enabled ones
 
-    No filtering — every nerve is returned regardless of qualification.
-    Registry descriptions take precedence over filesystem fallbacks.
+    No qualification filtering — every nerve on disk is returned.
+    Descriptions are enriched from the manifest when available.
     Filesystem-only nerves are auto-registered in cold memory.
-    Core senses are always included and registered as senses.
+    Enabled core senses are always included.
     """
     os.makedirs(NERVES_DIR, exist_ok=True)
 
-    nerves = mem.cold.list_nerves()
+    nerves: dict[str, str] = {}
     _scan_filesystem_nerves(nerves)
     _ensure_core_senses(nerves)
 

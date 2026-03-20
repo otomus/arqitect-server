@@ -10,6 +10,6 @@ class OpenRouterProvider(OpenAICompatProvider):
         super().__init__(
             api_key=api_key or get_secret("openrouter_api_key"),
             base_url="https://openrouter.ai/api/v1",
-            default_model="anthropic/claude-sonnet-4-20250514",
+            default_model="",
             **kwargs,
         )

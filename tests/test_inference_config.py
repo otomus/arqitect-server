@@ -1,10 +1,10 @@
-"""Tests for arqitect.inference.config — readiness checks, status reporting, setup guide."""
+"""Tests for arqitect.inference.config -- readiness checks, status reporting, setup guide."""
 
-import os
-import sys
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
+from dirty_equals import IsPositive
+from hypothesis import given, settings, strategies as st
 
 from arqitect.inference.config import (
     get_backend_type,
@@ -21,6 +21,7 @@ from arqitect.inference.config import (
 # REQUIRED_ROLES
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestRequiredRoles:
     """Verify REQUIRED_ROLES includes expected entries."""
 
@@ -31,11 +32,15 @@ class TestRequiredRoles:
         for role in ("brain", "nerve", "coder", "creative", "communication"):
             assert role in REQUIRED_ROLES
 
+    def test_required_roles_is_non_empty_list(self):
+        assert len(REQUIRED_ROLES) == IsPositive
+
 
 # ---------------------------------------------------------------------------
 # get_backend_type
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetBackendType:
     """Tests for get_backend_type."""
 
@@ -47,11 +52,19 @@ class TestGetBackendType:
     def test_returns_alternative_provider(self, _mock):
         assert get_backend_type() == "openai"
 
+    @given(provider=st.sampled_from(["gguf", "openai", "anthropic", "groq", "together_ai"]))
+    @settings(max_examples=10)
+    def test_returns_whatever_provider_is_configured(self, provider):
+        """get_backend_type is a pure passthrough to the config loader."""
+        with patch("arqitect.inference.config.get_inference_provider", return_value=provider):
+            assert get_backend_type() == provider
+
 
 # ---------------------------------------------------------------------------
 # get_model_name
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetModelName:
     """Tests for get_model_name."""
 
@@ -68,11 +81,19 @@ class TestGetModelName:
         """Empty string is falsy, so falls back to role name."""
         assert get_model_name("nerve") == "nerve"
 
+    @given(role=st.from_regex(r"[a-z_]{3,15}", fullmatch=True))
+    @settings(max_examples=15)
+    def test_fallback_always_returns_role_name(self, role):
+        """When config returns nothing, the role name itself is returned."""
+        with patch("arqitect.inference.config.get_model_for_role", return_value=None):
+            assert get_model_name(role) == role
+
 
 # ---------------------------------------------------------------------------
 # get_models_dir
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestGetModelsDir:
     """Tests for get_models_dir."""
 
@@ -85,6 +106,7 @@ class TestGetModelsDir:
 # check_gguf_ready
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestCheckGgufReady:
     """Tests for the GGUF readiness checker."""
 
@@ -93,7 +115,6 @@ class TestCheckGgufReady:
     @patch("arqitect.inference.config.get_models_dir")
     def test_all_present(self, mock_dir, mock_name, tmp_path):
         mock_dir.return_value = str(tmp_path)
-        # Create a file for every required role
         for role in REQUIRED_ROLES:
             mock_name.side_effect = lambda r: f"{r}.gguf"
             (tmp_path / f"{role}.gguf").touch()
@@ -116,21 +137,19 @@ class TestCheckGgufReady:
     @patch("arqitect.inference.config.get_models_dir")
     def test_partial_missing_includes_source(self, mock_dir, mock_name, tmp_path):
         mock_dir.return_value = str(tmp_path)
-        # Only create the brain model
         (tmp_path / "brain.gguf").touch()
         mock_name.side_effect = lambda r: f"{r}.gguf"
 
         ready, missing = check_gguf_ready()
         assert ready is False
         assert len(missing) == len(REQUIRED_ROLES) - 1
-        # Verify source info is included for roles that have registry entries
-        # (only "brain" has one, but it's present, so won't appear in missing)
 
 
 # ---------------------------------------------------------------------------
 # print_setup_guide
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestPrintSetupGuide:
     """Tests for the setup guide output."""
 
@@ -152,6 +171,7 @@ class TestPrintSetupGuide:
 # print_status_report
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestPrintStatusReport:
     """Tests for the status report printer."""
 

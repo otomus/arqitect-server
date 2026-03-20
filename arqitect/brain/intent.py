@@ -1,14 +1,14 @@
 """Intent classifier — determines if a user message is a workflow or a direct task.
 
 Isolated from the brain's system prompt to avoid bias. Uses the brain model
-(Qwen2.5-Coder-7B) with its own clean system prompt focused purely on intent detection.
+with its own clean system prompt focused purely on intent detection.
 """
 
 import json
 
 from arqitect.brain.config import BRAIN_MODEL
 from arqitect.brain.helpers import llm_generate, extract_json
-from arqitect.brain.types import IntentType
+from arqitect.types import IntentType
 
 
 _INTENT_SYSTEM = (

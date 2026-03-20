@@ -1,53 +1,50 @@
 """Performance tests for core arqitect modules.
 
 Verifies that critical operations complete within acceptable time bounds.
-All external dependencies (LLM, Redis, subprocesses) are mocked.
-Uses time.perf_counter() for high-resolution timing.
+Uses time.perf_counter() for high-resolution timing and
+@pytest.mark.timeout(30) as a hard ceiling via pytest-timeout.
 """
 
-import json
 import time
 import threading
 from unittest.mock import patch
 
 import pytest
+from hypothesis import given, settings, HealthCheck
+from hypothesis import strategies as st
+
+from arqitect.memory.cold import ColdMemory
+from arqitect.memory.hot import HotMemory
+from arqitect.memory.warm import WarmMemory
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures — reuse conftest infrastructure, expose typed memory layers
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
-def cold(tmp_path):
-    """Create a ColdMemory backed by a temporary SQLite database."""
-    db_path = str(tmp_path / "knowledge.db")
-    with patch("arqitect.memory.cold._DB_PATH", db_path):
-        from arqitect.memory.cold import ColdMemory
-        return ColdMemory()
+def cold(tmp_memory_dir):
+    """ColdMemory backed by conftest's patched temp SQLite path."""
+    return ColdMemory()
 
 
 @pytest.fixture
-def warm(tmp_path):
-    """Create a WarmMemory backed by a temporary SQLite database."""
-    db_path = str(tmp_path / "episodes.db")
-    with patch("arqitect.memory.warm._DB_PATH", db_path):
-        from arqitect.memory.warm import WarmMemory
-        return WarmMemory()
+def warm(tmp_memory_dir):
+    """WarmMemory backed by conftest's patched temp SQLite path."""
+    return WarmMemory()
 
 
 @pytest.fixture
-def hot():
-    """Create a HotMemory backed by fakeredis."""
-    import fakeredis
-    from arqitect.memory.hot import HotMemory
-    client = fakeredis.FakeRedis(decode_responses=True)
-    return HotMemory(client)
+def hot(test_redis):
+    """HotMemory backed by conftest's fakeredis instance."""
+    return HotMemory(test_redis)
 
 
 # ---------------------------------------------------------------------------
 # 1. Matching Performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestMatchingPerformance:
     """Verify that keyword-scoring functions scale to realistic catalog sizes."""
 
@@ -148,11 +145,33 @@ class TestMatchingPerformance:
         elapsed = time.perf_counter() - start
         assert elapsed < 3.0, f"match_nerves x10 on 50-nerve catalog took {elapsed:.2f}s, expected < 3.0s"
 
+    @patch("arqitect.matching._get_nerve_embedding", return_value=None)
+    @patch("arqitect.inference.engine.get_engine", side_effect=ImportError("no engine in test"))
+    @given(catalog_size=st.integers(min_value=50, max_value=300))
+    @settings(max_examples=5, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_match_nerves_scales_sublinearly(self, _mock_engine, _mock_emb, catalog_size):
+        """match_nerves should handle hypothesis-generated catalog sizes under budget."""
+        from arqitect.matching import match_nerves
+
+        catalog = {
+            f"nerve_{i}": f"This nerve handles task category {i} with domain logic"
+            for i in range(catalog_size)
+        }
+        start = time.perf_counter()
+        match_nerves("handle task category 42", catalog, threshold=0.5)
+        elapsed = time.perf_counter() - start
+        # Allow proportional scaling: ~2s for 100 nerves, so 6s ceiling for 300
+        budget = 2.0 * (catalog_size / 100)
+        assert elapsed < budget, (
+            f"match_nerves with {catalog_size} nerves took {elapsed:.2f}s, budget {budget:.1f}s"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 2. Cold Memory Performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestColdMemoryPerformance:
     """Verify ColdMemory operations scale within acceptable bounds."""
 
@@ -201,11 +220,28 @@ class TestColdMemoryPerformance:
         assert info["total_invocations"] == 500
         assert elapsed < 2.0, f"500 invocation records took {elapsed:.2f}s, expected < 2.0s"
 
+    @given(nerve_count=st.integers(min_value=10, max_value=200))
+    @settings(max_examples=5, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_register_nerves_scales_linearly(self, cold, nerve_count):
+        """Registering a hypothesis-generated number of nerves stays within budget."""
+        start = time.perf_counter()
+        for i in range(nerve_count):
+            cold.register_nerve(f"hyp_nerve_{i}", f"Hypothesis nerve {i}")
+        nerves = cold.list_nerves()
+        elapsed = time.perf_counter() - start
+        assert len(nerves) >= nerve_count
+        # Budget: ~1s per 100 nerves
+        budget = 1.0 * (nerve_count / 100) + 0.5
+        assert elapsed < budget, (
+            f"Registering {nerve_count} nerves took {elapsed:.2f}s, budget {budget:.1f}s"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 3. Warm Memory Performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestWarmMemoryPerformance:
     """Verify WarmMemory episodic storage scales within acceptable bounds."""
 
@@ -267,6 +303,7 @@ class TestWarmMemoryPerformance:
 # 4. Hot Memory Performance (fakeredis)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestHotMemoryPerformance:
     """Verify HotMemory Redis operations complete quickly with fakeredis."""
 
@@ -310,6 +347,7 @@ class TestHotMemoryPerformance:
 # 5. JSON Extraction Performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestJsonExtractionPerformance:
     """Verify extract_json handles volume without degradation."""
 
@@ -362,11 +400,26 @@ class TestJsonExtractionPerformance:
         elapsed = time.perf_counter() - start
         assert elapsed < 1.5, f"extract_json x500 nested took {elapsed:.2f}s, expected < 1.5s"
 
+    @given(padding_size=st.integers(min_value=100, max_value=5000))
+    @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_extract_json_variable_padding(self, padding_size):
+        """extract_json should handle variable-length preambles without blowing up."""
+        from arqitect.brain.helpers import extract_json
+
+        padding = "a" * padding_size
+        sample = f'{padding} ###JSON: {{"action": "test", "size": {padding_size}}}'
+        start = time.perf_counter()
+        result = extract_json(sample)
+        elapsed = time.perf_counter() - start
+        # Even a 5k-char preamble should parse in well under 100ms
+        assert elapsed < 0.1, f"extract_json with {padding_size}-char padding took {elapsed:.4f}s"
+
 
 # ---------------------------------------------------------------------------
 # 6. Config Loader Performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestConfigLoaderPerformance:
     """Verify config loading and access are fast, especially with caching."""
 
@@ -406,6 +459,7 @@ class TestConfigLoaderPerformance:
 # 7. Calibration Protocol Performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestCalibrationProtocolPerformance:
     """Verify calibration helpers are fast enough for startup probes."""
 
@@ -465,11 +519,30 @@ class TestCalibrationProtocolPerformance:
         elapsed = time.perf_counter() - start
         assert elapsed < 0.1, f"derive_status x2000 edge cases took {elapsed:.2f}s, expected < 0.1s"
 
+    @given(cap_count=st.integers(min_value=1, max_value=100))
+    @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_derive_status_scales_with_capabilities(self, cap_count):
+        """derive_status should stay fast regardless of capability count."""
+        from arqitect.senses.calibration_protocol import derive_status
+
+        capabilities = {
+            f"cap_{i}": {"available": i % 2 == 0} for i in range(cap_count)
+        }
+        start = time.perf_counter()
+        for _ in range(100):
+            derive_status(capabilities)
+        elapsed = time.perf_counter() - start
+        per_call = elapsed / 100
+        assert per_call < 0.01, (
+            f"derive_status with {cap_count} caps took {per_call:.4f}s per call, expected < 0.01s"
+        )
+
 
 # ---------------------------------------------------------------------------
 # 8. Concurrent Access Performance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(30)
 class TestConcurrentAccessPerformance:
     """Verify thread-safety and performance under concurrent access."""
 

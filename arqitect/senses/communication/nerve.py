@@ -14,11 +14,12 @@ import sys
 
 _SENSE_DIR = os.path.dirname(os.path.abspath(__file__))
 from arqitect.config.loader import get_project_root, get_sandbox_dir as _get_sandbox_dir
+from arqitect.types import Sense
 _PROJECT_ROOT = str(get_project_root())
 _PERSONALITY_PATH = os.path.join(_PROJECT_ROOT, "personality.json")
 _COLD_DB_PATH = os.path.join(str(get_project_root()), "memory", "knowledge.db")
 
-SENSE_NAME = "communication"
+SENSE_NAME = Sense.COMMUNICATION
 COMM_MODEL = "communication"
 def _load_adapter_description() -> str:
     try:
@@ -441,16 +442,9 @@ def calibrate() -> dict:
     # Check model availability via file existence (avoids loading full engine in subprocess)
     has_llm = False
     try:
-        from arqitect.inference.config import get_backend_type, get_model_name, get_models_dir
-        backend = get_backend_type()
-        if backend == "gguf":
-            model_file = get_model_name(COMM_MODEL)
-            has_llm = os.path.exists(os.path.join(get_models_dir(), model_file))
-        elif backend == "ollama":
-            has_llm = True  # Assume available if ollama backend configured
-        else:
-            from arqitect.inference.engine import get_engine
-            has_llm = get_engine().is_loaded(COMM_MODEL)
+        from arqitect.inference.config import get_model_name, get_models_dir
+        model_file = get_model_name(COMM_MODEL)
+        has_llm = os.path.exists(os.path.join(get_models_dir(), model_file))
     except Exception:
         has_llm = False
     gemma_status = {"installed": has_llm, "version": "latest" if has_llm else "", "install_hint": ""}

@@ -14,6 +14,7 @@ import yaml
 from arqitect.config.defaults import DEFAULTS
 from arqitect.config.loader import get_project_root, load_config
 from arqitect.inference.providers import PROVIDER_META, get_wizard_providers
+from arqitect.types import InferenceRole, Sense
 
 
 # ── Prompt helpers ───────────────────────────────────────────────────────
@@ -92,6 +93,9 @@ def _open_file_dialog(title: str, initial_dir: str = "", file_type: str = "") ->
     os_type = _detect_os()
 
     if os_type == "macos":
+        # macOS 'choose file of type' expects UTIs, not file extensions.
+        # Custom extensions like .gguf have no registered UTI, so the
+        # filter silently hides them. Skip the type clause on macOS.
         script = f'set theFile to choose file with prompt "{title}"'
         if resolved_dir:
             script = (
@@ -248,6 +252,58 @@ def _prompt_extra_config(config: dict, provider_name: str, *, before_model: bool
             config.setdefault(store_in, {})[key] = value
 
 
+def find_local_name(models_dir: Path, resolved_target: Path) -> str | None:
+    """Find a filename in models_dir that resolves to the same file.
+
+    Checks direct matches and symlinks so that picking a blob file
+    returns the symlink name (e.g. model-file.gguf) instead
+    of the raw target (sha256-60e05f...).
+
+    Args:
+        models_dir: Directory containing model files and symlinks.
+        resolved_target: Fully resolved path of the selected file.
+
+    Returns:
+        The entry name in models_dir that points to resolved_target,
+        or None if no match is found.
+    """
+    if not models_dir.is_dir():
+        return None
+    for entry in models_dir.iterdir():
+        if entry.resolve() == resolved_target:
+            return entry.name
+    return None
+
+
+def resolve_model_selection(
+    selected_path: str, models_dir: str
+) -> tuple[str, str]:
+    """Resolve a file-picker selection into (model_name, models_dir).
+
+    Resolution logic:
+    1. If models_dir is set and contains a file (or symlink) that resolves
+       to the same target as selected_path, return that entry's name.
+    2. Otherwise, set models_dir to the selected file's parent directory
+       and return the filename.
+
+    Args:
+        selected_path: Absolute path returned by the file picker.
+        models_dir: Current models_dir from config (empty string if unset).
+
+    Returns:
+        Tuple of (model_name, models_dir) to store in config.
+    """
+    model_path = Path(selected_path)
+    resolved_target = model_path.resolve()
+
+    if models_dir:
+        local_name = find_local_name(Path(models_dir), resolved_target)
+        if local_name:
+            return local_name, models_dir
+
+    return model_path.name, str(model_path.parent)
+
+
 def _prompt_model_for_provider(config: dict, provider_name: str, role: str = "") -> str:
     """Prompt for a model name/path appropriate to the provider.
 
@@ -259,20 +315,18 @@ def _prompt_model_for_provider(config: dict, provider_name: str, role: str = "")
     # Prompt extra config that must come before model selection (e.g. base_url)
     _prompt_extra_config(config, provider_name, before_model=True)
 
-    # GGUF: file picker
     if meta.get("model_prompt") == "file_picker":
-        existing_dir = config.get("inference", {}).get("models_dir", "./models")
-        model = _prompt_gguf_file(existing_dir)
-        model_parent = str(Path(model).parent)
-        if model_parent and model_parent != ".":
-            config["inference"]["models_dir"] = model_parent
-        return model
+        existing_dir = config.get("inference", {}).get("models_dir", "")
+        full_path = _prompt_gguf_file(existing_dir or "./models")
+        model_name, resolved_dir = resolve_model_selection(full_path, existing_dir)
+        config["inference"]["models_dir"] = resolved_dir
+        return model_name
 
     # Text prompt with provider-specific default
     default_model = meta.get("default_model", "")
     model = _prompt_text(f"Model name{role_hint}", default_model)
 
-    # Prompt extra config that comes after model selection (e.g. ollama_host)
+    # Prompt extra config that comes after model selection
     _prompt_extra_config(config, provider_name, before_model=False)
 
     return model
@@ -317,7 +371,7 @@ def _step_brain_model(config: dict) -> None:
         default=1,
     )
 
-    all_roles = ("brain", "nerve", "coder", "creative", "communication")
+    all_roles = tuple(InferenceRole)
 
     if mode == 1:
         _configure_provider_uniform(config, providers, all_roles)
@@ -338,7 +392,6 @@ def _configure_provider_uniform(config: dict, providers: list, roles: tuple) -> 
     # Require API key for cloud providers
     _require_api_key(config, provider_name)
 
-    # Write both new per-role config and flat backward-compat fields
     config["inference"]["provider"] = provider_name
     for role in roles:
         config["inference"]["roles"][role] = {"provider": provider_name, "model": model}
@@ -363,8 +416,8 @@ def _configure_provider_per_role(config: dict, providers: list, roles: tuple) ->
         config["inference"]["roles"][role] = {"provider": provider_name, "model": model}
         config["inference"]["models"][role] = model
 
-    # Flat backward-compat: use brain's provider as the default
-    brain_cfg = config["inference"]["roles"].get("brain", {})
+    # Use brain's provider as the top-level default
+    brain_cfg = config["inference"]["roles"].get(InferenceRole.BRAIN, {})
     config["inference"]["provider"] = brain_cfg.get("provider", "gguf")
 
 
@@ -379,26 +432,29 @@ def _step_vision(config: dict) -> None:
     options.append("Yes — Custom vision endpoint")
     options.append("No — Skip vision")
 
+    sight = Sense.SIGHT
     choice = _prompt_choice("Enable vision sense?", options, default=1)
-    config.setdefault("senses", {}).setdefault("sight", {})
+    config.setdefault("senses", {}).setdefault(sight, {})
 
     if options[choice - 1].startswith("No"):
-        config["senses"]["sight"]["enabled"] = False
-        config["senses"]["sight"]["provider"] = ""
+        config["senses"][sight]["enabled"] = False
+        config["senses"][sight]["provider"] = ""
         return
 
-    config["senses"]["sight"]["enabled"] = True
+    config["senses"][sight]["enabled"] = True
     if "moondream" in options[choice - 1].lower():
-        config["senses"]["sight"]["provider"] = "moondream"
+        config["senses"][sight]["provider"] = "moondream"
         models_dir = config.get("inference", {}).get("models_dir", "./models")
-        vision_model = _prompt_gguf_file(models_dir)
-        config["inference"]["models"]["vision"] = vision_model
+        full_path = _prompt_gguf_file(models_dir)
+        vision_name, resolved_dir = resolve_model_selection(full_path, models_dir)
+        config["inference"]["models_dir"] = resolved_dir
+        config["inference"]["models"]["vision"] = vision_name
     elif "anthropic" in options[choice - 1].lower():
-        config["senses"]["sight"]["provider"] = "anthropic"
+        config["senses"][sight]["provider"] = "anthropic"
     else:
         endpoint = _prompt_text("Vision endpoint URL")
-        config["senses"]["sight"]["provider"] = "custom"
-        config["senses"]["sight"]["endpoint"] = endpoint
+        config["senses"][sight]["provider"] = "custom"
+        config["senses"][sight]["endpoint"] = endpoint
 
 
 def _step_hearing(config: dict) -> None:
@@ -414,18 +470,19 @@ def _step_hearing(config: dict) -> None:
         ],
         default=3,
     )
-    config.setdefault("senses", {}).setdefault("hearing", {})
+    hearing = Sense.HEARING
+    config.setdefault("senses", {}).setdefault(hearing, {})
 
     if choice == 3:
-        config["senses"]["hearing"]["enabled"] = False
+        config["senses"][hearing]["enabled"] = False
         return
 
-    config["senses"]["hearing"]["enabled"] = True
+    config["senses"][hearing]["enabled"] = True
     if choice == 1:
-        config["senses"]["hearing"]["stt"] = "whisper"
+        config["senses"][hearing]["stt"] = "whisper"
     else:
         stt = _prompt_text("STT provider name", "deepgram")
-        config["senses"]["hearing"]["stt"] = stt
+        config["senses"][hearing]["stt"] = stt
 
     if _prompt_yes_no("Enable text-to-speech (TTS)?", default=False):
         tts_choice = _prompt_choice(
@@ -440,9 +497,9 @@ def _step_hearing(config: dict) -> None:
         )
         tts_map = {1: "openai", 2: "piper", 3: "elevenlabs"}
         if tts_choice in tts_map:
-            config["senses"]["hearing"]["tts"] = tts_map[tts_choice]
+            config["senses"][hearing]["tts"] = tts_map[tts_choice]
         else:
-            config["senses"]["hearing"]["tts"] = _prompt_text("TTS provider name")
+            config["senses"][hearing]["tts"] = _prompt_text("TTS provider name")
 
 
 def _step_personality(config: dict) -> None:
@@ -584,8 +641,9 @@ def _step_embeddings(config: dict) -> None:
         config["embeddings"]["model"] = "all-MiniLM-L6-v2"
     elif choice == 3:
         config["embeddings"]["provider"] = "gguf"
-        brain_model = config.get("inference", {}).get("models", {}).get("brain", "Qwen2.5-Coder-7B.gguf")
-        config["embeddings"]["model"] = brain_model
+        brain_entry = config.get("inference", {}).get("models", {}).get("brain", "")
+        brain_file = brain_entry.get("file", "") if isinstance(brain_entry, dict) else (brain_entry or "")
+        config["embeddings"]["model"] = brain_file
     elif choice == 4:
         config["embeddings"]["provider"] = "openai"
         config["embeddings"]["model"] = "text-embedding-3-small"

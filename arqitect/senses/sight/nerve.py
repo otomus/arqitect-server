@@ -18,10 +18,11 @@ import sys
 
 _SENSE_DIR = os.path.dirname(os.path.abspath(__file__))
 from arqitect.config.loader import get_project_root, get_redis_host_port, get_sandbox_dir as _get_sandbox_dir
+from arqitect.types import Sense
 _PROJECT_ROOT = str(get_project_root())
 _SANDBOX_DIR = _get_sandbox_dir()
 
-SENSE_NAME = "sight"
+SENSE_NAME = Sense.SIGHT
 def _load_adapter_description() -> str:
     try:
         from arqitect.brain.adapters import get_description
@@ -39,13 +40,13 @@ VISION_MODEL = "vision"
 def _check_model_available() -> bool:
     """Check if the vision model files exist (without loading the full engine)."""
     try:
-        from arqitect.inference.config import get_backend_type, get_model_name, get_models_dir
-        backend = get_backend_type()
-        if backend == "ollama":
-            return True  # Ollama manages its own models
+        from arqitect.inference.config import get_model_name, get_models_dir
+        from arqitect.inference.model_registry import MODEL_REGISTRY
         models_dir = get_models_dir()
         model_file = get_model_name(VISION_MODEL)
-        mmproj = "moondream2-mmproj-f16.gguf"
+        mmproj = MODEL_REGISTRY.get(VISION_MODEL, {}).get("mmproj", "")
+        if not mmproj:
+            return os.path.exists(os.path.join(models_dir, model_file))
         return (os.path.exists(os.path.join(models_dir, model_file))
                 and os.path.exists(os.path.join(models_dir, mmproj)))
     except Exception:
@@ -300,22 +301,7 @@ def calibrate() -> dict:
 
     system = platform.system()
     # Check model file existence (avoids loading full engine in calibration subprocess)
-    has_moondream = False
-    try:
-        from arqitect.inference.config import get_backend_type, get_model_name, get_models_dir
-        backend = get_backend_type()
-        if backend == "gguf":
-            model_file = get_model_name(VISION_MODEL)
-            mmproj_file = "moondream2-mmproj-f16.gguf"
-            models_dir = get_models_dir()
-            has_moondream = (os.path.exists(os.path.join(models_dir, model_file))
-                            and os.path.exists(os.path.join(models_dir, mmproj_file)))
-        elif backend == "ollama":
-            has_moondream = True
-        else:
-            has_moondream = _check_model_available()
-    except Exception:
-        has_moondream = _check_model_available()
+    has_moondream = _check_model_available()
     moondream = {"installed": has_moondream, "version": "latest" if has_moondream else "", "install_hint": ""}
 
     # Screenshot tool

@@ -16,8 +16,16 @@ import os
 import sys
 import threading
 
-from arqitect.config.loader import get_nerves_dir, get_models_dir; NERVES_DIR = get_nerves_dir()
-MODELS_DIR = get_models_dir()
+def _nerves_dir() -> str:
+    """Lazy accessor — avoids module-level calls that break import from subprocesses."""
+    from arqitect.config.loader import get_nerves_dir
+    return get_nerves_dir()
+
+
+def _models_dir() -> str:
+    """Lazy accessor — avoids module-level calls that break import from subprocesses."""
+    from arqitect.config.loader import get_models_dir
+    return get_models_dir()
 
 def _get_min_examples(role: str) -> int:
     """Get minimum training examples from community config."""
@@ -29,14 +37,43 @@ def _log(msg: str):
     print(msg, file=sys.stderr)
 
 
-def collect_training_data(nerve_name: str) -> list[dict]:
+# Per-size-class training data limits.
+# Each tier trains on a prefix of the canonical test bank.
+_SIZE_CLASS_LIMITS: dict[str, int] = {
+    "tinylm": 50,
+    "small": 100,
+    "medium": 200,
+    "large": 500,
+}
+
+
+def _slice_for_size_class(data: list[dict], size_class: str | None) -> list[dict]:
+    """Slice training data to the limit for a size class.
+
+    Returns the full dataset when size_class is None (backward compat).
+    Always returns a prefix — same ordering, not random.
+    """
+    if size_class is None:
+        return data
+    limit = _SIZE_CLASS_LIMITS.get(size_class, len(data))
+    return data[:limit]
+
+
+def collect_training_data(nerve_name: str, size_class: str | None = None) -> list[dict]:
     """Gather input/output pairs from test bank and successful episodes.
 
     Sources:
-    1. Test bank — expected behaviors from qualification (high quality)
-    2. Successful episodes — real user interactions that worked
+        1. Test bank — expected behaviors from qualification (high quality).
+        2. Successful episodes — real user interactions that worked.
 
-    Returns list of {"input": str, "output": str} dicts.
+    Args:
+        nerve_name: Name of the nerve to collect data for.
+        size_class: Optional size class to slice the data. Each tier gets
+            a prefix of the canonical bank (tinylm~50, small~100,
+            medium~200, large~500). None returns everything.
+
+    Returns:
+        List of {"input": str, "output": str} dicts.
     """
     data = []
 
@@ -75,25 +112,19 @@ def collect_training_data(nerve_name: str) -> list[dict]:
     except Exception as e:
         _log(f"[TUNER] Failed to collect training data for '{nerve_name}': {e}")
 
-    return data
+    return _slice_for_size_class(data, size_class)
 
 
 def _get_base_model_path(role: str) -> str | None:
     """Get the GGUF model path for a nerve role."""
-    from .model_registry import MODEL_REGISTRY
+    from .model_registry import MODEL_REGISTRY, resolve_registry_key
 
-    # Role -> model name mapping (mirrors nerve_runtime.py)
-    role_model = {
-        "tool": "nerve", "creative": "creative", "code": "coder",
-        "vision": "vision", "scheduler": "nerve", "generative": "creative",
-        "brain": "brain", "awareness": "brain", "communication": "communication",
-    }
-    model_name = role_model.get(role, "nerve")
+    model_name = resolve_registry_key(role)
     entry = MODEL_REGISTRY.get(model_name)
     if not entry:
         return None
 
-    path = os.path.join(MODELS_DIR, entry["file"])
+    path = os.path.join(_models_dir(), entry["file"])
     return path if os.path.exists(path) else None
 
 
@@ -143,7 +174,7 @@ def train_nerve_adapter(
         _log(f"[TUNER] No base model found for role '{role}'")
         return False
 
-    adapter_dir = os.path.join(NERVES_DIR, nerve_name, "adapter")
+    adapter_dir = os.path.join(_nerves_dir(), nerve_name, "adapter")
     os.makedirs(adapter_dir, exist_ok=True)
 
     _log(f"[TUNER] Training LoRA adapter for '{nerve_name}' "
@@ -336,7 +367,7 @@ def get_nerves_ready_for_training() -> list[dict]:
             name = row[0]
             role = row[2] or "tool"
             data = collect_training_data(name)
-            adapter_dir = os.path.join(NERVES_DIR, name, "adapter")
+            adapter_dir = os.path.join(_nerves_dir(), name, "adapter")
             has_adapter = os.path.exists(os.path.join(adapter_dir, "adapter.gguf"))
 
             min_ex = _get_min_examples(role)

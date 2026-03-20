@@ -9,6 +9,8 @@ import os
 import subprocess
 import sys
 
+from arqitect.types import Sense
+
 
 def _invoke_sense(sense_name: str, args: dict) -> dict:
     """Invoke a sense nerve as a subprocess, returning parsed JSON result."""
@@ -42,39 +44,39 @@ def see(image_path: str = "", prompt: str = "Describe this image") -> dict:
     args = {"prompt": prompt}
     if image_path:
         args["image_path"] = image_path
-    return _invoke_sense("sight", args)
+    return _invoke_sense(Sense.SIGHT, args)
 
 
 def see_screenshot(prompt: str = "Describe what's on the screen") -> dict:
     """Capture a screenshot and analyze it."""
-    return _invoke_sense("sight", {"mode": "screenshot", "prompt": prompt})
+    return _invoke_sense(Sense.SIGHT, {"mode": "screenshot", "prompt": prompt})
 
 
 def hear(audio_path: str = "") -> dict:
     """Speech-to-text from an audio file."""
-    return _invoke_sense("hearing", {"mode": "stt", "audio_path": audio_path})
+    return _invoke_sense(Sense.HEARING, {"mode": "stt", "audio_path": audio_path})
 
 
 def speak(text: str, voice: str = "default") -> dict:
     """Text-to-speech."""
-    return _invoke_sense("hearing", {"mode": "tts", "text": text, "voice": voice})
+    return _invoke_sense(Sense.HEARING, {"mode": "tts", "text": text, "voice": voice})
 
 
 def touch(command: str = "read", path: str = "", **kwargs) -> dict:
     """File/OS operations via the touch sense."""
     args = {"command": command, "path": path}
     args.update(kwargs)
-    return _invoke_sense("touch", args)
+    return _invoke_sense(Sense.TOUCH, args)
 
 
 def check_awareness(action: str, context: str = "") -> dict:
     """Permission check before destructive operations."""
-    return _invoke_sense("awareness", {"action": action, "context": context})
+    return _invoke_sense(Sense.AWARENESS, {"action": action, "context": context})
 
 
 def express(message: str, tone: str = "neutral", fmt: str = "text") -> dict:
     """Format a message with tone and style via the communication sense."""
-    return _invoke_sense("communication", {
+    return _invoke_sense(Sense.COMMUNICATION, {
         "message": message, "tone": tone, "format": fmt,
     })
 

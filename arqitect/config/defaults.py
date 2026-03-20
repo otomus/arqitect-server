@@ -6,12 +6,14 @@ DEFAULTS = {
     "inference": {
         "provider": "gguf",
         "models": {
-            "brain": "Qwen2.5-Coder-7B.gguf",
-            "nerve": "Qwen2.5-Coder-7B.gguf",
-            "coder": "Qwen2.5-Coder-7B.gguf",
-            "creative": "Qwen2.5-Coder-7B.gguf",
-            "communication": "Qwen2.5-Coder-7B.gguf",
-            "vision": "moondream2-text-model-f16.gguf",
+            "brain": {"file": "", "source": ""},
+            "nerve": {"file": "", "source": ""},
+            "coder": {"file": "", "source": ""},
+            "creative": {"file": "", "source": ""},
+            "communication": {"file": "", "source": ""},
+            "vision": {"file": "", "source": "", "chat_handler": "", "mmproj": ""},
+            "embedding": {"file": "", "source": ""},
+            "image_gen": {"file": "", "source": "", "backend": ""},
         },
         "roles": {
             "brain": {"provider": None, "model": None},
@@ -111,7 +113,7 @@ DEFAULTS = {
     },
     "embeddings": {
         "provider": "gguf",
-        "model": "Qwen2.5-Coder-7B.gguf",
+        "model": "",
     },
     "admin": {
         "name": "",

@@ -1,6 +1,5 @@
 """Tests for JWT session token create/decode/refresh."""
 
-import os
 import time
 from unittest.mock import patch
 
@@ -21,7 +20,7 @@ JWT_SECRET = "test-secret-for-unit-tests"
 @pytest.fixture(autouse=True)
 def _set_jwt_secret():
     """Every test in this file gets a valid JWT secret."""
-    with patch.dict(os.environ, {"ARQITECT_JWT_SECRET": JWT_SECRET}):
+    with patch("arqitect.auth.token.get_secret", return_value=JWT_SECRET):
         yield
 
 
@@ -30,30 +29,28 @@ class TestGetJwtSecret:
         assert get_jwt_secret() == JWT_SECRET
 
     def test_raises_when_missing(self):
-        with patch.dict(os.environ, {}, clear=True):
-            os.environ.pop("ARQITECT_JWT_SECRET", None)
-            with pytest.raises(ValueError, match="ARQITECT_JWT_SECRET"):
+        with patch("arqitect.auth.token.get_secret", return_value=""):
+            with pytest.raises(ValueError, match="jwt_secret"):
                 get_jwt_secret()
 
 
 class TestCreateToken:
     def test_produces_string(self):
-        token = create_token("uid_1", "a@b.com", "user", "Alice")
+        token = create_token("uid_1", "user", "Alice")
         assert isinstance(token, str)
         assert len(token) > 20
 
     def test_claims_round_trip(self):
-        token = create_token("uid_1", "a@b.com", "user", "Alice")
+        token = create_token("uid_1", "user", "Alice")
         claims = decode_token(token)
         assert claims is not None
         assert claims["sub"] == "uid_1"
-        assert claims["email"] == "a@b.com"
         assert claims["role"] == "user"
         assert claims["name"] == "Alice"
 
     def test_has_iat_and_exp(self):
         before = int(time.time())
-        token = create_token("uid_1", "a@b.com", "user", "Alice")
+        token = create_token("uid_1", "user", "Alice")
         claims = decode_token(token)
         assert claims["iat"] >= before
         assert claims["exp"] == claims["iat"] + TOKEN_LIFETIME_SECONDS
@@ -61,7 +58,7 @@ class TestCreateToken:
 
 class TestDecodeToken:
     def test_valid_token(self):
-        token = create_token("uid_1", "a@b.com", "user", "Alice")
+        token = create_token("uid_1", "user", "Alice")
         claims = decode_token(token)
         assert claims is not None
         assert claims["sub"] == "uid_1"
@@ -77,7 +74,7 @@ class TestDecodeToken:
         assert decode_token(token) is None
 
     def test_tampered_token_returns_none(self):
-        token = create_token("uid_1", "a@b.com", "user", "Alice")
+        token = create_token("uid_1", "user", "Alice")
         tampered = token[:-4] + "XXXX"
         assert decode_token(tampered) is None
 

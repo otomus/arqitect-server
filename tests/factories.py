@@ -21,7 +21,7 @@ from arqitect.brain.dispatch import (
     UpdateContextDecision,
     UseSenseDecision,
 )
-from arqitect.brain.types import Action
+from arqitect.types import Action
 
 
 # ---------------------------------------------------------------------------

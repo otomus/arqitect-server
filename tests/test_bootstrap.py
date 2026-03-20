@@ -5,33 +5,36 @@ import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
-
+from dirty_equals import IsStr, IsPartialDict
 
 MODULE = "arqitect.brain.bootstrap"
 
 
 @pytest.fixture()
 def mock_mem():
-    """Provide a mocked MemoryManager with hot and cold sub-mocks."""
-    mem = MagicMock()
-    mem.hot.get_session.return_value = {}
-    mem.cold.get_facts.return_value = {}
-    mem.cold.get_user_facts.return_value = {}
-    with patch(f"{MODULE}.mem", mem):
-        yield mem
+    """Provide a mocked MemoryManager with hot and cold sub-mocks.
+
+    Uses MagicMock because bootstrap tests need return-value control
+    and call assertions on mem.hot / mem.cold methods.
+    """
+    m = MagicMock()
+    m.hot.get_session.return_value = {}
+    m.cold.get_facts.return_value = {}
+    m.cold.get_user_facts.return_value = {}
+    with patch(f"{MODULE}.mem", m):
+        yield m
 
 
 @pytest.fixture()
-def mock_redis():
-    """Provide a mocked Redis client."""
-    r = MagicMock()
-    with patch(f"{MODULE}.r", r):
-        yield r
+def bootstrap_redis(test_redis):
+    """Patch the bootstrap module's Redis reference to use fakeredis from conftest."""
+    with patch(f"{MODULE}.r", test_redis):
+        yield test_redis
 
 
 @pytest.fixture()
-def mock_events():
-    """Silence event publishing."""
+def bootstrap_events():
+    """Silence event publishing at the bootstrap module's import site."""
     with patch(f"{MODULE}.publish_event") as pe, \
          patch(f"{MODULE}.publish_memory_state") as pms:
         yield pe, pms
@@ -44,29 +47,30 @@ def mock_requests():
         yield req
 
 
-# ── bootstrap_session ────────────────────────────────────────────────────
+# -- bootstrap_session --------------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestBootstrapSession:
     """Tests for startup session initialization."""
 
-    def test_already_bootstrapped_returns_early(self, mock_mem, mock_events):
+    def test_already_bootstrapped_returns_early(self, mock_mem, bootstrap_events):
         mock_mem.hot.get_session.return_value = {"city": "Tel Aviv", "timezone": "Asia/Jerusalem"}
         from arqitect.brain.bootstrap import bootstrap_session
         bootstrap_session()
         mock_mem.cold.get_facts.assert_not_called()
 
-    def test_restores_from_cold_memory(self, mock_mem, mock_events):
+    def test_restores_from_cold_memory(self, mock_mem, bootstrap_events):
         mock_mem.hot.get_session.return_value = {}
         cold_facts = {"city": "London", "timezone": "Europe/London"}
         mock_mem.cold.get_facts.return_value = cold_facts
         from arqitect.brain.bootstrap import bootstrap_session
         bootstrap_session()
         mock_mem.hot.set_session.assert_called_once_with(cold_facts)
-        _, publish_memory_state = mock_events
+        _, publish_memory_state = bootstrap_events
         publish_memory_state.assert_called_once()
 
-    def test_ip_geolocation_success(self, mock_mem, mock_events, mock_requests):
+    def test_ip_geolocation_success(self, mock_mem, bootstrap_events, mock_requests):
         mock_mem.hot.get_session.return_value = {}
         mock_mem.cold.get_facts.return_value = {}
         geo_data = {
@@ -85,10 +89,9 @@ class TestBootstrapSession:
         bootstrap_session()
         mock_mem.hot.set_session.assert_called_once()
         session_arg = mock_mem.hot.set_session.call_args[0][0]
-        assert session_arg["city"] == "Berlin"
-        assert session_arg["timezone"] == "Europe/Berlin"
+        assert session_arg == IsPartialDict(city="Berlin", timezone="Europe/Berlin")
 
-    def test_ip_geolocation_failure_does_not_raise(self, mock_mem, mock_events, mock_requests):
+    def test_ip_geolocation_failure_does_not_raise(self, mock_mem, bootstrap_events, mock_requests):
         mock_mem.hot.get_session.return_value = {}
         mock_mem.cold.get_facts.return_value = {}
         mock_requests.get.side_effect = Exception("network error")
@@ -96,7 +99,7 @@ class TestBootstrapSession:
         bootstrap_session()
         mock_mem.hot.set_session.assert_not_called()
 
-    def test_cold_facts_stored_on_geo_success(self, mock_mem, mock_events, mock_requests):
+    def test_cold_facts_stored_on_geo_success(self, mock_mem, bootstrap_events, mock_requests):
         mock_mem.hot.get_session.return_value = {}
         mock_mem.cold.get_facts.return_value = {}
         mock_resp = MagicMock()
@@ -107,9 +110,10 @@ class TestBootstrapSession:
         assert mock_mem.cold.set_fact.call_count >= 1
 
 
-# ── calibrate_sense ──────────────────────────────────────────────────────
+# -- calibrate_sense ----------------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestCalibrateSense:
     """Tests for individual sense calibration."""
 
@@ -118,8 +122,7 @@ class TestCalibrateSense:
              patch(f"{MODULE}.SENSES_DIR", "/fake/senses"):
             from arqitect.brain.bootstrap import calibrate_sense
             result = calibrate_sense("sight")
-        assert result["status"] == "unavailable"
-        assert "not found" in result["error"]
+        assert result == IsPartialDict(status="unavailable", error=IsStr(regex=".*not found.*"))
 
     def test_subprocess_success_returns_parsed_json(self):
         cal_result = {"sense": "sight", "status": "available", "capabilities": {}}
@@ -141,8 +144,7 @@ class TestCalibrateSense:
              patch(f"{MODULE}.SANDBOX_DIR", "/fake/sandbox"):
             from arqitect.brain.bootstrap import calibrate_sense
             result = calibrate_sense("sight")
-        assert result["status"] == "unavailable"
-        assert "timed out" in result["error"]
+        assert result == IsPartialDict(status="unavailable", error=IsStr(regex=".*timed out.*"))
 
     def test_subprocess_error_with_module_not_found(self):
         proc = MagicMock()
@@ -154,8 +156,7 @@ class TestCalibrateSense:
              patch(f"{MODULE}.SANDBOX_DIR", "/fake/sandbox"):
             from arqitect.brain.bootstrap import calibrate_sense
             result = calibrate_sense("sight")
-        assert result["status"] == "unavailable"
-        assert "ModuleNotFoundError" in result["error"]
+        assert result == IsPartialDict(status="unavailable", error=IsStr(regex=".*ModuleNotFoundError.*"))
 
     def test_subprocess_generic_exception(self):
         with patch(f"{MODULE}.os.path.isfile", return_value=True), \
@@ -164,13 +165,13 @@ class TestCalibrateSense:
              patch(f"{MODULE}.SANDBOX_DIR", "/fake/sandbox"):
             from arqitect.brain.bootstrap import calibrate_sense
             result = calibrate_sense("sight")
-        assert result["status"] == "unavailable"
-        assert "disk failure" in result["error"]
+        assert result == IsPartialDict(status="unavailable", error=IsStr(regex=".*disk failure.*"))
 
 
-# ── calibrate_all_senses ─────────────────────────────────────────────────
+# -- calibrate_all_senses -----------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestCalibrateAllSenses:
     """Tests for bulk sense calibration."""
 
@@ -220,9 +221,10 @@ class TestCalibrateAllSenses:
         assert results["hearing"]["status"] == "unavailable"
 
 
-# ── bootstrap_user_session ───────────────────────────────────────────────
+# -- bootstrap_user_session ---------------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestBootstrapUserSession:
     """Tests for per-user session initialization."""
 
@@ -244,13 +246,13 @@ class TestBootstrapUserSession:
         bootstrap_user_session("user-456")
         mock_mem.hot.set_session.assert_called_once()
         call_kwargs = mock_mem.hot.set_session.call_args
-        assert call_kwargs[0][0]["city"] == "Tokyo"
+        assert call_kwargs[0][0] == IsPartialDict(city="Tokyo")
         assert call_kwargs[1]["user_id"] == "user-456"
 
     def test_falls_back_to_server_session(self, mock_mem):
         # First call (user session) returns empty, second call (server session) returns data
         mock_mem.hot.get_session.side_effect = [
-            {},                                           # user session — empty
+            {},                                              # user session — empty
             {"city": "London", "timezone": "Europe/London"},  # server session
         ]
         mock_mem.cold.get_user_facts.return_value = {}
@@ -258,7 +260,7 @@ class TestBootstrapUserSession:
         bootstrap_user_session("user-789")
         mock_mem.hot.set_session.assert_called_once()
         call_args = mock_mem.hot.set_session.call_args
-        assert call_args[0][0]["city"] == "London"
+        assert call_args[0][0] == IsPartialDict(city="London")
 
     def test_no_server_session_either(self, mock_mem):
         mock_mem.hot.get_session.return_value = {}
@@ -268,13 +270,14 @@ class TestBootstrapUserSession:
         mock_mem.hot.set_session.assert_not_called()
 
 
-# ── _store_calibration_in_memory ─────────────────────────────────────────
+# -- _store_calibration_in_memory ---------------------------------------------
 
 
+@pytest.mark.timeout(10)
 class TestStoreCalibrationInMemory:
     """Tests for storing calibration results in cold + Redis."""
 
-    def test_stores_in_cold_and_redis(self, mock_mem, mock_redis, mock_events):
+    def test_stores_in_cold_and_redis(self, mock_mem, bootstrap_redis, bootstrap_events):
         results = {
             "sight": {
                 "sense": "sight",
@@ -288,24 +291,30 @@ class TestStoreCalibrationInMemory:
         fact_args = mock_mem.cold.set_fact.call_args[0]
         assert fact_args[0] == "sense_calibration"
         assert fact_args[1] == "sight"
-        mock_redis.hset.assert_called_once()
+        # Verify fakeredis received the hset
+        stored = bootstrap_redis.hget("synapse:sense_calibration", "sight")
+        assert stored is not None
+        assert json.loads(stored) == IsPartialDict(status="available")
 
-    def test_handles_redis_failure_gracefully(self, mock_mem, mock_redis, mock_events):
-        mock_redis.hset.side_effect = Exception("connection refused")
-        results = {
-            "touch": {
-                "sense": "touch",
-                "status": "available",
-                "capabilities": {},
-            },
-        }
-        from arqitect.brain.bootstrap import _store_calibration_in_memory
-        _store_calibration_in_memory(results)
+    def test_handles_redis_failure_gracefully(self, mock_mem, bootstrap_events):
+        # Patch redis to a mock that raises on hset
+        failing_redis = MagicMock()
+        failing_redis.hset.side_effect = Exception("connection refused")
+        with patch(f"{MODULE}.r", failing_redis):
+            results = {
+                "touch": {
+                    "sense": "touch",
+                    "status": "available",
+                    "capabilities": {},
+                },
+            }
+            from arqitect.brain.bootstrap import _store_calibration_in_memory
+            _store_calibration_in_memory(results)
         # Cold memory should still be written
         mock_mem.cold.set_fact.assert_called_once()
 
-    def test_publishes_event_for_user_action_needed(self, mock_mem, mock_redis, mock_events):
-        publish_event, _ = mock_events
+    def test_publishes_event_for_user_action_needed(self, mock_mem, bootstrap_redis, bootstrap_events):
+        publish_event, _ = bootstrap_events
         results = {
             "hearing": {
                 "sense": "hearing",
@@ -323,8 +332,8 @@ class TestStoreCalibrationInMemory:
         assert len(event_data["user_action_needed"]) == 1
         assert event_data["user_action_needed"][0]["sense"] == "hearing"
 
-    def test_no_event_when_no_actions(self, mock_mem, mock_redis, mock_events):
-        publish_event, _ = mock_events
+    def test_no_event_when_no_actions(self, mock_mem, bootstrap_redis, bootstrap_events):
+        publish_event, _ = bootstrap_events
         results = {
             "sight": {"sense": "sight", "status": "available", "capabilities": {}},
         }
@@ -332,7 +341,7 @@ class TestStoreCalibrationInMemory:
         _store_calibration_in_memory(results)
         publish_event.assert_not_called()
 
-    def test_summary_includes_missing_capabilities(self, mock_mem, mock_redis, mock_events):
+    def test_summary_includes_missing_capabilities(self, mock_mem, bootstrap_redis, bootstrap_events):
         results = {
             "sight": {
                 "sense": "sight",

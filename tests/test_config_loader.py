@@ -1,10 +1,14 @@
 """Tests for arqitect/config/loader.py — project root, YAML loading, and config accessors."""
 
+import copy
 import os
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from dirty_equals import IsInstance, IsPartialDict
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from arqitect.config.loader import (
     _deep_merge,
@@ -31,9 +35,35 @@ def _clear_caches():
     get_project_root.cache_clear()
 
 
+# Strategy for generating nested dicts with JSON-safe leaf values.
+_json_leaves = st.one_of(
+    st.integers(),
+    st.text(max_size=20),
+    st.booleans(),
+    st.floats(allow_nan=False, allow_infinity=False),
+    st.none(),
+)
+_nested_dicts = st.recursive(
+    _json_leaves,
+    lambda children: st.dictionaries(
+        st.text(min_size=1, max_size=5, alphabet="abcdefgh"),
+        children,
+        max_size=5,
+    ),
+    max_leaves=15,
+)
+# Only generate top-level dicts (not bare leaf values).
+_dict_strategy = st.dictionaries(
+    st.text(min_size=1, max_size=5, alphabet="abcdefgh"),
+    _nested_dicts,
+    max_size=5,
+)
+
+
 # ── _deep_merge ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestDeepMerge:
     """Tests for recursive dict merging."""
 
@@ -72,10 +102,64 @@ class TestDeepMerge:
         assert base == {"a": {"x": 1}}
         assert override == {"a": {"y": 2}}
 
+    def test_result_is_a_dict(self):
+        """Sanity check: result type is always dict."""
+        result = _deep_merge({"a": 1}, {"b": 2})
+        assert result == IsInstance[dict]
+
+    @given(base=_dict_strategy, override=_dict_strategy)
+    @settings(max_examples=200)
+    def test_override_keys_always_present_in_result(self, base, override):
+        """Every key from override must appear in the merged result."""
+        result = _deep_merge(base, override)
+        for key in override:
+            assert key in result
+
+    @given(base=_dict_strategy, override=_dict_strategy)
+    @settings(max_examples=200)
+    def test_base_keys_preserved_when_not_overridden(self, base, override):
+        """Keys in base that are absent from override survive the merge."""
+        result = _deep_merge(base, override)
+        for key in base:
+            assert key in result
+
+    @given(base=_dict_strategy)
+    @settings(max_examples=100)
+    def test_merge_with_empty_override_is_identity(self, base):
+        """Merging with an empty dict returns an equal copy."""
+        result = _deep_merge(base, {})
+        assert result == base
+
+    @given(override=_dict_strategy)
+    @settings(max_examples=100)
+    def test_merge_with_empty_base_returns_override(self, override):
+        """Merging an empty base with override returns the override."""
+        result = _deep_merge({}, override)
+        assert result == override
+
+    @given(base=_dict_strategy, override=_dict_strategy)
+    @settings(max_examples=200)
+    def test_does_not_mutate_inputs(self, base, override):
+        """Neither base nor override is modified by the merge."""
+        base_snapshot = copy.deepcopy(base)
+        override_snapshot = copy.deepcopy(override)
+        _deep_merge(base, override)
+        assert base == base_snapshot
+        assert override == override_snapshot
+
+    @given(a=_dict_strategy, b=_dict_strategy, c=_dict_strategy)
+    @settings(max_examples=100)
+    def test_result_superset_of_all_keys(self, a, b, c):
+        """Merging three dicts pairwise retains all top-level keys."""
+        merged = _deep_merge(_deep_merge(a, b), c)
+        for key in (set(a) | set(b) | set(c)):
+            assert key in merged
+
 
 # ── find_project_root ────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestFindProjectRoot:
     """Tests for project root detection."""
 
@@ -105,10 +189,15 @@ class TestFindProjectRoot:
             with patch.object(Path, "cwd", return_value=tmp_path):
                 assert find_project_root() == tmp_path
 
+    def test_result_is_always_a_path(self, tmp_path):
+        with patch.dict(os.environ, {"ARQITECT_PROJECT_ROOT": str(tmp_path)}):
+            assert find_project_root() == IsInstance[Path]
+
 
 # ── load_config ──────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestLoadConfig:
     """Tests for YAML loading and merging with defaults."""
 
@@ -120,7 +209,7 @@ class TestLoadConfig:
         assert config["name"] == "MyBot"
         assert config["inference"]["provider"] == "openai"
         # Defaults still present for keys not overridden
-        assert "storage" in config
+        assert config == IsPartialDict(storage=IsInstance[dict])
 
     def test_returns_defaults_when_no_yaml(self, tmp_path):
         with patch.dict(os.environ, {"ARQITECT_PROJECT_ROOT": str(tmp_path)}):
@@ -132,6 +221,7 @@ class TestLoadConfig:
 # ── get_config ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestGetConfig:
     """Tests for dot-path config access."""
 
@@ -153,6 +243,7 @@ class TestGetConfig:
 # ── get_secret ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestGetSecret:
     """Tests for secrets accessor."""
 
@@ -174,6 +265,7 @@ class TestGetSecret:
 # ── get_redis_host_port ──────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestGetRedisHostPort:
     """Tests for Redis URL parsing."""
 
@@ -209,10 +301,18 @@ class TestGetRedisHostPort:
         assert host == "myhost"
         assert port == 6380
 
+    def test_port_is_always_an_int(self, tmp_path):
+        yaml_content = "storage:\n  hot:\n    url: redis://localhost:6379\n"
+        (tmp_path / "arqitect.yaml").write_text(yaml_content)
+        with patch.dict(os.environ, {"ARQITECT_PROJECT_ROOT": str(tmp_path)}):
+            _, port = get_redis_host_port()
+        assert port == IsInstance[int]
+
 
 # ── get_model_for_role ───────────────────────────────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestGetModelForRole:
     """Tests for model filename resolution by role."""
 
@@ -247,10 +347,16 @@ class TestGetModelForRole:
         with patch.dict(os.environ, {"ARQITECT_PROJECT_ROOT": str(tmp_path)}):
             assert get_model_for_role("nonexistent") == "fallback.gguf"
 
+    def test_result_is_always_a_string(self, tmp_path):
+        """No matter the config shape, get_model_for_role returns a string."""
+        with patch.dict(os.environ, {"ARQITECT_PROJECT_ROOT": str(tmp_path)}):
+            assert get_model_for_role("anything") == IsInstance[str]
+
 
 # ── get_per_role_provider / get_per_role_model ───────────────────────────
 
 
+@pytest.mark.timeout(10)
 class TestPerRoleOverrides:
     """Tests for per-role provider and model overrides."""
 

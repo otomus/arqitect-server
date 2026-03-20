@@ -103,7 +103,7 @@ CORE_TOOLS = frozenset({"image_generator"})
 mcp = FastMCP("Synapse Tools")
 
 
-# ── Legacy HTTP Endpoints (for nerve_runtime compatibility) ────────────────
+# ── HTTP Endpoints ─────────────────────────────────────────────────────────
 
 @mcp.custom_route("/tools", methods=["GET"])
 async def list_tools_handler(request: Request):

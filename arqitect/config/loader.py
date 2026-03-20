@@ -32,9 +32,6 @@ def find_project_root() -> Path:
     for parent in [cwd, *cwd.parents]:
         if (parent / "arqitect.yaml").exists():
             return parent
-        # Also check for legacy inference.conf (old projects)
-        if (parent / "inference.conf").exists():
-            return parent
 
     # Fallback: cwd itself
     return cwd
@@ -62,7 +59,6 @@ def load_config() -> dict:
     """Load arqitect.yaml from project root, merged with defaults.
 
     Falls back to DEFAULTS if no arqitect.yaml exists.
-    Also reads legacy inference.conf if present and no arqitect.yaml.
     """
     root = get_project_root()
     yaml_path = root / "arqitect.yaml"
@@ -72,44 +68,8 @@ def load_config() -> dict:
             user_config = yaml.safe_load(f) or {}
         return _deep_merge(DEFAULTS, user_config)
 
-    # Legacy: try reading inference.conf
-    conf_path = root / "inference.conf"
-    if conf_path.exists():
-        return _load_legacy_config(conf_path)
-
     import copy
     return copy.deepcopy(DEFAULTS)
-
-
-def _load_legacy_config(conf_path: Path) -> dict:
-    """Read legacy inference.conf and map to the new config structure."""
-    import configparser
-    import copy
-    cp = configparser.ConfigParser()
-    cp.read(str(conf_path))
-
-    config = copy.deepcopy(DEFAULTS)
-
-    # Map backend type
-    backend = cp.get("backend", "type", fallback="gguf")
-    config["inference"] = dict(config.get("inference", {}))
-    config["inference"]["provider"] = backend
-
-    # Map models
-    if cp.has_section("models"):
-        config["inference"]["models"] = dict(cp.items("models"))
-
-    # Map gguf models_dir
-    if cp.has_section("gguf"):
-        models_dir = cp.get("gguf", "models_dir", fallback="")
-        if models_dir:
-            config["inference"]["models_dir"] = models_dir
-
-    # Map ollama host
-    if cp.has_section("ollama"):
-        config["inference"]["ollama_host"] = cp.get("ollama", "host", fallback="http://localhost:11434")
-
-    return config
 
 
 # ── Config accessors ─────────────────────────────────────────────────────
@@ -276,8 +236,35 @@ def get_inference_provider() -> str:
 
 
 def get_model_for_role(role: str) -> str:
-    """Get the model name for a given role (brain, nerve, coder, creative, etc.)."""
-    return get_config(f"inference.models.{role}", get_config("inference.models.brain", ""))
+    """Get the model filename for a given role.
+
+    Supports both string and dict formats in arqitect.yaml:
+      inference.models.brain: "model-file.gguf"           # string
+      inference.models.brain: {file: "model-file.gguf"}   # dict
+    """
+    value = get_config(f"inference.models.{role}")
+    if value is None:
+        value = get_config("inference.models.brain", "")
+    if isinstance(value, dict):
+        return value.get("file", "")
+    return value or ""
+
+
+def get_model_config(role: str) -> dict:
+    """Get the full model config for a role (file, source, chat_handler, etc.).
+
+    Returns a dict with at least 'file'. Other keys (source, chat_handler,
+    mmproj, backend) are present if the yaml specifies them.
+    Falls back to brain config, then empty dict.
+    """
+    value = get_config(f"inference.models.{role}")
+    if value is None:
+        value = get_config("inference.models.brain", "")
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str) and value:
+        return {"file": value}
+    return {}
 
 
 def get_per_role_provider(role: str) -> str | None:

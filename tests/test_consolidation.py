@@ -1,4 +1,4 @@
-"""Tests for nerve consolidation — winner selection, merging, and adapter migration.
+"""Tests for nerve consolidation -- winner selection, merging, and adapter migration.
 
 Covers:
 - Community nerves always win over fabricated ones
@@ -6,6 +6,7 @@ Covers:
 - Tool and adapter migration during merges
 - Qualified fabricated nerves are protected from fabricated winners
 - Qualified fabricated nerves are absorbed by community winners
+- Coverage gating and last_invoked_at tracking
 """
 
 import json
@@ -13,6 +14,8 @@ import os
 from unittest.mock import patch
 
 import pytest
+
+from hypothesis import given, settings, strategies as st
 
 from tests.conftest import make_nerve_file
 
@@ -39,6 +42,7 @@ def _patch_consolidate_deps(mem):
 # pick_winner
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestPickWinner:
     """Winner selection in a cluster of similar nerves."""
 
@@ -102,9 +106,10 @@ class TestPickWinner:
 
 
 # ---------------------------------------------------------------------------
-# merge_nerve — tool and adapter migration
+# merge_nerve -- tool and adapter migration
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestMergeNerve:
     """Tool and adapter migration during merges."""
 
@@ -127,19 +132,13 @@ class TestMergeNerve:
         assert not os.path.isdir(os.path.join(nerves_dir, "loser"))
 
     def test_cache_files_migrate_without_overwrite(self, mem, nerves_dir, tmp_path):
-        """Loser's community cache files are copied to winner without overwriting.
-
-        Per-size-class context.json/meta.json files migrate for size classes
-        the winner doesn't already have.
-        """
+        """Loser's community cache files are copied to winner without overwriting."""
         cache_dir = tmp_path / ".community" / "cache" / "nerves"
 
-        # Winner has medium/context.json
         winner_cache = cache_dir / "winner" / "medium"
         winner_cache.mkdir(parents=True)
         (winner_cache / "context.json").write_text(json.dumps({"system_prompt": "winner"}))
 
-        # Loser has medium/llama-8b/ and small/
         loser_medium_model = cache_dir / "loser" / "medium" / "llama-8b"
         loser_medium_model.mkdir(parents=True)
         (loser_medium_model / "context.json").write_text(json.dumps({"system_prompt": "loser model"}))
@@ -169,9 +168,10 @@ class TestMergeNerve:
 
 
 # ---------------------------------------------------------------------------
-# consolidate_nerves — community absorption
+# consolidate_nerves -- community absorption
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestConsolidateWithCommunity:
     """Community nerves absorb overlapping fabricated nerves."""
 
@@ -179,7 +179,6 @@ class TestConsolidateWithCommunity:
         self, mem, nerves_dir, tmp_path,
     ):
         """A qualified fabricated nerve is still merged into a community winner."""
-        # Set up community manifest
         cache_dir = tmp_path / ".community" / "cache"
         cache_dir.mkdir(parents=True)
         manifest = {
@@ -230,7 +229,6 @@ class TestConsolidateWithCommunity:
             with patch("arqitect.brain.consolidate.find_nerve_clusters", return_value=fake_clusters):
                 result = consolidate_nerves()
 
-        # forecast_nerve wins by score but weather_nerve is qualified — skip merge
         assert result["merged"] == 0
         assert os.path.isdir(os.path.join(nerves_dir, "weather_nerve"))
 
@@ -239,6 +237,7 @@ class TestConsolidateWithCommunity:
 # Minimum test coverage gate
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestMinimumCoverage:
     """Scores from partial test runs must not be trusted."""
 
@@ -262,19 +261,29 @@ class TestMinimumCoverage:
         assert _has_sufficient_coverage(0, 0) is False
         assert _has_sufficient_coverage(5, 0) is False
 
+    @given(
+        passed=st.integers(min_value=0, max_value=100),
+        total=st.integers(min_value=1, max_value=100),
+    )
+    @settings(max_examples=50)
+    def test_coverage_threshold_at_80_percent(self, passed, total):
+        """Coverage gate passes iff passed/total >= 0.8."""
+        from arqitect.brain.consolidate import _has_sufficient_coverage
+        expected = (passed / total) >= 0.8
+        assert _has_sufficient_coverage(passed, total) is expected
+
     def test_save_final_score_skips_low_coverage(self, mem):
         """_save_final_score does not record when coverage is too low."""
         from arqitect.brain.consolidate import _save_final_score, _ImprovementState
 
         mem.cold.register_nerve("test_nerve", "Test")
         state = _ImprovementState("test_nerve", "Test", 0.0)
-        # Simulate 1 test out of 100 scoring perfectly
         state.update(1.0, [{"score": 1.0, "passed": True}])
 
         _save_final_score("test_nerve", state, 0.0, 0.95, 5, total_tests=100)
 
         qual = mem.cold.get_qualification("nerve", "test_nerve")
-        assert qual is None  # Score should NOT have been saved
+        assert qual is None
 
     def test_save_final_score_records_with_full_coverage(self, mem):
         """_save_final_score records when coverage is sufficient."""
@@ -296,6 +305,7 @@ class TestMinimumCoverage:
 # last_invoked_at tracking
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestLastInvokedAt:
     """Invocation timestamp tracking for usage-based priority."""
 
@@ -324,11 +334,13 @@ class TestLastInvokedAt:
 # Work queue priority
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestWorkQueuePriority:
     """Recently-used nerves are tuned before dormant ones."""
 
     def test_recently_used_nerves_come_first(self, mem, nerves_dir):
-        """Nerves with last_invoked_at sort before those without."""
+        """Only invoked nerves appear in the queue; dormant ones are excluded.
+        Among invoked nerves, most recently used sorts first."""
         mem.cold.register_nerve("dormant_nerve", "Dormant")
         mem.cold.register_nerve("active_nerve", "Active")
         mem.cold.record_nerve_invocation("active_nerve", success=True)
@@ -341,5 +353,5 @@ class TestWorkQueuePriority:
 
         names = [item["name"] for item in queue]
         assert "active_nerve" in names
-        assert "dormant_nerve" in names
-        assert names.index("active_nerve") < names.index("dormant_nerve")
+        assert "dormant_nerve" not in names, \
+            "Never-invoked nerves must be excluded from the work queue"

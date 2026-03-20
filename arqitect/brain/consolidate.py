@@ -38,7 +38,7 @@ import threading
 
 from arqitect.brain.config import CORE_SENSES, NERVES_DIR, mem
 from arqitect.brain.events import publish_event, publish_nerve_status
-from arqitect.brain.types import Channel
+from arqitect.types import Channel, InferenceRole
 
 logger = logging.getLogger(__name__)
 
@@ -937,7 +937,130 @@ def consolidate_nerves(interrupted: threading.Event = None) -> dict:
     return summary
 
 
+# ── Smart hydration helpers ──────────────────────────────────────────────────
+
+
+def _needs_hydration(nerve_name: str) -> bool:
+    """Check if a nerve still lacks a system_prompt (not yet hydrated)."""
+    meta = mem.cold.get_nerve_metadata(nerve_name)
+    return not meta.get("system_prompt")
+
+
+def _is_underperforming(nerve_name: str) -> bool:
+    """Check if a nerve scores below the quality threshold.
+
+    No qualification record means the nerve has never been evaluated,
+    so its effective score is 0% — definitely underperforming.
+    """
+    qual = mem.cold.get_qualification("nerve", nerve_name)
+    if not qual:
+        return True
+    return qual.get("score", 0.0) < HIGH_QUALITY_SCORE
+
+
+def _is_missing_model_adapter(nerve_name: str) -> bool:
+    """Check if the nerve has no adapter tuned for the current brain model.
+
+    Returns True if the current model slug has no context.json in
+    the adapter cache, meaning this nerve hasn't been tuned for
+    the model we're actually running.
+    """
+    from arqitect.brain.adapters import has_model_specific_adapter
+    return not has_model_specific_adapter("nerve")
+
+
+def _find_local_overlap_candidates(catalog: dict[str, str]) -> set[str]:
+    """Find community nerves that overlap with locally fabricated nerves.
+
+    Uses match_score to compare descriptions between community and local nerves.
+    Returns set of community nerve names that are consolidation candidates.
+    """
+    from arqitect.matching import match_score
+
+    community_nerves = _get_community_nerve_names()
+    if not community_nerves:
+        return set()
+
+    local_nerves = {
+        name: desc for name, desc in catalog.items()
+        if name not in community_nerves
+        and name not in CORE_SENSES
+        and not mem.cold.is_sense(name)
+        and mem.cold.get_nerve_origin(name) == "local"
+    }
+    if not local_nerves:
+        return set()
+
+    overlap = set()
+    merge_threshold = _get_merge_threshold()
+    for comm_name in community_nerves:
+        if comm_name not in catalog:
+            continue
+        comm_desc = catalog[comm_name]
+        for local_name, local_desc in local_nerves.items():
+            score = max(
+                match_score(comm_desc, local_name, local_desc),
+                match_score(local_desc, comm_name, comm_desc),
+            )
+            if score >= merge_threshold:
+                overlap.add(comm_name)
+                break
+
+    return overlap
+
+
+def _select_hydration_candidates() -> list[tuple[str, str]]:
+    """Select which nerves to hydrate during community sync.
+
+    Filters the full catalog to only nerves worth hydrating:
+    1. Invoked nerves scoring below HIGH_QUALITY_SCORE (need improvement)
+    2. Nerves with no adapter for the current model (need tuning)
+    3. Community nerves overlapping local fabricated nerves (consolidation)
+
+    Returns:
+        List of (nerve_name, reason) tuples, sorted by recency of use.
+    """
+    catalog = mem.cold.list_nerves()
+    candidates: dict[str, str] = {}
+
+    # Pass 1: underperforming or missing adapter
+    for nerve_name in catalog:
+        if not _needs_hydration(nerve_name):
+            continue
+
+        last_invoked = mem.cold.get_last_invoked_at(nerve_name)
+        if last_invoked and _is_underperforming(nerve_name):
+            candidates[nerve_name] = "score < {:.0f}%".format(HIGH_QUALITY_SCORE * 100)
+        elif _is_missing_model_adapter(nerve_name):
+            candidates[nerve_name] = "no adapter for current model"
+
+    # Pass 2: community nerves overlapping local fabricated nerves
+    overlap = _find_local_overlap_candidates(catalog)
+    for nerve_name in overlap:
+        if _needs_hydration(nerve_name) and nerve_name not in candidates:
+            candidates[nerve_name] = "overlaps local nerve — consolidation candidate"
+
+    # Sort by recency (recently-used first)
+    result = [
+        (name, reason, mem.cold.get_last_invoked_at(name))
+        for name, reason in candidates.items()
+    ]
+    result.sort(key=lambda x: (x[2] is None, -_ts_key(x[2])))
+    return [(name, reason) for name, reason, _ in result]
+
+
 # ── Reconciler (slow, interruptible — React Fiber style) ────────────────────
+
+
+def _ts_key(ts: str | None) -> float:
+    """Convert an ISO timestamp string to a sortable float (epoch seconds)."""
+    if not ts:
+        return 0.0
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(ts).timestamp()
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def _build_work_queue() -> list[dict]:
@@ -979,17 +1102,22 @@ def _build_work_queue() -> list[dict]:
         if not os.path.isfile(nerve_py):
             continue
         score = nerve_scores.get(name, 0.0)
-        if score < _get_improvement_threshold():
-            last_invoked = mem.cold.get_last_invoked_at(name)
-            queue.append({
-                "name": name,
-                "description": desc or name.replace("_", " "),
-                "score": score,
-                "last_invoked_at": last_invoked,
-            })
+        if score >= _get_improvement_threshold():
+            continue
+        # Only reconcile nerves that have actually been invoked —
+        # improving never-used nerves wastes LLM calls.
+        last_invoked = mem.cold.get_last_invoked_at(name)
+        if not last_invoked:
+            continue
+        queue.append({
+            "name": name,
+            "description": desc or name.replace("_", " "),
+            "score": score,
+            "last_invoked_at": last_invoked,
+        })
 
-    # Recently-used nerves first, then weakest score within each group
-    queue.sort(key=lambda x: (x["last_invoked_at"] is None, x["score"]))
+    # Most recently used first, then weakest score to break ties.
+    queue.sort(key=lambda x: (-_ts_key(x["last_invoked_at"]), x["score"]))
     return queue
 
 
@@ -1134,10 +1262,28 @@ def _detect_plateau(score_history: list[float]) -> bool:
     return improvement < PLATEAU_DELTA_THRESHOLD and recent[-1] < _get_improvement_threshold()
 
 
+def _is_template_test_bank(tests: list[dict]) -> bool:
+    """Detect community template test banks that need regeneration.
+
+    Template tests have placeholder outputs like '{"action": "call", "tool": "...", "args": {"input": "example"}}'
+    that don't represent real expected behavior for the nerve.
+    """
+    _TEMPLATE_MARKERS = ('"input": "example"', '"action": "error"', '"args": {}')
+    for tc in tests:
+        output = tc.get("output", "")
+        if any(marker in output for marker in _TEMPLATE_MARKERS):
+            return True
+    return False
+
+
 def _ensure_test_bank(name: str, description: str, stored_tests: list | None,
                       generate_test_cases) -> list | None:
-    """Ensure we have a sufficient test bank, generating if needed."""
-    if stored_tests and len(stored_tests) >= MAX_RETEST_CASES:
+    """Ensure we have a sufficient test bank, generating if needed.
+
+    Community template tests are detected and regenerated — they contain
+    placeholder outputs that don't match real nerve behavior.
+    """
+    if stored_tests and len(stored_tests) >= MAX_RETEST_CASES and not _is_template_test_bank(stored_tests):
         return stored_tests
     tests = generate_test_cases(name, description, "")
     if tests:
@@ -1316,7 +1462,12 @@ def _cleanup_tool_backups(applied_fixes: list[str]) -> None:
 
 def _apply_prompt_improvements(name: str, state: _ImprovementState,
                                 new_sp: str, new_ex: list, new_desc: str, meta: dict) -> None:
-    """Apply system prompt, examples, and description improvements."""
+    """Apply system prompt, examples, and description improvements.
+
+    Community nerves are read-only — their prompts come from the community cache.
+    """
+    if meta.get("origin") == "community":
+        return
     effective_desc = new_desc if new_desc and new_desc.strip() else state.description
     if not (new_sp or new_ex):
         return
@@ -1335,7 +1486,12 @@ def _apply_prompt_improvements(name: str, state: _ImprovementState,
 def _rollback_if_worse(name: str, description: str, prev_prompt: str, prev_score: float,
                        meta: dict, stored_tests: list[dict],
                        interrupted: threading.Event, run_nerve_with_input, evaluate_nerve_output) -> None:
-    """Roll back prompt changes if they made the score worse."""
+    """Roll back prompt changes if they made the score worse.
+
+    No-op for community nerves — their prompts are managed by the community cache.
+    """
+    if meta.get("origin") == "community":
+        return
     try:
         reeval_score = 0.0
         reeval_count = 0
@@ -1438,8 +1594,6 @@ class Dreamstate:
             mem.hot.clear_conversation()
         self._schedule()
 
-    # Backward compat
-    touch = wake
 
     def _schedule(self):
         """Schedule next dreamstate entry after IDLE_THRESHOLD seconds of silence."""
@@ -1548,7 +1702,15 @@ class Dreamstate:
         logger.info("[DREAMSTATE] Dream cycle complete — brain resting")
 
     def _dream_community_sync(self):
-        """Pull latest community manifest, seed new nerves/tools, and build tool environments."""
+        """Pull latest community manifest, seed new nerves/tools, and build tool environments.
+
+        Smart hydration: only downloads full bundles for nerves that need work,
+        rather than hydrating all ~100 community nerves blindly.
+        A nerve qualifies for hydration if:
+        1. It has been invoked AND scores below the quality threshold
+        2. OR it has no adapter tuned for the current model
+        3. OR it overlaps with a locally fabricated nerve (consolidation candidate)
+        """
         try:
             from arqitect.brain.community import sync_manifest, seed_tools, seed_nerves, hydrate_nerve_bundle
             manifest = sync_manifest()
@@ -1562,15 +1724,18 @@ class Dreamstate:
             # Build tool environments for any tools that need it
             self._dream_build_tool_envs()
 
-            # Hydrate deferred bundles — fetch full metadata for nerves
-            # that were registered lightweight at startup
-            catalog = mem.cold.list_nerves()
-            for nerve_name in catalog:
+            # Smart hydration — only fetch bundles for nerves that need work
+            candidates = _select_hydration_candidates()
+            if not candidates:
+                logger.info("[DREAMSTATE] No nerves need hydration")
+                return
+
+            logger.info("[DREAMSTATE] Hydrating %d nerve(s) (smart filter)", len(candidates))
+            for nerve_name, reason in candidates:
                 if self._interrupted.is_set():
                     break
-                meta = mem.cold.get_nerve_metadata(nerve_name)
-                if not meta.get("system_prompt"):
-                    hydrate_nerve_bundle(nerve_name)
+                logger.info("[DREAMSTATE] Hydrating %s (%s)", nerve_name, reason)
+                hydrate_nerve_bundle(nerve_name)
 
         except Exception as e:
             logger.warning("[DREAMSTATE] Community sync error: %s", e)
@@ -1809,21 +1974,22 @@ class Dreamstate:
                         logger.info("[MCP-FANOUT] '%s' new desc: %s", nerve_name, new_desc[:80])
                         changed = True
 
-                    # Update system_prompt
-                    if new_sp and new_sp != current_sp:
-                        role = nerve_meta.get("role", "tool")
-                        ex = new_examples if isinstance(new_examples, list) else nerve_meta.get("examples", [])
-                        mem.cold.register_nerve_rich(
-                            nerve_name, new_desc or current_desc, new_sp, json.dumps(ex), role
-                        )
-                        logger.info("[MCP-FANOUT] '%s' system_prompt updated (iter %d)", nerve_name, iteration)
-                        changed = True
-                    elif new_examples and isinstance(new_examples, list):
-                        # Update just examples
-                        role = nerve_meta.get("role", "tool")
-                        mem.cold.register_nerve_rich(
-                            nerve_name, current_desc, current_sp, json.dumps(new_examples), role
-                        )
+                    # Update system_prompt (skip for community nerves — prompts are read-only)
+                    if nerve_meta.get("origin") != "community":
+                        if new_sp and new_sp != current_sp:
+                            role = nerve_meta.get("role", "tool")
+                            ex = new_examples if isinstance(new_examples, list) else nerve_meta.get("examples", [])
+                            mem.cold.register_nerve_rich(
+                                nerve_name, new_desc or current_desc, new_sp, json.dumps(ex), role
+                            )
+                            logger.info("[MCP-FANOUT] '%s' system_prompt updated (iter %d)", nerve_name, iteration)
+                            changed = True
+                        elif new_examples and isinstance(new_examples, list):
+                            # Update just examples
+                            role = nerve_meta.get("role", "tool")
+                            mem.cold.register_nerve_rich(
+                                nerve_name, current_desc, current_sp, json.dumps(new_examples), role
+                            )
                         changed = True
 
                     # Wire existing tools
@@ -2117,7 +2283,7 @@ class Dreamstate:
             variant = adapter_info["variant"]
 
             # Filter episodes relevant to this role
-            if role == "brain":
+            if role == InferenceRole.BRAIN:
                 # Brain routes everything — all episodes are relevant
                 relevant_eps = all_episodes
             else:
@@ -2766,16 +2932,25 @@ class Dreamstate:
 
         Runs before fine-tuning so nerves can cross the min_training_examples
         threshold within a single dream cycle.
+
+        Only medium/large brains can generate useful test cases — tinylm/small
+        produce garbage that pollutes the training bank.
         """
         try:
             from arqitect.inference.tuner import collect_training_data
             from arqitect.critic.qualify_nerve import generate_test_cases
-            from arqitect.brain.adapters import get_tuning_config
+            from arqitect.brain.adapters import get_tuning_config, get_model_size_class
         except ImportError:
             return
 
+        # Brain size gate — only medium/large can fabricate test cases
+        brain_size = get_model_size_class("brain")
+        if brain_size not in ("medium", "large"):
+            return
+
         rows = mem.cold.conn.execute(
-            "SELECT name, description, role FROM nerve_registry WHERE is_sense=0"
+            "SELECT name, description, role FROM nerve_registry "
+            "WHERE is_sense=0 AND last_invoked_at IS NOT NULL"
         ).fetchall()
 
         for row in rows:
@@ -2980,8 +3155,8 @@ class Dreamstate:
         1. Observation — analyze accumulated interaction signals, score trait effectiveness
         2. Evolution — propose and apply trait changes within admin-defined anchor bounds
 
-        Replaces the legacy _dream_reflect with structured signal-based evolution,
-        anchor validation, and full history tracking.
+        Analyzes accumulated interaction signals, scores trait effectiveness,
+        then proposes and applies trait changes within admin-defined anchor bounds.
         """
         if self._interrupted.is_set():
             return
@@ -3062,7 +3237,7 @@ _dreamstate = None
 
 
 def get_consolidator() -> Dreamstate:
-    """Get the singleton dreamstate manager. Name kept for backward compat."""
+    """Get the singleton dreamstate manager."""
     global _dreamstate
     if _dreamstate is None:
         _dreamstate = Dreamstate()

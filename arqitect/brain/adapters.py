@@ -17,9 +17,18 @@ import urllib.request
 import urllib.error
 
 from arqitect.brain.community import _cache_dir, COMMUNITY_RAW_URL
+from arqitect.types import InferenceRole, NerveRole, Sense
 
 # Roles that have community adapters
-ADAPTER_ROLES = ("brain", "nerve", "creative", "code", "awareness", "communication", "vision")
+ADAPTER_ROLES = (
+    InferenceRole.BRAIN,
+    InferenceRole.NERVE,
+    InferenceRole.CREATIVE,
+    NerveRole.CODE,
+    Sense.AWARENESS,
+    InferenceRole.COMMUNICATION,
+    "vision",
+)
 
 # Valid size classes (directories in community repo)
 SIZE_CLASSES = ("tinylm", "small", "medium", "large")
@@ -30,7 +39,7 @@ SIZE_CLASSES = ("tinylm", "small", "medium", "large")
 #   - tool/nerve: precise structured I/O → attention steering (q, v)
 #   - code: syntax + structure → attention + MLP for richer code patterns
 #   - creative: diverse generation → wide targets, higher rank
-#   - vision: different architecture (moondream2 uses fused projections)
+#   - vision: different architecture (vision models use fused projections)
 #   - communication: tone/style → attention layers, lower rank
 #   - brain: routing accuracy → attention focus, conservative rank
 #
@@ -39,17 +48,17 @@ SIZE_CLASSES = ("tinylm", "small", "medium", "large")
 # per model architecture when community hasn't specified them.
 
 ROLE_TUNING_OVERRIDES = {
-    "tool": {
+    NerveRole.TOOL: {
         # Precise structured output — focus attention steering
         "lora_target_modules": ["q_proj", "v_proj"],
     },
-    "code": {
+    NerveRole.CODE: {
         # Syntax accuracy + structured generation — add MLP layers
         "lora_target_modules": ["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj", "down_proj"],
         "lora_rank": 16,
         "default_temperature": 0.2,
     },
-    "creative": {
+    InferenceRole.CREATIVE: {
         # Diverse generation — wider targets, higher rank, warmer temperature
         "lora_target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj"],
         "lora_rank": 16,
@@ -61,20 +70,20 @@ ROLE_TUNING_OVERRIDES = {
         "lora_rank": 8,
         "training_max_length": 384,
     },
-    "communication": {
+    InferenceRole.COMMUNICATION: {
         # Tone/style adaptation — attention layers, conservative
         "lora_target_modules": ["q_proj", "v_proj"],
         "lora_rank": 4,
         "default_temperature": 0.5,
     },
-    "brain": {
+    InferenceRole.BRAIN: {
         # Routing decisions — attention focus, low rank to avoid overfitting
         "lora_target_modules": ["q_proj", "v_proj"],
         "lora_rank": 4,
         "lora_lr": 1e-4,
         "default_temperature": 0.2,
     },
-    "awareness": {
+    Sense.AWARENESS: {
         # Self-reflection — similar to brain
         "lora_target_modules": ["q_proj", "v_proj"],
         "lora_rank": 4,
@@ -86,7 +95,7 @@ ROLE_TUNING_OVERRIDES = {
 # Senses map to themselves (brain, awareness, etc.).
 # All other nerve roles map to "nerve" (the generic nerve adapter).
 _ROLE_TO_ADAPTER = {
-    "tool": "nerve", "data": "nerve", "scheduler": "nerve",
+    NerveRole.TOOL: "nerve", "data": "nerve", "scheduler": "nerve",
     "generative": "creative",
 }
 
@@ -172,8 +181,8 @@ _ADAPTER_FILES = ("context.json", "meta.json", "test_bank.jsonl")
 def _model_slug(model_file: str) -> str:
     """Derive a stable directory-safe model slug from a model filename.
 
-    e.g. 'Qwen2.5-Coder-7B.gguf' → 'qwen2.5-coder-7b'
-         'moondream2-text-model-f16.gguf' → 'moondream2-text-model-f16'
+    e.g. 'My-Model-7B.gguf' → 'my-model-7b'
+         'vision-model-f16.gguf' → 'vision-model-f16'
     """
     slug = model_file.lower()
     for ext in (".gguf", ".bin", ".safetensors"):
@@ -185,8 +194,9 @@ def _model_slug(model_file: str) -> str:
 def _get_model_file_for_role(role: str) -> str | None:
     """Get the raw model filename for a role from registry or yaml config."""
     try:
-        from arqitect.inference.model_registry import MODEL_REGISTRY
-        entry = MODEL_REGISTRY.get(role)
+        from arqitect.inference.model_registry import MODEL_REGISTRY, resolve_registry_key
+        registry_key = resolve_registry_key(role)
+        entry = MODEL_REGISTRY.get(registry_key)
         if entry:
             return entry.get("file", "")
     except ImportError:
@@ -252,53 +262,125 @@ def _load_test_bank(role: str, *path_parts: str) -> list[dict]:
 
 # ── Size class mapping ──────────────────────────────────────────────
 
+import re
+
+_PARAM_REGEX = re.compile(r"(?<![.\d])(\d+(?:\.\d+)?)b(?![a-z])", re.IGNORECASE)
+"""Extract parameter count from a model name.
+
+Matches patterns like '7b', '13b', '3.8b', '70b', '0.5b'.
+Negative lookbehind prevents matching the 'b' inside unrelated tokens.
+Negative lookahead prevents matching 'billion' etc.
+"""
+
+
+def _extract_param_billions(model_name: str) -> float | None:
+    """Extract the parameter count (in billions) from a model name.
+
+    Returns None if no recognizable param count is found.
+    """
+    match = _PARAM_REGEX.search(model_name.lower())
+    if not match:
+        return None
+    return float(match.group(1))
+
+
+# Param-count thresholds (billions) for size class bucketing.
+# Align with common model families:
+#   tinylm: 0.5B, 1B, 1.3B, 1.5B, 2B
+#   small:  3B, 3.8B, 4B
+#   medium: 7B, 8B, 13B, 14B
+#   large:  30B, 34B, 70B, 72B, 405B
+_TINYLM_MAX_PARAMS = 3
+_SMALL_MAX_PARAMS = 6
+_MEDIUM_MAX_PARAMS = 32
+
+
+def _params_to_size_class(billions: float) -> str:
+    """Bucket a parameter count into a size class."""
+    if billions < _TINYLM_MAX_PARAMS:
+        return "tinylm"
+    if billions < _SMALL_MAX_PARAMS:
+        return "small"
+    if billions < _MEDIUM_MAX_PARAMS:
+        return "medium"
+    return "large"
+
+
+def _is_cloud_provider(role: str) -> bool:
+    """Check whether a role is served by a cloud provider.
+
+    Cloud models don't have param counts in their names but are
+    frontier-class — they map to the 'large' size class.
+    """
+    try:
+        from arqitect.config.loader import get_per_role_provider, get_inference_provider
+        from arqitect.inference.providers import PROVIDER_META
+
+        provider_name = get_per_role_provider(role) or get_inference_provider()
+        meta = PROVIDER_META.get(provider_name, {})
+        return meta.get("category") == "cloud"
+    except Exception:
+        return False
+
+
 def _model_to_size_class(model_name: str) -> str | None:
     """Map a model name to a size class for adapter resolution.
 
-    Derives from parameter count in the model filename.
-    Models without a recognizable count need an explicit entry
-    in _MODEL_SIZE_OVERRIDES.
+    Uses regex to extract the parameter count (e.g. '7b' → 7.0 → medium).
+    Returns None when no param count is found — callers that need a cloud
+    fallback should use ``get_model_size_class`` which checks the provider.
     """
     if not model_name:
         return None
-    name = model_name.lower()
-    _MODEL_SIZE_OVERRIDES = {
-        "moondream": "small",
-    }
-    for pattern, size in _MODEL_SIZE_OVERRIDES.items():
-        if pattern in name:
-            return size
-    if any(s in name for s in ("0.5b", "1b", "1.5b")):
-        return "tinylm"
-    if any(s in name for s in ("3b", "4b")):
-        return "small"
-    if any(s in name for s in ("7b", "8b", "13b")):
-        return "medium"
-    if any(s in name for s in ("30b", "34b", "70b")):
+    params = _extract_param_billions(model_name)
+    if params is None:
+        return None
+    return _params_to_size_class(params)
+
+
+def get_model_size_class(role: str) -> str | None:
+    """Get the size class for the model currently assigned to a role.
+
+    Resolution order:
+        1. Extract param count from model filename (GGUF models).
+        2. If no param count and provider is cloud → 'large'.
+        3. Otherwise → None.
+    """
+    f = _get_model_file_for_role(role)
+    size = _model_to_size_class(f) if f else None
+    if size:
+        return size
+    # Cloud models (opus4, gpt-4o, gemini-2.0-flash) don't embed param counts.
+    # All cloud providers are frontier-class → large.
+    if _is_cloud_provider(role):
         return "large"
     return None
 
 
-def get_model_size_class(role: str) -> str | None:
-    """Get the size class for the model currently assigned to a role."""
-    f = _get_model_file_for_role(role)
-    return _model_to_size_class(f) if f else None
+def get_raw_model_name(role: str) -> str | None:
+    """Get the raw model name string for a role (not slugified).
+
+    Returns the per-role model override, the flat model config, or None.
+    Used for provenance tagging — records which model generated test cases.
+    Unlike ``get_model_name_for_role``, this returns the original name
+    (e.g. 'claude-sonnet-4-20250514') not a filesystem-safe slug.
+    """
+    try:
+        from arqitect.config.loader import get_per_role_model, get_model_for_role
+        return get_per_role_model(role) or get_model_for_role(role) or None
+    except Exception:
+        return _get_model_file_for_role(role)
 
 
 def get_active_variant(role: str) -> str:
     """Get the size class for this role's model.
 
     Always derived from config — never hardcoded.
-    Raises ValueError if the model can't be mapped.
+    Falls back to 'small' if the model can't be classified.
     """
     size = get_model_size_class(role)
     if not size:
-        model = _get_model_file_for_role(role)
-        raise ValueError(
-            f"Cannot determine size class for role '{role}' "
-            f"(model: '{model}'). Add a parameter count (e.g. 7B) "
-            f"to the model name or update _model_to_size_class()."
-        )
+        return "small"
     return size
 
 
@@ -438,10 +520,7 @@ def resolve_nerve_prompt(nerve_name: str, role: str) -> dict | None:
         nerves/{name}/{size_class}/{model_slug}/context.json
       → nerves/{name}/{size_class}/context.json
     """
-    try:
-        size_class = get_active_variant(role)
-    except ValueError:
-        return None
+    size_class = get_active_variant(role)
     model_slug = get_model_name_for_role(role)
 
     if model_slug:
@@ -457,10 +536,7 @@ def resolve_nerve_meta(nerve_name: str, role: str) -> dict | None:
 
     Merges base (size_class) with model-specific override, same as resolve_meta.
     """
-    try:
-        size_class = get_active_variant(role)
-    except ValueError:
-        return None
+    size_class = get_active_variant(role)
     model_slug = get_model_name_for_role(role)
 
     base = _load_json(_nerve_cache_dir(nerve_name, size_class, "meta.json"))
@@ -485,14 +561,25 @@ def resolve_nerve_meta(nerve_name: str, role: str) -> dict | None:
 # ── Convenience getters ─────────────────────────────────────────────
 
 def get_temperature(role: str) -> float:
+    """Get sampling temperature from the community adapter for a role.
+
+    Returns 0.7 if no adapter is configured.
+    """
     ctx = resolve_prompt(role)
-    return ctx["temperature"]
+    if ctx:
+        return ctx.get("temperature", 0.7)
+    return 0.7
 
 
 def get_max_tokens(role: str) -> int:
-    """Get max output tokens from the community adapter for a role."""
+    """Get max output tokens from the community adapter for a role.
+
+    Returns 2048 if no adapter is configured.
+    """
     ctx = resolve_prompt(role)
-    return ctx["max_tokens"]
+    if ctx:
+        return ctx.get("max_tokens", 2048)
+    return 2048
 
 
 _DEFAULT_CONVERSATION_WINDOW = 10
@@ -523,6 +610,19 @@ def get_message_truncation(role: str) -> int:
     return _DEFAULT_MESSAGE_TRUNCATION
 
 
+def get_max_context(role: str) -> int:
+    """Get the context window size from the community adapter for a role.
+
+    Reads capabilities.max_context from the adapter meta.json.
+    Returns 2048 if no adapter is configured.
+    """
+    meta = resolve_meta(role)
+    if meta:
+        caps = meta.get("capabilities", {})
+        return caps.get("max_context", 2048)
+    return 2048
+
+
 def get_json_mode(role: str) -> bool:
     meta = resolve_meta(role)
     if meta:
@@ -539,8 +639,22 @@ def get_description(role: str) -> str:
 
 
 def get_qualification_score(role: str) -> float:
+    """Return the qualification_score from the resolved adapter context."""
     ctx = resolve_prompt(role)
     return float(ctx.get("qualification_score", 0)) if ctx else 0.0
+
+
+def has_model_specific_adapter(role: str) -> bool:
+    """Check if a model-specific adapter context exists for the current model.
+
+    Returns False if only size-class defaults exist (no tuning done for
+    the specific model currently assigned to this role).
+    """
+    model_slug = get_model_name_for_role(role)
+    if not model_slug:
+        return False
+    variant = get_active_variant(role)
+    return _load_context(role, variant, model_slug) is not None
 
 
 # ── Save (local persistence for dream state) ────────────────────────
@@ -574,7 +688,6 @@ def save_model_adapter(role: str, context: dict | None = None, meta: dict | None
     _save_to(dest_dir, context, meta, tests)
 
 
-# Back-compat aliases used by consolidate.py
 def save_context(role: str, context: dict, variant: str):
     """Save context.json to model-specific directory."""
     model_slug = get_model_name_for_role(role)

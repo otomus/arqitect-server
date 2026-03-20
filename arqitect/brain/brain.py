@@ -1,11 +1,12 @@
 """
 The Progenitor (Brain) — high-level reasoning and nerve synthesis.
-Uses Qwen2.5-Coder-7B via in-process GGUF inference for reasoning and code generation.
+Uses the configured brain model via the inference router for reasoning and code generation.
 Communicates with nerves over Redis Pub/Sub.
 Three-tier memory: Hot (Redis) + Warm (SQLite episodes) + Cold (SQLite knowledge).
 """
 
 import json
+import logging
 import os
 import re
 import subprocess
@@ -15,6 +16,13 @@ import time
 # Force unbuffered output for daemon mode
 sys.stdout.reconfigure(line_buffering=True)
 
+# Configure logging so logger.info() calls in all modules are visible.
+# The brain runs as a daemon with stdout/stderr redirected to brain.log.
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(message)s",
+    stream=sys.stdout,
+)
 
 import base64
 import redis
@@ -25,7 +33,7 @@ from arqitect.brain.config import (
     DOMAIN_INDEXER_PATH, CORE_SENSES,
     r, mem,
 )
-from arqitect.brain.types import Action, Channel, IntentType, NerveStatus, RedisKey
+from arqitect.types import Action, Channel, IntentType, NerveStatus, RedisKey
 from arqitect.brain.helpers import (
     llm_generate, extract_json,
     _is_nerve_error, _graceful_failure_message, _substitute_fact_values_brain,
@@ -800,6 +808,14 @@ def think(task: str, history: list[str] | None = None, depth: int = 0) -> str:
 
 def listen_redis():
     """Listen for tasks on Redis Pub/Sub (daemon mode for dashboard)."""
+    # Initialize OpenTelemetry tracing (writes to ./traces/*.jsonl)
+    try:
+        from arqitect.telemetry import init_telemetry
+        trace_file = init_telemetry()
+        print(f"[TELEMETRY] Tracing to {trace_file}")
+    except Exception as e:
+        print(f"[TELEMETRY] Init failed (tracing disabled): {e}")
+
     try:
         # Bootstrap core senses (immutable, always present)
         bootstrap_senses()

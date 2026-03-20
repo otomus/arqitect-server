@@ -4,7 +4,7 @@ Covers:
 - Domain detection from keywords
 - is_indexed checks against SQLite
 - URL fetching with HTML stripping
-- LLM fact extraction and JSON parsing
+- LLM fact extraction and JSON parse
 - Fact storage in SQLite with upsert
 - index_domain pipeline branches
 - Project profiling: package.json, pyproject.toml, Cargo.toml, go.mod
@@ -17,10 +17,14 @@ Covers:
 import json
 import os
 import sqlite3
-from unittest.mock import patch, MagicMock
+import tempfile
+from unittest.mock import patch
 
 import pytest
 import responses
+from dirty_equals import IsInstance, IsNonNegative
+from hypothesis import given, settings, HealthCheck
+from hypothesis import strategies as st
 
 from arqitect.knowledge.domain_indexer import (
     AUTHORITY_URLS,
@@ -46,8 +50,49 @@ from arqitect.knowledge.project_profiler import (
 )
 
 
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+def _create_facts_table(db_path: str) -> None:
+    """Create the facts table in a SQLite database at db_path."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS facts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT NOT NULL,
+            confidence REAL DEFAULT 1.0,
+            UNIQUE(category, key)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _insert_fact(db_path: str, category: str, key: str, value: str) -> None:
+    """Insert a single fact row into the facts table."""
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO facts (category, key, value) VALUES (?, ?, ?)",
+        (category, key, value),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _query_facts(db_path: str, category: str) -> list[tuple]:
+    """Return all (key, value) pairs for a given category."""
+    conn = sqlite3.connect(db_path)
+    rows = conn.execute(
+        "SELECT key, value FROM facts WHERE category=?", (category,)
+    ).fetchall()
+    conn.close()
+    return rows
+
+
 # ── Domain Detection ─────────────────────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestDetectDomain:
     """Keyword-based domain detection from user input."""
 
@@ -87,9 +132,25 @@ class TestDetectDomain:
         """Empty string returns None."""
         assert detect_domain("") is None
 
+    @given(keyword=st.sampled_from(list(DOMAIN_MAP.keys())))
+    @settings(max_examples=30)
+    def test_every_keyword_maps_to_its_domain(self, keyword: str):
+        """Every keyword in DOMAIN_MAP triggers its declared domain."""
+        expected_domain = DOMAIN_MAP[keyword]
+        result = detect_domain(f"tell me about {keyword} please")
+        assert result == expected_domain
+
+    @given(text=st.text(alphabet=st.characters(whitelist_categories=("Lu", "Ll")), min_size=1, max_size=20))
+    @settings(max_examples=30)
+    def test_returns_string_or_none(self, text: str):
+        """detect_domain always returns a str or None — never raises."""
+        result = detect_domain(text)
+        assert result is None or isinstance(result, str)
+
 
 # ── is_indexed ────────────────────────────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestIsIndexed:
     """Check whether domain facts already exist in SQLite."""
 
@@ -101,19 +162,7 @@ class TestIsIndexed:
     def test_returns_false_for_empty_db(self, tmp_path):
         """Returns False when the database exists but has no matching facts."""
         db_path = str(tmp_path / "knowledge.db")
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                confidence REAL DEFAULT 1.0,
-                UNIQUE(category, key)
-            )
-        """)
-        conn.commit()
-        conn.close()
+        _create_facts_table(db_path)
 
         with patch("arqitect.knowledge.domain_indexer._DB_PATH", db_path):
             assert is_indexed("python") is False
@@ -121,21 +170,8 @@ class TestIsIndexed:
     def test_returns_true_when_facts_exist(self, tmp_path):
         """Returns True when matching domain facts exist."""
         db_path = str(tmp_path / "knowledge.db")
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT NOT NULL,
-                key TEXT NOT NULL,
-                value TEXT NOT NULL,
-                confidence REAL DEFAULT 1.0,
-                UNIQUE(category, key)
-            )
-        """)
-        conn.execute("INSERT INTO facts (category, key, value) VALUES (?, ?, ?)",
-                      ("domain:python", "list_comprehension", "Compact syntax for lists"))
-        conn.commit()
-        conn.close()
+        _create_facts_table(db_path)
+        _insert_fact(db_path, "domain:python", "list_comprehension", "Compact syntax for lists")
 
         with patch("arqitect.knowledge.domain_indexer._DB_PATH", db_path):
             assert is_indexed("python") is True
@@ -151,6 +187,7 @@ class TestIsIndexed:
 
 # ── _fetch_url ────────────────────────────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestFetchUrl:
     """URL fetching with HTML stripping."""
 
@@ -206,6 +243,7 @@ class TestFetchUrl:
 
 # ── _extract_facts_with_llm ──────────────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestExtractFactsWithLLM:
     """LLM-based fact extraction from source text."""
 
@@ -256,6 +294,7 @@ class TestExtractFactsWithLLM:
 
 # ── _store_facts ──────────────────────────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestStoreFacts:
     """Fact storage in SQLite with upsert semantics."""
 
@@ -268,9 +307,7 @@ class TestStoreFacts:
                 {"key": "decorator", "value": "Function wrapper"},
             ])
 
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute("SELECT key, value FROM facts WHERE category='domain:python'").fetchall()
-        conn.close()
+        rows = _query_facts(db_path, "domain:python")
         assert len(rows) == 2
         keys = {r[0] for r in rows}
         assert "list_comprehension" in keys
@@ -283,10 +320,9 @@ class TestStoreFacts:
             _store_facts("python", [{"key": "test", "value": "original"}])
             _store_facts("python", [{"key": "test", "value": "updated"}])
 
-        conn = sqlite3.connect(db_path)
-        row = conn.execute("SELECT value FROM facts WHERE category='domain:python' AND key='test'").fetchone()
-        conn.close()
-        assert row[0] == "updated"
+        rows = _query_facts(db_path, "domain:python")
+        assert len(rows) == 1
+        assert rows[0][1] == "updated"
 
     def test_normalizes_keys(self, tmp_path):
         """Keys are lowercased and spaces replaced with underscores."""
@@ -294,32 +330,41 @@ class TestStoreFacts:
         with patch("arqitect.knowledge.domain_indexer._DB_PATH", db_path):
             _store_facts("python", [{"key": " My Key Name ", "value": "test"}])
 
-        conn = sqlite3.connect(db_path)
-        row = conn.execute("SELECT key FROM facts WHERE category='domain:python'").fetchone()
-        conn.close()
-        assert row[0] == "my_key_name"
+        rows = _query_facts(db_path, "domain:python")
+        assert rows[0][0] == "my_key_name"
+
+    @given(
+        key=st.text(
+            alphabet=st.characters(whitelist_categories=("L", "Nd", "Zs")),
+            min_size=1, max_size=30,
+        ),
+        value=st.text(min_size=1, max_size=100),
+    )
+    @settings(max_examples=15, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_store_and_retrieve_roundtrip(self, tmp_path, key, value):
+        """Any key/value pair survives a store-then-query round-trip."""
+        with tempfile.TemporaryDirectory() as td:
+            db_path = os.path.join(td, "knowledge.db")
+            with patch("arqitect.knowledge.domain_indexer._DB_PATH", db_path):
+                _store_facts("roundtrip", [{"key": key, "value": value}])
+
+            rows = _query_facts(db_path, "domain:roundtrip")
+            assert len(rows) >= 1
+            stored_value = rows[0][1]
+            assert stored_value == value.strip()
 
 
 # ── index_domain ──────────────────────────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestIndexDomain:
     """Full indexing pipeline for a domain."""
 
     def test_skips_already_indexed_domain(self, tmp_path, capsys):
         """Skips indexing when domain already has facts."""
         db_path = str(tmp_path / "knowledge.db")
-        conn = sqlite3.connect(db_path)
-        conn.execute("""
-            CREATE TABLE facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                category TEXT NOT NULL, key TEXT NOT NULL,
-                value TEXT NOT NULL, confidence REAL DEFAULT 1.0,
-                UNIQUE(category, key)
-            )
-        """)
-        conn.execute("INSERT INTO facts (category, key, value) VALUES ('domain:python', 'k', 'v')")
-        conn.commit()
-        conn.close()
+        _create_facts_table(db_path)
+        _insert_fact(db_path, "domain:python", "k", "v")
 
         with patch("arqitect.knowledge.domain_indexer._DB_PATH", db_path):
             index_domain("python")
@@ -334,14 +379,12 @@ class TestIndexDomain:
         url = AUTHORITY_URLS["python"]
         responses.add(responses.GET, url, body="<p>Python docs</p>", status=200)
 
-        facts_json = json.dumps([{"key": "test_fact", "value": "test value"}])
         with patch("arqitect.knowledge.domain_indexer._DB_PATH", db_path), \
-             patch("arqitect.knowledge.domain_indexer._extract_facts_with_llm", return_value=[{"key": "test_fact", "value": "test value"}]):
+             patch("arqitect.knowledge.domain_indexer._extract_facts_with_llm",
+                   return_value=[{"key": "test_fact", "value": "test value"}]):
             index_domain("python")
 
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute("SELECT * FROM facts WHERE category='domain:python'").fetchall()
-        conn.close()
+        rows = _query_facts(db_path, "domain:python")
         assert len(rows) == 1
 
     @responses.activate
@@ -354,12 +397,11 @@ class TestIndexDomain:
             status=200,
         )
         with patch("arqitect.knowledge.domain_indexer._DB_PATH", db_path), \
-             patch("arqitect.knowledge.domain_indexer._extract_facts_with_llm", return_value=[{"key": "kotlin", "value": "JVM language"}]):
+             patch("arqitect.knowledge.domain_indexer._extract_facts_with_llm",
+                   return_value=[{"key": "kotlin", "value": "JVM language"}]):
             index_domain("kotlin")
 
-        conn = sqlite3.connect(db_path)
-        rows = conn.execute("SELECT * FROM facts WHERE category='domain:kotlin'").fetchall()
-        conn.close()
+        rows = _query_facts(db_path, "domain:kotlin")
         assert len(rows) == 1
 
     def test_returns_early_when_no_facts_extracted(self, tmp_path, capsys):
@@ -376,6 +418,7 @@ class TestIndexDomain:
 
 # ── Project Profiler: _read_json / _read_toml ────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestReadHelpers:
     """JSON and TOML file reading helpers."""
 
@@ -401,9 +444,24 @@ class TestReadHelpers:
         """Returns empty dict for missing TOML file."""
         assert _read_toml("/nonexistent/path.toml") == {}
 
+    @given(data=st.dictionaries(
+        keys=st.text(min_size=1, max_size=10, alphabet=st.characters(whitelist_categories=("L",))),
+        values=st.text(min_size=0, max_size=50),
+        min_size=0, max_size=5,
+    ))
+    @settings(max_examples=10, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_read_json_roundtrip(self, tmp_path, data):
+        """Any JSON-serializable dict survives a write-then-read round-trip."""
+        with tempfile.TemporaryDirectory() as td:
+            p = os.path.join(td, "roundtrip.json")
+            with open(p, "w") as f:
+                json.dump(data, f)
+            assert _read_json(p) == data
+
 
 # ── Project Profiler: _detect_from_package_json ──────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestDetectFromPackageJson:
     """Extract project facts from package.json."""
 
@@ -494,6 +552,7 @@ class TestDetectFromPackageJson:
 
 # ── Project Profiler: _detect_from_pyproject ─────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestDetectFromPyproject:
     """Extract project facts from pyproject.toml or requirements.txt."""
 
@@ -558,6 +617,7 @@ class TestDetectFromPyproject:
 
 # ── Project Profiler: _detect_from_cargo ─────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestDetectFromCargo:
     """Extract project facts from Cargo.toml."""
 
@@ -580,6 +640,7 @@ class TestDetectFromCargo:
 
 # ── Project Profiler: _detect_from_go_mod ────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestDetectFromGoMod:
     """Extract project facts from go.mod."""
 
@@ -621,6 +682,7 @@ class TestDetectFromGoMod:
 
 # ── Project Profiler: _scan_structure ────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestScanStructure:
     """Directory structure scanning."""
 
@@ -681,6 +743,7 @@ class TestScanStructure:
 
 # ── Project Profiler: _detect_conventions ────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestDetectConventions:
     """Convention detection from config files."""
 
@@ -729,6 +792,7 @@ class TestDetectConventions:
 
 # ── Project Profiler: profile_project ────────────────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestProfileProject:
     """Full project profiling integration."""
 
@@ -766,9 +830,16 @@ class TestProfileProject:
         facts = profile_project(str(tmp_path))
         assert facts["language"] == "javascript"
 
+    def test_profile_always_includes_name_and_path(self, tmp_path):
+        """Every successful profile contains name and path keys."""
+        facts = profile_project(str(tmp_path))
+        assert facts["name"] == IsInstance(str)
+        assert facts["path"] == str(tmp_path)
+
 
 # ── Project Profiler: format_profile_for_prompt ──────────────────────────────
 
+@pytest.mark.timeout(10)
 class TestFormatProfileForPrompt:
     """Formatting project facts for LLM prompt injection."""
 
@@ -804,3 +875,14 @@ class TestFormatProfileForPrompt:
         result = format_profile_for_prompt(facts)
         assert "myapp" in result
         assert "/app" in result
+
+    @given(
+        name=st.text(min_size=1, max_size=20, alphabet=st.characters(whitelist_categories=("L", "Nd"))),
+        path=st.text(min_size=1, max_size=50, alphabet=st.characters(whitelist_categories=("L", "Nd", "P"))),
+    )
+    @settings(max_examples=15)
+    def test_format_never_raises(self, name, path):
+        """format_profile_for_prompt never raises for valid name/path dicts."""
+        result = format_profile_for_prompt({"name": name, "path": path})
+        assert isinstance(result, str)
+        assert len(result) == IsNonNegative

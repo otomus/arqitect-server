@@ -18,6 +18,7 @@ import time
 
 from arqitect.brain.config import BRAIN_MODEL
 from arqitect.brain.helpers import llm_generate, extract_json
+from arqitect.types import Action
 
 
 _RECIPES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipes")
@@ -172,7 +173,7 @@ def _recipe_to_chain(recipe: dict, task: str, project_facts: dict | None) -> dic
         })
 
     return {
-        "action": "chain_nerves",
+        "action": Action.CHAIN_NERVES,
         "steps": steps,
         "goal": task,
         "recipe_id": recipe.get("id", ""),

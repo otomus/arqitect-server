@@ -1,14 +1,18 @@
 """Tests for the arqitect init wizard.
 
 Mocks all interactive I/O (input + file dialogs) so tests run headlessly.
+Uses dirty_equals for flexible config assertions and parametrize for
+repetitive patterns.
 """
 
 import copy
+import os
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
 import yaml
+from dirty_equals import IsStr, IsDict, IsPartialDict, IsPositiveInt
 
 from arqitect.cli.wizard import (
     _step_environment,
@@ -22,6 +26,8 @@ from arqitect.cli.wizard import (
     _step_storage,
     _step_admin,
     _write_config,
+    find_local_name,
+    resolve_model_selection,
     run_wizard,
     STEPS,
 )
@@ -34,7 +40,7 @@ def fresh_config() -> dict:
     return copy.deepcopy(DEFAULTS)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────
+# -- Helpers ----------------------------------------------------------------
 
 class _InputSequence:
     """Feed a predefined sequence of answers to input() calls."""
@@ -51,36 +57,173 @@ class _InputSequence:
         return val
 
 
-# ── Step tests ───────────────────────────────────────────────────────────
+# -- Model resolution (pure logic, no I/O) ---------------------------------
 
+@pytest.mark.timeout(10)
+class TestFindLocalName:
+    """find_local_name resolves symlinks and direct matches in models_dir."""
+
+    def test_direct_file_match(self, tmp_path: Path) -> None:
+        model_file = tmp_path / "model.gguf"
+        model_file.touch()
+        result = find_local_name(tmp_path, model_file.resolve())
+        assert result == "model.gguf"
+
+    def test_symlink_resolves_to_target(self, tmp_path: Path) -> None:
+        blobs_dir = tmp_path / "blobs"
+        blobs_dir.mkdir()
+        blob = blobs_dir / "sha256-abc123"
+        blob.touch()
+
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        link = models_dir / "Qwen2.5-Coder-7B.gguf"
+        link.symlink_to(blob)
+
+        result = find_local_name(models_dir, blob.resolve())
+        assert result == "Qwen2.5-Coder-7B.gguf"
+
+    def test_no_match_returns_none(self, tmp_path: Path) -> None:
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        (models_dir / "other.gguf").touch()
+
+        unrelated = tmp_path / "elsewhere" / "blob"
+        unrelated.parent.mkdir()
+        unrelated.touch()
+
+        result = find_local_name(models_dir, unrelated.resolve())
+        assert result is None
+
+    def test_nonexistent_dir_returns_none(self, tmp_path: Path) -> None:
+        fake_dir = tmp_path / "does_not_exist"
+        target = tmp_path / "file.gguf"
+        target.touch()
+        result = find_local_name(fake_dir, target.resolve())
+        assert result is None
+
+    def test_multiple_symlinks_returns_first_match(self, tmp_path: Path) -> None:
+        blob = tmp_path / "blob"
+        blob.touch()
+
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        (models_dir / "link_a.gguf").symlink_to(blob)
+        (models_dir / "link_b.gguf").symlink_to(blob)
+
+        result = find_local_name(models_dir, blob.resolve())
+        assert result in ("link_a.gguf", "link_b.gguf")
+
+
+@pytest.mark.timeout(10)
+class TestResolveModelSelection:
+    """resolve_model_selection picks the right (model_name, models_dir) pair."""
+
+    def test_symlink_in_models_dir(self, tmp_path: Path) -> None:
+        """Picking a blob that has a symlink in models_dir returns the symlink name."""
+        blobs_dir = tmp_path / "blobs"
+        blobs_dir.mkdir()
+        blob = blobs_dir / "sha256-abc123"
+        blob.touch()
+
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        (models_dir / "Qwen2.5-Coder-7B.gguf").symlink_to(blob)
+
+        name, dir_ = resolve_model_selection(str(blob), str(models_dir))
+        assert name == "Qwen2.5-Coder-7B.gguf"
+        assert dir_ == str(models_dir)
+
+    def test_direct_file_in_models_dir(self, tmp_path: Path) -> None:
+        """Picking a file already in models_dir returns its name."""
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        model = models_dir / "brain.gguf"
+        model.touch()
+
+        name, dir_ = resolve_model_selection(str(model), str(models_dir))
+        assert name == "brain.gguf"
+        assert dir_ == str(models_dir)
+
+    def test_file_outside_models_dir_updates_dir(self, tmp_path: Path) -> None:
+        """Picking a file not reachable from models_dir sets models_dir to its parent."""
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+
+        other_dir = tmp_path / "other"
+        other_dir.mkdir()
+        model = other_dir / "custom.gguf"
+        model.touch()
+
+        name, dir_ = resolve_model_selection(str(model), str(models_dir))
+        assert name == "custom.gguf"
+        assert dir_ == str(other_dir)
+
+    def test_no_models_dir_sets_from_file_parent(self, tmp_path: Path) -> None:
+        """When models_dir is empty, use the selected file's parent."""
+        some_dir = tmp_path / "somewhere"
+        some_dir.mkdir()
+        model = some_dir / "model.gguf"
+        model.touch()
+
+        name, dir_ = resolve_model_selection(str(model), "")
+        assert name == "model.gguf"
+        assert dir_ == str(some_dir)
+
+    def test_second_pick_preserves_models_dir(self, tmp_path: Path) -> None:
+        """Simulates picking brain from blobs, then vision from models_dir.
+
+        Both files share the same real target via symlink -- models_dir
+        should stay stable and both names should resolve locally.
+        """
+        blobs_dir = tmp_path / "blobs"
+        blobs_dir.mkdir()
+        brain_blob = blobs_dir / "sha256-brain"
+        brain_blob.touch()
+        vision_file = tmp_path / "models" / "moondream.gguf"
+
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        (models_dir / "Qwen.gguf").symlink_to(brain_blob)
+        vision_file.touch()
+
+        # First pick: brain blob
+        name1, dir1 = resolve_model_selection(str(brain_blob), str(models_dir))
+        assert name1 == "Qwen.gguf"
+        assert dir1 == str(models_dir)
+
+        # Second pick: vision file from same models_dir
+        name2, dir2 = resolve_model_selection(str(vision_file), dir1)
+        assert name2 == "moondream.gguf"
+        assert dir2 == str(models_dir)
+
+
+# -- Step tests -------------------------------------------------------------
+
+@pytest.mark.timeout(10)
 class TestStepEnvironment:
     """Environment step should set top-level environment field."""
 
-    def test_desktop(self, fresh_config: dict) -> None:
-        answers = _InputSequence(["1"])
+    @pytest.mark.parametrize(
+        ("input_choice", "expected_env"),
+        [
+            ("1", "desktop"),
+            ("2", "server"),
+            ("3", "iot"),
+            ("", "server"),  # default
+        ],
+        ids=["desktop", "server", "iot", "default-is-server"],
+    )
+    def test_environment_choices(
+        self, fresh_config: dict, input_choice: str, expected_env: str
+    ) -> None:
+        answers = _InputSequence([input_choice])
         with patch("builtins.input", answers):
             _step_environment(fresh_config)
-        assert fresh_config["environment"] == "desktop"
-
-    def test_server(self, fresh_config: dict) -> None:
-        answers = _InputSequence(["2"])
-        with patch("builtins.input", answers):
-            _step_environment(fresh_config)
-        assert fresh_config["environment"] == "server"
-
-    def test_iot(self, fresh_config: dict) -> None:
-        answers = _InputSequence(["3"])
-        with patch("builtins.input", answers):
-            _step_environment(fresh_config)
-        assert fresh_config["environment"] == "iot"
-
-    def test_default_is_server(self, fresh_config: dict) -> None:
-        answers = _InputSequence([""])
-        with patch("builtins.input", answers):
-            _step_environment(fresh_config)
-        assert fresh_config["environment"] == "server"
+        assert fresh_config["environment"] == expected_env
 
 
+@pytest.mark.timeout(10)
 class TestStepBrainModel:
     """Brain model step should set provider, models, roles, and prompt for API keys.
 
@@ -99,13 +242,14 @@ class TestStepBrainModel:
         with patch("builtins.input", answers):
             _step_brain_model(fresh_config)
 
-        assert fresh_config["inference"]["provider"] == "gguf"
-        assert fresh_config["inference"]["models"]["brain"] == "/models/test.gguf"
-        assert fresh_config["inference"]["models"]["nerve"] == "/models/test.gguf"
-        assert fresh_config["inference"]["models_dir"] == "/models"
+        assert fresh_config["inference"] == IsPartialDict(
+            provider="gguf",
+            models_dir="/models",
+            models=IsPartialDict(brain="test.gguf", nerve="test.gguf"),
+        )
         # Per-role config also written
         assert fresh_config["inference"]["roles"]["brain"]["provider"] == "gguf"
-        assert fresh_config["inference"]["roles"]["nerve"]["model"] == "/models/test.gguf"
+        assert fresh_config["inference"]["roles"]["nerve"]["model"] == "test.gguf"
 
     @patch("arqitect.cli.wizard._open_file_dialog")
     def test_gguf_different_model_per_role(self, mock_dialog: MagicMock, fresh_config: dict) -> None:
@@ -128,11 +272,13 @@ class TestStepBrainModel:
         with patch("builtins.input", answers):
             _step_brain_model(fresh_config)
 
-        assert fresh_config["inference"]["models"]["brain"] == "/models/brain.gguf"
-        assert fresh_config["inference"]["models"]["nerve"] == "/models/nerve.gguf"
-        assert fresh_config["inference"]["models"]["coder"] == "/models/coder.gguf"
-        assert fresh_config["inference"]["models"]["creative"] == "/models/creative.gguf"
-        assert fresh_config["inference"]["models"]["communication"] == "/models/comm.gguf"
+        assert fresh_config["inference"]["models"] == IsPartialDict(
+            brain="brain.gguf",
+            nerve="nerve.gguf",
+            coder="coder.gguf",
+            creative="creative.gguf",
+            communication="comm.gguf",
+        )
 
     @patch("arqitect.cli.wizard._open_file_dialog", return_value="/custom/models/q.gguf")
     def test_gguf_models_dir_derived_from_file(self, _mock_file: MagicMock, fresh_config: dict) -> None:
@@ -145,7 +291,7 @@ class TestStepBrainModel:
             _step_brain_model(fresh_config)
 
         assert fresh_config["inference"]["models_dir"] == "/custom/models"
-        assert fresh_config["inference"]["models"]["brain"] == "/custom/models/q.gguf"
+        assert fresh_config["inference"]["models"]["brain"] == "q.gguf"
 
     def test_anthropic_from_server(self, fresh_config: dict) -> None:
         fresh_config["environment"] = "server"
@@ -165,7 +311,7 @@ class TestStepBrainModel:
         fresh_config["environment"] = "desktop"
         answers = _InputSequence([
             "1",               # mode: same for all
-            "3",               # Anthropic (desktop option 3)
+            "2",               # Anthropic (desktop option 2: GGUF=1, Anthropic=2)
             "",                # default model
             "sk-key",          # API key (required)
         ])
@@ -175,7 +321,7 @@ class TestStepBrainModel:
         assert fresh_config["inference"]["provider"] == "anthropic"
 
     def test_anthropic_api_key_required(self, fresh_config: dict) -> None:
-        """Cloud providers now require an API key — empty key prompts again."""
+        """Cloud providers now require an API key -- empty key prompts again."""
         fresh_config["environment"] = "server"
         answers = _InputSequence([
             "1",               # mode: same for all
@@ -202,10 +348,12 @@ class TestStepBrainModel:
         with patch("builtins.input", answers):
             _step_brain_model(fresh_config)
 
-        assert fresh_config["inference"]["provider"] == "openai"
+        assert fresh_config["inference"] == IsPartialDict(provider="openai")
         assert fresh_config["inference"]["models"]["brain"] == "gpt-4o-mini"
-        assert fresh_config["secrets"]["openai_base_url"] == "https://my-proxy.com/v1"
-        assert fresh_config["secrets"]["openai_api_key"] == "sk-openai-key"
+        assert fresh_config["secrets"] == IsPartialDict(
+            openai_base_url="https://my-proxy.com/v1",
+            openai_api_key="sk-openai-key",
+        )
 
     def test_groq_provider(self, fresh_config: dict) -> None:
         fresh_config["environment"] = "server"
@@ -218,31 +366,29 @@ class TestStepBrainModel:
         with patch("builtins.input", answers):
             _step_brain_model(fresh_config)
 
-        assert fresh_config["inference"]["provider"] == "groq"
+        assert fresh_config["inference"] == IsPartialDict(provider="groq")
         assert fresh_config["inference"]["models"]["brain"] == "llama-3.1-8b"
         assert fresh_config["secrets"]["groq_api_key"] == "gsk_testkey"
 
-    def test_ollama_provider(self, fresh_config: dict) -> None:
+    def test_deepseek_provider(self, fresh_config: dict) -> None:
         fresh_config["environment"] = "desktop"
         answers = _InputSequence([
             "1",               # mode: same for all
-            "2",               # Ollama (desktop option 2)
-            "mistral:7b",
-            "http://myhost:11434",
+            "5",               # DeepSeek (desktop: GGUF=1, Anthropic=2, OpenAI=3, Groq=4, DeepSeek=5)
+            "",                # default model
+            "sk-ds-key",       # API key (required)
         ])
         with patch("builtins.input", answers):
             _step_brain_model(fresh_config)
 
-        assert fresh_config["inference"]["provider"] == "ollama"
-        assert fresh_config["inference"]["models"]["brain"] == "mistral:7b"
-        assert fresh_config["inference"]["ollama_host"] == "http://myhost:11434"
+        assert fresh_config["inference"]["provider"] == "deepseek"
 
     def test_server_includes_local_options(self, fresh_config: dict) -> None:
-        """Server now shows all 5 providers (cloud first, then local)."""
+        """Server shows cloud providers first, then local (GGUF last)."""
         fresh_config["environment"] = "server"
         answers = _InputSequence([
             "1",               # mode: same for all
-            "3",               # Groq (server option 3)
+            "3",               # Groq (server: Anthropic=1, OpenAI=2, Groq=3)
             "",                # default model
             "gsk_key",         # API key
         ])
@@ -273,10 +419,11 @@ class TestStepBrainModel:
         assert fresh_config["inference"]["roles"]["brain"]["provider"] == "anthropic"
         assert fresh_config["inference"]["roles"]["nerve"]["provider"] == "groq"
         assert fresh_config["inference"]["roles"]["coder"]["provider"] == "groq"
-        # Flat backward-compat uses brain's provider
+        # Top-level uses brain's provider
         assert fresh_config["inference"]["provider"] == "anthropic"
 
 
+@pytest.mark.timeout(10)
 class TestStepVision:
     """Vision step should set sight sense config."""
 
@@ -294,9 +441,12 @@ class TestStepVision:
         with patch("builtins.input", answers):
             _step_vision(fresh_config)
 
-        assert fresh_config["senses"]["sight"]["enabled"] is True
-        assert fresh_config["senses"]["sight"]["provider"] == "moondream"
-        assert fresh_config["inference"]["models"]["vision"] == "/models/moondream2.gguf"
+        assert fresh_config["senses"]["sight"] == IsPartialDict(
+            enabled=True,
+            provider="moondream",
+        )
+        assert fresh_config["inference"]["models"]["vision"] == "moondream2.gguf"
+        assert fresh_config["inference"]["models_dir"] == "/models"
 
     def test_anthropic_vision_option_appears(self, fresh_config: dict) -> None:
         fresh_config["inference"]["provider"] = "anthropic"
@@ -305,8 +455,10 @@ class TestStepVision:
         with patch("builtins.input", answers):
             _step_vision(fresh_config)
 
-        assert fresh_config["senses"]["sight"]["enabled"] is True
-        assert fresh_config["senses"]["sight"]["provider"] == "anthropic"
+        assert fresh_config["senses"]["sight"] == IsPartialDict(
+            enabled=True,
+            provider="anthropic",
+        )
 
     def test_custom_vision_endpoint(self, fresh_config: dict) -> None:
         answers = _InputSequence([
@@ -316,10 +468,13 @@ class TestStepVision:
         with patch("builtins.input", answers):
             _step_vision(fresh_config)
 
-        assert fresh_config["senses"]["sight"]["provider"] == "custom"
-        assert fresh_config["senses"]["sight"]["endpoint"] == "http://vision:8080/predict"
+        assert fresh_config["senses"]["sight"] == IsPartialDict(
+            provider="custom",
+            endpoint="http://vision:8080/predict",
+        )
 
 
+@pytest.mark.timeout(10)
 class TestStepHearing:
     """Hearing step should set STT/TTS config."""
 
@@ -339,8 +494,10 @@ class TestStepHearing:
         with patch("builtins.input", answers):
             _step_hearing(fresh_config)
 
-        assert fresh_config["senses"]["hearing"]["stt"] == "whisper"
-        assert fresh_config["senses"]["hearing"]["tts"] == "elevenlabs"
+        assert fresh_config["senses"]["hearing"] == IsPartialDict(
+            stt="whisper",
+            tts="elevenlabs",
+        )
 
     def test_cloud_stt_without_tts(self, fresh_config: dict) -> None:
         answers = _InputSequence([
@@ -355,6 +512,7 @@ class TestStepHearing:
         assert fresh_config["senses"]["hearing"].get("tts", "") == ""
 
 
+@pytest.mark.timeout(10)
 class TestStepPersonality:
     """Personality step should set name, tone, traits."""
 
@@ -368,8 +526,10 @@ class TestStepPersonality:
             _step_personality(fresh_config)
 
         assert fresh_config["name"] == "MyBot"
-        assert fresh_config["personality"]["preset"] == "professional"
-        assert fresh_config["personality"]["tone"] == "clear, direct, and helpful"
+        assert fresh_config["personality"] == IsPartialDict(
+            preset="professional",
+            tone="clear, direct, and helpful",
+        )
 
     def test_custom_personality(self, fresh_config: dict) -> None:
         answers = _InputSequence([
@@ -387,6 +547,7 @@ class TestStepPersonality:
         assert fresh_config["personality"]["communication_style"]["formality"] == "formal"
 
 
+@pytest.mark.timeout(10)
 class TestStepConnectors:
     """Connector step should set telegram/whatsapp config."""
 
@@ -423,8 +584,10 @@ class TestStepConnectors:
             _step_connectors(fresh_config)
 
         assert fresh_config["connectors"]["telegram"]["enabled"] is False
-        assert fresh_config["connectors"]["whatsapp"]["enabled"] is True
-        assert fresh_config["connectors"]["whatsapp"]["bot_name"] == "WaBot"
+        assert fresh_config["connectors"]["whatsapp"] == IsPartialDict(
+            enabled=True,
+            bot_name="WaBot",
+        )
 
     def test_both_connectors(self, fresh_config: dict) -> None:
         answers = _InputSequence([
@@ -442,6 +605,7 @@ class TestStepConnectors:
         assert fresh_config["connectors"]["whatsapp"]["enabled"] is True
 
 
+@pytest.mark.timeout(10)
 class TestStepTouch:
     """Touch step should set environment and filesystem config."""
 
@@ -456,10 +620,11 @@ class TestStepTouch:
         with patch("builtins.input", answers):
             _step_touch(fresh_config)
 
-        assert fresh_config["senses"]["touch"]["environment"] == "server"
-        assert fresh_config["senses"]["touch"]["filesystem"]["access"] == "sandboxed"
-        assert fresh_config["senses"]["touch"]["filesystem"]["root"] == "./data"
-        assert fresh_config["senses"]["touch"]["execution"]["allowlist"] == ["python", "git"]
+        assert fresh_config["senses"]["touch"] == IsPartialDict(
+            environment="server",
+            filesystem=IsPartialDict(access="sandboxed", root="./data"),
+            execution=IsPartialDict(allowlist=["python", "git"]),
+        )
 
     def test_desktop_full_access_any_command(self, fresh_config: dict) -> None:
         fresh_config["environment"] = "desktop"
@@ -470,9 +635,11 @@ class TestStepTouch:
         with patch("builtins.input", answers):
             _step_touch(fresh_config)
 
-        assert fresh_config["senses"]["touch"]["environment"] == "desktop"
-        assert fresh_config["senses"]["touch"]["filesystem"]["access"] == "full"
-        assert fresh_config["senses"]["touch"]["execution"]["enabled"] is True
+        assert fresh_config["senses"]["touch"] == IsPartialDict(
+            environment="desktop",
+            filesystem=IsPartialDict(access="full"),
+            execution=IsPartialDict(enabled=True),
+        )
 
     def test_server_no_execution(self, fresh_config: dict) -> None:
         fresh_config["environment"] = "server"
@@ -492,19 +659,41 @@ class TestStepTouch:
         with patch("builtins.input", answers):
             _step_touch(fresh_config)
 
-        assert fresh_config["senses"]["touch"]["environment"] == "iot"
-        assert fresh_config["senses"]["touch"]["execution"]["enabled"] is False
+        assert fresh_config["senses"]["touch"] == IsPartialDict(
+            environment="iot",
+            execution=IsPartialDict(enabled=False),
+        )
 
 
+@pytest.mark.timeout(10)
 class TestStepEmbeddings:
     """Embeddings step should set provider and model."""
 
-    def test_none_embeddings(self, fresh_config: dict) -> None:
-        answers = _InputSequence(["5"])
+    @pytest.mark.parametrize(
+        ("input_choice", "expected_provider", "expected_model"),
+        [
+            ("1", "local", "nomic-embed-text"),
+            ("2", "local", "all-MiniLM-L6-v2"),
+            ("4", "openai", "text-embedding-3-small"),
+            ("5", "none", ""),
+        ],
+        ids=["nomic", "minilm", "openai", "none"],
+    )
+    def test_embedding_choices(
+        self,
+        fresh_config: dict,
+        input_choice: str,
+        expected_provider: str,
+        expected_model: str,
+    ) -> None:
+        answers = _InputSequence([input_choice])
         with patch("builtins.input", answers):
             _step_embeddings(fresh_config)
 
-        assert fresh_config["embeddings"]["provider"] == "none"
+        assert fresh_config["embeddings"] == IsPartialDict(
+            provider=expected_provider,
+            model=expected_model,
+        )
 
     def test_gguf_embeddings_uses_brain_model(self, fresh_config: dict) -> None:
         fresh_config["inference"]["models"]["brain"] = "my-model.gguf"
@@ -514,30 +703,8 @@ class TestStepEmbeddings:
 
         assert fresh_config["embeddings"]["model"] == "my-model.gguf"
 
-    def test_nomic_embed(self, fresh_config: dict) -> None:
-        answers = _InputSequence(["1"])
-        with patch("builtins.input", answers):
-            _step_embeddings(fresh_config)
 
-        assert fresh_config["embeddings"]["provider"] == "local"
-        assert fresh_config["embeddings"]["model"] == "nomic-embed-text"
-
-    def test_minilm_embed(self, fresh_config: dict) -> None:
-        answers = _InputSequence(["2"])
-        with patch("builtins.input", answers):
-            _step_embeddings(fresh_config)
-
-        assert fresh_config["embeddings"]["model"] == "all-MiniLM-L6-v2"
-
-    def test_openai_embed(self, fresh_config: dict) -> None:
-        answers = _InputSequence(["4"])
-        with patch("builtins.input", answers):
-            _step_embeddings(fresh_config)
-
-        assert fresh_config["embeddings"]["provider"] == "openai"
-        assert fresh_config["embeddings"]["model"] == "text-embedding-3-small"
-
-
+@pytest.mark.timeout(10)
 class TestStepStorage:
     """Storage step should set Redis, cold DB, and ports."""
 
@@ -571,8 +738,7 @@ class TestStepStorage:
             _step_storage(fresh_config)
 
         assert fresh_config["storage"]["hot"]["url"] == "redis://my-redis:6380"
-        assert fresh_config["ports"]["mcp"] == 9100
-        assert fresh_config["ports"]["bridge"] == 4000
+        assert fresh_config["ports"] == IsPartialDict(mcp=9100, bridge=4000)
 
     def test_postgres_cold_storage(self, fresh_config: dict) -> None:
         answers = _InputSequence([
@@ -586,10 +752,13 @@ class TestStepStorage:
         with patch("builtins.input", answers):
             _step_storage(fresh_config)
 
-        assert fresh_config["storage"]["cold"]["type"] == "postgres"
-        assert fresh_config["storage"]["cold"]["url"] == "postgresql://u:p@host/db"
+        assert fresh_config["storage"]["cold"] == IsPartialDict(
+            type="postgres",
+            url="postgresql://u:p@host/db",
+        )
 
 
+@pytest.mark.timeout(10)
 class TestStepAdmin:
     """Admin step should set name, email, and auto-generate JWT."""
 
@@ -602,9 +771,12 @@ class TestStepAdmin:
         with patch("builtins.input", answers):
             _step_admin(fresh_config)
 
-        assert fresh_config["admin"]["name"] == "Admin"
-        assert fresh_config["admin"]["email"] == "admin@test.com"
-        assert len(fresh_config["secrets"]["jwt_secret"]) > 20
+        assert fresh_config["admin"] == IsPartialDict(
+            name="Admin",
+            email="admin@test.com",
+        )
+        # JWT secret is a non-trivial random string
+        assert fresh_config["secrets"]["jwt_secret"] == IsStr(min_length=20)
 
     def test_admin_preserves_existing_jwt(self, fresh_config: dict) -> None:
         fresh_config["secrets"]["jwt_secret"] = "existing-secret"
@@ -632,16 +804,18 @@ class TestStepAdmin:
         with patch("builtins.input", answers):
             _step_admin(fresh_config)
 
-        smtp = fresh_config["secrets"]["smtp"]
-        assert smtp["host"] == "smtp.example.com"
-        assert smtp["port"] == 465
-        assert smtp["user"] == "user@example.com"
-        assert smtp["password"] == "s3cret"
-        assert smtp["from"] == "noreply@example.com"
+        assert fresh_config["secrets"]["smtp"] == IsPartialDict(
+            host="smtp.example.com",
+            port=465,
+            user="user@example.com",
+            password="s3cret",
+        )
+        assert fresh_config["secrets"]["smtp"]["from"] == "noreply@example.com"
 
 
-# ── Config writer ────────────────────────────────────────────────────────
+# -- Config writer ----------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestWriteConfig:
     """Config writer should produce valid YAML with ordered keys."""
 
@@ -669,37 +843,37 @@ class TestWriteConfig:
         assert name_pos < inference_pos < secrets_pos
 
 
-# ── File dialog helpers ──────────────────────────────────────────────────
+# -- File dialog helpers ----------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestFileDialogs:
     """File/dir dialog helpers should handle all OS types."""
 
-    @patch("arqitect.cli.wizard._detect_os", return_value="macos")
+    @pytest.mark.parametrize(
+        ("os_type", "initial_dir", "stdout", "expected_result", "expected_cmd_fragment"),
+        [
+            ("macos", "/tmp", "/path/to/model.gguf\n", "/path/to/model.gguf", "osascript"),
+            ("windows", "C:\\models", "C:\\models\\test.gguf\n", "C:\\models\\test.gguf", "powershell"),
+            ("linux", "/home/user", "/home/user/model.gguf\n", "/home/user/model.gguf", "zenity"),
+        ],
+        ids=["macos", "windows", "linux"],
+    )
     @patch("subprocess.run")
-    def test_file_dialog_macos(self, mock_run: MagicMock, _mock_os: MagicMock) -> None:
+    def test_file_dialog_per_os(
+        self,
+        mock_run: MagicMock,
+        os_type: str,
+        initial_dir: str,
+        stdout: str,
+        expected_result: str,
+        expected_cmd_fragment: str,
+    ) -> None:
         from arqitect.cli.wizard import _open_file_dialog
-        mock_run.return_value = MagicMock(returncode=0, stdout="/path/to/model.gguf\n")
-        result = _open_file_dialog("Pick", initial_dir="/tmp")
-        assert result == "/path/to/model.gguf"
-        assert "osascript" in mock_run.call_args[0][0]
-
-    @patch("arqitect.cli.wizard._detect_os", return_value="windows")
-    @patch("subprocess.run")
-    def test_file_dialog_windows(self, mock_run: MagicMock, _mock_os: MagicMock) -> None:
-        from arqitect.cli.wizard import _open_file_dialog
-        mock_run.return_value = MagicMock(returncode=0, stdout="C:\\models\\test.gguf\n")
-        result = _open_file_dialog("Pick", initial_dir="C:\\models")
-        assert result == "C:\\models\\test.gguf"
-        assert "powershell" in mock_run.call_args[0][0]
-
-    @patch("arqitect.cli.wizard._detect_os", return_value="linux")
-    @patch("subprocess.run")
-    def test_file_dialog_linux(self, mock_run: MagicMock, _mock_os: MagicMock) -> None:
-        from arqitect.cli.wizard import _open_file_dialog
-        mock_run.return_value = MagicMock(returncode=0, stdout="/home/user/model.gguf\n")
-        result = _open_file_dialog("Pick", initial_dir="/home/user")
-        assert result == "/home/user/model.gguf"
-        assert "zenity" in mock_run.call_args[0][0]
+        mock_run.return_value = MagicMock(returncode=0, stdout=stdout)
+        with patch("arqitect.cli.wizard._detect_os", return_value=os_type):
+            result = _open_file_dialog("Pick", initial_dir=initial_dir)
+        assert result == expected_result
+        assert expected_cmd_fragment in mock_run.call_args[0][0]
 
     @patch("arqitect.cli.wizard._detect_os", return_value="macos")
     @patch("subprocess.run")
@@ -718,8 +892,9 @@ class TestFileDialogs:
         assert result == "/Users/test/models"
 
 
-# ── Full wizard integration ─────────────────────────────────────────────
+# -- Full wizard integration -----------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestRunWizard:
     """Full wizard run should produce a valid arqitect.yaml."""
 
@@ -760,15 +935,15 @@ class TestRunWizard:
             "1",               # Anthropic (server option 1)
             "",                # default model
             "sk-test",         # API key (required)
-            # vision — anthropic vision (option 1 when brain is anthropic)
+            # vision -- anthropic vision (option 1 when brain is anthropic)
             "1",
-            # hearing — text only
+            # hearing -- text only
             "3",
             # personality
             "CloudBot", "2", "2",  # friendly, casual
             # connectors
             "n", "n",
-            # touch — uses environment from step 1 (server)
+            # touch -- uses environment from step 1 (server)
             "2", "", "3",      # sandboxed, default dir, no exec
             # embeddings
             "4",               # openai
@@ -783,9 +958,11 @@ class TestRunWizard:
         yaml_path = tmp_path / "arqitect.yaml"
         with open(yaml_path) as f:
             config = yaml.safe_load(f)
-        assert config["inference"]["provider"] == "anthropic"
-        assert config["senses"]["sight"]["provider"] == "anthropic"
-        assert config["name"] == "CloudBot"
+        assert config == IsPartialDict(
+            name="CloudBot",
+            inference=IsPartialDict(provider="anthropic"),
+            senses=IsPartialDict(sight=IsPartialDict(provider="anthropic")),
+        )
 
     @patch("arqitect.cli.wizard._open_file_dialog", return_value="/models/brain.gguf")
     @patch("arqitect.cli.wizard.get_project_root")
@@ -797,7 +974,7 @@ class TestRunWizard:
             # brain model
             "1",               # mode: same for all
             "1",               # GGUF (desktop option 1)
-            # file dialog mocked — models_dir derived from file
+            # file dialog mocked -- models_dir derived from file
             # vision
             "3",               # skip (last non-anthropic option is index 3)
             # hearing
@@ -806,7 +983,7 @@ class TestRunWizard:
             "TestBot", "1", "2",  # name, professional, casual
             # connectors
             "n", "n",
-            # touch — uses environment from step 1 (desktop)
+            # touch -- uses environment from step 1 (desktop)
             "2", "", "2", "",  # sandboxed, default dir, allowlisted, no commands
             # embeddings
             "5",               # none
@@ -824,4 +1001,4 @@ class TestRunWizard:
             config = yaml.safe_load(f)
         assert config["name"] == "TestBot"
         assert config["admin"]["email"] == "t@t.com"
-        assert len(config["secrets"]["jwt_secret"]) > 20
+        assert config["secrets"]["jwt_secret"] == IsStr(min_length=20)

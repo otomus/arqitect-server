@@ -11,12 +11,35 @@ environment: server
 inference:
   provider: gguf
   models:
-    brain: Qwen2.5-Coder-7B.gguf
-    nerve: Qwen2.5-Coder-7B.gguf
-    coder: Qwen2.5-Coder-7B.gguf
-    creative: Qwen2.5-Coder-7B.gguf
-    communication: Qwen2.5-Coder-7B.gguf
-    vision: moondream2-text-model-f16.gguf
+    # Each model can be a filename string or a dict with metadata:
+    #   file: GGUF filename in models_dir
+    #   source: HuggingFace repo ID for auto-download
+    #   chat_handler: special handler (e.g. moondream for vision)
+    #   mmproj: multimodal projection file (for vision models)
+    #   backend: non-LLM backend type (e.g. stable_diffusion)
+    brain:
+      file: ''  # e.g. Qwen2.5-Coder-7B.gguf
+      source: '' # e.g. Qwen/Qwen2.5-Coder-7B-Instruct-GGUF
+    nerve:
+      file: ''
+      source: ''
+    coder:
+      file: ''
+      source: ''
+    creative:
+      file: ''
+      source: ''
+    communication:
+      file: ''
+      source: ''
+    vision:
+      file: ''
+      source: ''
+      chat_handler: ''
+      mmproj: ''
+    embedding:
+      file: ''
+      source: ''
   roles:
     brain:
       provider: null

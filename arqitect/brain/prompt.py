@@ -7,7 +7,7 @@ injecting runtime calibration and session context.
 import json
 
 from arqitect.brain.config import r, mem, CORE_SENSES
-from arqitect.brain.types import RedisKey
+from arqitect.types import RedisKey
 
 
 def _build_calibration_prompt_section() -> str:

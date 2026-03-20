@@ -1,0 +1,28 @@
+# serializer version: 1
+# name: TestNerveTemplateStructure.test_template_snapshot
+  list([
+    'import json',
+    'import sys',
+    'import os',
+    'from arqitect.nerves.nerve_runtime import (',
+    'from arqitect.senses.sense_runtime import (',
+    'from arqitect.matching import match_tools as _match_tools',
+    'from arqitect.types import Action',
+    'NERVE_NAME = "{{NERVE_NAME}}"',
+    'NERVE_ROLE = "{{NERVE_ROLE}}"',
+    'DESCRIPTION = """{{DESCRIPTION}}"""',
+    'AVAILABLE_SENSES = {',
+    'def get_tool_list():',
+    'def get_tool_names():',
+    'def get_effective_role(meta):',
+    'def build_planner_prompt(meta):',
+    'from arqitect.brain.adapters import resolve_prompt',
+    'def parse_json(raw):',
+    'def match_tool_name(model_name, available_tools):',
+    'def main():',
+    'import sys as _sys',
+    'from arqitect.matching import best_match_tool as _best_match',
+    'import datetime as _dt',
+    'from arqitect.brain.adapters import get_json_mode as _get_jm',
+  ])
+# ---

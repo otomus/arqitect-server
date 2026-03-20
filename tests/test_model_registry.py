@@ -1,9 +1,14 @@
 """Tests for arqitect.inference.model_registry — registry building, proxy, resolution."""
 
+from __future__ import annotations
+
 import os
 from unittest.mock import patch, MagicMock
 
 import pytest
+from dirty_equals import IsInstance, IsNonNegative
+from hypothesis import given, settings, assume, HealthCheck
+from hypothesis import strategies as st
 
 from arqitect.inference.model_registry import (
     _REGISTRY_ROLES,
@@ -23,6 +28,7 @@ import arqitect.inference.model_registry as registry_mod
 # Constants
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestConstants:
     """Verify named constants are set correctly."""
 
@@ -36,11 +42,25 @@ class TestConstants:
         for role in ("brain", "nerve", "vision", "embedding"):
             assert role in _REGISTRY_ROLES
 
+    def test_registry_roles_is_tuple_of_strings(self):
+        assert _REGISTRY_ROLES == IsInstance(tuple)
+        for role in _REGISTRY_ROLES:
+            assert role == IsInstance(str)
+            assert len(role) > 0
+
+    def test_role_to_registry_key_values_are_valid_roles(self):
+        """Every alias target must be a known registry role."""
+        for target in ROLE_TO_REGISTRY_KEY.values():
+            assert target in _REGISTRY_ROLES, (
+                f"Alias target '{target}' is not a known registry role"
+            )
+
 
 # ---------------------------------------------------------------------------
 # _build_registry
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestBuildRegistry:
     """Tests for building the registry from yaml config."""
 
@@ -73,11 +93,26 @@ class TestBuildRegistry:
         called_roles = {c.args[0] for c in mock_gmc.call_args_list}
         assert called_roles == set(_REGISTRY_ROLES)
 
+    @patch("arqitect.config.loader.get_model_config")
+    def test_registry_keys_are_subset_of_roles(self, mock_gmc):
+        """Every key in the built registry must be a known role."""
+        mock_gmc.side_effect = lambda role: {"file": f"{role}.gguf"}
+        reg = _build_registry()
+        assert set(reg.keys()) <= set(_REGISTRY_ROLES)
+
+    @patch("arqitect.config.loader.get_model_config")
+    def test_config_with_empty_file_string_excluded(self, mock_gmc):
+        """A config with file='' (falsy) should be excluded."""
+        mock_gmc.return_value = {"file": "", "source": "hf/x"}
+        reg = _build_registry()
+        assert len(reg) == 0
+
 
 # ---------------------------------------------------------------------------
 # _RegistryProxy
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestRegistryProxy:
     """Tests for the lazy dict proxy."""
 
@@ -125,11 +160,31 @@ class TestRegistryProxy:
         _ = proxy["brain"]
         mock_get.assert_called_once()
 
+    def test_getitem_missing_raises_keyerror(self):
+        proxy = self._make_proxy({"a": 1})
+        with pytest.raises(KeyError):
+            _ = proxy["nonexistent"]
+
+    @given(data=st.dictionaries(
+        keys=st.text(min_size=1, max_size=20),
+        values=st.integers(),
+        min_size=1,
+        max_size=10,
+    ))
+    @settings(max_examples=30)
+    def test_proxy_behaves_like_dict(self, data: dict):
+        """A pre-loaded proxy contains all inserted keys with correct values."""
+        proxy = self._make_proxy(data)
+        for key in data:
+            assert proxy[key] == data[key]
+            assert key in proxy
+
 
 # ---------------------------------------------------------------------------
 # resolve_registry_key
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestResolveRegistryKey:
     """Tests for role alias resolution."""
 
@@ -155,11 +210,31 @@ class TestResolveRegistryKey:
         for alias, target in ROLE_TO_REGISTRY_KEY.items():
             assert resolve_registry_key(alias) == target
 
+    @given(role=st.text(min_size=1, max_size=50))
+    @settings(max_examples=50)
+    def test_resolve_always_returns_string(self, role: str):
+        """resolve_registry_key must always return a non-empty string for non-empty input."""
+        result = resolve_registry_key(role)
+        assert result == IsInstance(str)
+        assert len(result) > 0
+
+    @given(role=st.text(min_size=1, max_size=50).filter(lambda r: r not in ROLE_TO_REGISTRY_KEY))
+    @settings(max_examples=30)
+    def test_non_alias_is_identity(self, role: str):
+        """Any role not in the alias map must be returned unchanged."""
+        assert resolve_registry_key(role) == role
+
+    def test_resolve_is_idempotent_for_targets(self):
+        """Resolving an already-resolved target must not change it further."""
+        for target in ROLE_TO_REGISTRY_KEY.values():
+            assert resolve_registry_key(target) == target
+
 
 # ---------------------------------------------------------------------------
 # find_registry_entry_by_file
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestFindRegistryEntryByFile:
     """Tests for filename-based registry lookup."""
 
@@ -177,11 +252,30 @@ class TestFindRegistryEntryByFile:
     def test_empty_registry(self):
         assert find_registry_entry_by_file("any.gguf") is None
 
+    @given(filename=st.text(min_size=1, max_size=50))
+    @settings(max_examples=20)
+    @patch.object(registry_mod, "MODEL_REGISTRY", {})
+    def test_empty_registry_always_returns_none(self, filename: str):
+        """An empty registry must return None for any filename."""
+        assert find_registry_entry_by_file(filename) is None
+
+    @patch.object(
+        registry_mod, "MODEL_REGISTRY",
+        {"a": {"file": "x.gguf"}, "b": {"file": "y.gguf"}},
+    )
+    def test_returns_dict_with_file_field(self):
+        """The returned entry must contain the 'file' key matching the query."""
+        entry = find_registry_entry_by_file("y.gguf")
+        assert entry is not None
+        assert entry == IsInstance(dict)
+        assert entry["file"] == "y.gguf"
+
 
 # ---------------------------------------------------------------------------
 # resolve_model_path
 # ---------------------------------------------------------------------------
 
+@pytest.mark.timeout(10)
 class TestResolveModelPath:
     """Tests for model path resolution."""
 
@@ -204,3 +298,17 @@ class TestResolveModelPath:
     def test_relative_name_not_found(self, tmp_path):
         result = resolve_model_path("missing.gguf", str(tmp_path))
         assert result is None
+
+    @given(filename=st.from_regex(r"[a-z][a-z0-9_]{0,19}\.gguf", fullmatch=True))
+    @settings(max_examples=20, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_relative_name_missing_in_empty_dir(self, tmp_path, filename: str):
+        """A relative name never resolves in an empty directory."""
+        result = resolve_model_path(filename, str(tmp_path))
+        assert result is None
+
+    def test_resolve_prefers_absolute_over_relative(self, tmp_path):
+        """When name is an absolute path that exists, models_dir is irrelevant."""
+        model_file = tmp_path / "model.gguf"
+        model_file.touch()
+        result = resolve_model_path(str(model_file), "/completely/wrong")
+        assert result == str(model_file)

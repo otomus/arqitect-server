@@ -4,6 +4,7 @@ Uses LLM critic to evaluate nerve quality and correctness.
 """
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -12,6 +13,8 @@ import sys
 import time
 
 import redis
+
+logger = logging.getLogger(__name__)
 
 from arqitect.config.loader import get_nerves_dir, get_sandbox_dir, get_mcp_tools_dir, get_redis_host_port
 
@@ -92,20 +95,70 @@ def _get_batch_size(role: str = "tool") -> int:
     return get_tuning_config(role)["test_cases_per_batch"]
 
 
+def _parse_test_case_response(raw: str) -> list[dict] | None:
+    """Parse LLM output into a list of test case dicts.
+
+    Handles multiple formats:
+        - Bare JSON array: [{"input": ..., "output": ...}, ...]
+        - Wrapped object: {"test_cases": [...]} or {"tests": [...]}
+        - Code-fenced JSON: ```json [...] ```
+
+    Returns None if parsing fails.
+    """
+    # 1. Try structured extraction (handles nested JSON)
+    result = _extract_json(raw)
+    if isinstance(result, list):
+        return result
+    # LLM sometimes wraps the array in an object like {"test_cases": [...]}
+    if isinstance(result, dict):
+        for key in ("test_cases", "tests", "cases", "data"):
+            if isinstance(result.get(key), list):
+                return result[key]
+
+    # 2. Fallback: strip code fences and parse directly
+    try:
+        stripped = raw.strip()
+        if stripped.startswith("```"):
+            lines = stripped.split("\n")
+            lines = [l for l in lines if not l.strip().startswith("```")]
+            stripped = "\n".join(lines)
+        parsed = json.loads(stripped)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            for key in ("test_cases", "tests", "cases", "data"):
+                if isinstance(parsed.get(key), list):
+                    return parsed[key]
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    return None
+
+
 def generate_test_cases(name: str, description: str, trigger_task: str = "",
                         count: int = 0, existing_inputs: set | None = None,
                         role: str = "tool") -> list[dict]:
     """Ask the critic LLM to generate domain test cases for a nerve.
 
-    Each test case has: input, context, output, category.
+    Each test case has: input, context, output, category, generated_by.
     - input: the user query
     - context: runtime context (user details, location, time) that was present — use {} for no context
     - output: the expected response the nerve should produce
     - category: core|edge|boundary|negative
+    - generated_by: model name that created this test case
+
+    Only medium/large brains can generate test cases — tinylm/small produce
+    garbage critic output that pollutes the test bank.
 
     count: how many to generate (0 = use model-specific default batch size)
     existing_inputs: set of inputs already in the test bank (to avoid duplicates)
     """
+    # Brain size gate — only medium/large can fabricate test cases
+    from arqitect.brain.adapters import get_model_size_class
+    brain_size = get_model_size_class("brain")
+    if brain_size not in ("medium", "large"):
+        return []
+
     batch_size = count or _get_batch_size(role)
     prompt = (
         f"You are a QA engineer. Generate test cases for a nerve agent called '{name}'.\n"
@@ -135,24 +188,21 @@ def generate_test_cases(name: str, description: str, trigger_task: str = "",
         "Return ONLY the JSON array."
     )
     raw = _llm(prompt, role=role)
-    print(f"[CRITIC] Raw test case output ({len(raw)} chars): {raw[:300]}")
-    result = _extract_json(raw)
-    if isinstance(result, list):
-        return result
-    # Fallback: try json.loads directly on stripped output
-    try:
-        stripped = raw.strip()
-        if stripped.startswith("```"):
-            lines = stripped.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            stripped = "\n".join(lines)
-        parsed = json.loads(stripped)
-        if isinstance(parsed, list):
-            return parsed
-    except (json.JSONDecodeError, TypeError):
-        pass
-    print(f"[CRITIC] Could not parse test cases from critic LLM output")
-    return []
+    logger.debug("[CRITIC] Raw test case output (%d chars): %s", len(raw), raw[:300])
+    cases = _parse_test_case_response(raw)
+
+    if cases is None:
+        logger.warning("[CRITIC] Could not parse test cases for '%s' from LLM output", name)
+        return []
+
+    # Tag each case with the model that generated it (provenance)
+    from arqitect.brain.adapters import get_raw_model_name
+    model_name = get_raw_model_name("brain")
+    if model_name:
+        for tc in cases:
+            tc["generated_by"] = model_name
+
+    return cases
 
 
 def run_nerve_with_input(nerve_name: str, user_input: str, mem_manager) -> dict:
@@ -321,6 +371,76 @@ def _is_junk_description(desc: str) -> bool:
     return any(t in d for t in junk_terms)
 
 
+def _is_description_drift(original_desc: str, new_desc: str) -> bool:
+    """Detect when a proposed description has drifted away from the nerve's domain.
+
+    Uses simple word-overlap heuristic: if the new description shares fewer than
+    20% of content words with the original, it's considered a drift.
+    """
+    if not original_desc or not new_desc:
+        return False
+    _stopwords = {"a", "an", "the", "is", "are", "was", "were", "be", "been",
+                  "and", "or", "of", "to", "in", "for", "on", "with", "that",
+                  "this", "it", "as", "at", "by", "from", "not", "no"}
+    orig_words = {w.lower() for w in re.findall(r'\w+', original_desc)} - _stopwords
+    new_words = {w.lower() for w in re.findall(r'\w+', new_desc)} - _stopwords
+    if not orig_words:
+        return False
+    overlap = len(orig_words & new_words)
+    return overlap / len(orig_words) < 0.2
+
+
+_DEFAULT_MAX_SYSTEM_TOKENS = 2048
+_SIZE_CLASS_YAML_KEY = {"tinylm": "tiny"}  # size_classes.yaml uses "tiny" not "tinylm"
+
+
+def _get_max_system_tokens(role: str) -> int:
+    """Get the max system prompt length for the current model's size class.
+
+    Reads from size_classes.yaml via the adapter config.
+    Falls back to ``_DEFAULT_MAX_SYSTEM_TOKENS`` on any error.
+    """
+    try:
+        import yaml
+        config_path = os.path.join(os.path.dirname(__file__), "..", "config", "size_classes.yaml")
+        with open(config_path) as f:
+            classes = yaml.safe_load(f)
+        from arqitect.brain.adapters import get_active_variant
+        size_class = get_active_variant(role)
+        key = _SIZE_CLASS_YAML_KEY.get(size_class, size_class)
+        return classes.get(key, {}).get("max_system_tokens", _DEFAULT_MAX_SYSTEM_TOKENS)
+    except Exception:
+        return _DEFAULT_MAX_SYSTEM_TOKENS
+
+
+def _consolidate_prompt(name: str, desc: str, prompt: str) -> str:
+    """Rewrite a prompt with accumulated rules into a coherent whole.
+
+    When 5+ Rule: lines have been appended, the prompt becomes a messy list.
+    This rewrites it into a single coherent system prompt that preserves the
+    nerve's identity and all the behavioral guidance from the rules.
+    """
+    consolidation_instruction = (
+        f"Rewrite this system prompt for a nerve agent called '{name}' ({desc}) "
+        f"into a single coherent system prompt. Preserve ALL behavioral guidance "
+        f"from the accumulated rules, but express them naturally — not as a list of rules. "
+        f"The nerve's core identity and domain must remain front and center.\n\n"
+        f"Current prompt:\n{prompt}\n\n"
+        f"Return ONLY the rewritten system prompt text, nothing else."
+    )
+    try:
+        consolidated = _llm(consolidation_instruction)
+        # Sanity check: must still reference the nerve's domain
+        # Split on spaces and hyphens to handle compound terms like "self-reflection"
+        desc_words = [w.lower() for part in desc.split()[:3] for w in re.split(r'[-\s]', part) if len(w) > 2]
+        if not desc_words or any(w in consolidated.lower() for w in desc_words):
+            return consolidated.strip()
+        # Fallback: return original if consolidation lost the identity
+        return prompt
+    except Exception:
+        return prompt
+
+
 def _extract_tool_errors(failures: list[dict]) -> list[dict]:
     """Extract tool-specific errors from test run stderr/stdout."""
     tool_errors = []
@@ -487,12 +607,21 @@ def suggest_improvements(name: str, desc: str, system_prompt: str, examples: lis
     to append, a refined description for routing, and new examples.
     When tool errors are present, can also suggest tool code fixes.
 
+    Only medium/large brains can produce useful improvements — tinylm/small
+    must not modify prompts as their suggestions degrade quality.
+
     Guards against:
     - Internal metric leakage (rules about "embedding similarity")
     - Duplicate rules (same idea rephrased)
     - Vague filler rules ("ensure contextually appropriate")
     - Description pollution (reconciler jargon replacing what the nerve does)
+    - Description drift (new description unrelated to nerve's domain)
     """
+    # Brain size gate — tinylm/small must not modify prompts
+    from arqitect.brain.adapters import get_model_size_class
+    brain_size = get_model_size_class("brain")
+    if brain_size not in ("medium", "large"):
+        return {"system_prompt": system_prompt, "examples": examples, "discover_tools": [], "index_domains": [], "description": "", "tool_fixes": []}
     failure_summary = "\n".join(
         f"- Input: {f.get('input', '')} | Issue: {f.get('issue', '')} | Score: {f.get('score', 0)}"
         for f in failures[:5]
@@ -581,14 +710,26 @@ def suggest_improvements(name: str, desc: str, system_prompt: str, examples: lis
                     new_system_prompt = f"{system_prompt}\nRule: {rule.strip()}"
                 else:
                     new_system_prompt = f"Rule: {rule.strip()}"
-                # Cap total system prompt length at 800 chars
-                if len(new_system_prompt) > 800:
-                    new_system_prompt = new_system_prompt[:800]
+
+                # Consolidation: when 5+ rules accumulate, rewrite into a coherent prompt
+                rule_count = new_system_prompt.count("Rule:")
+                if rule_count >= 5:
+                    new_system_prompt = _consolidate_prompt(name, desc, new_system_prompt)
+
+                # Size-class-aware prompt cap (replaces hardcoded 800)
+                max_tokens = _get_max_system_tokens(role)
+                if len(new_system_prompt) > max_tokens:
+                    new_system_prompt = new_system_prompt[:max_tokens]
 
         # Guard: reject polluted descriptions
         new_desc = result.get("description", "")
         if new_desc and _is_junk_description(new_desc):
             print(f"[QUALIFY] Rejected junk description for '{name}': {new_desc[:80]}")
+            new_desc = ""
+
+        # Guard: reject description drift — new description must relate to nerve's domain
+        if new_desc and _is_description_drift(desc, new_desc):
+            print(f"[QUALIFY] Rejected drifted description for '{name}': {new_desc[:80]}")
             new_desc = ""
 
         # Merge new examples with existing ones (additive)
@@ -884,7 +1025,7 @@ def qualify_nerve(name: str, description: str, trigger_task: str, mem_manager) -
             new_examples = improvements.get("examples", [])
             new_desc = improvements.get("description", "")
             effective_desc = new_desc if new_desc and new_desc.strip() else description
-            if new_system_prompt or new_examples:
+            if (new_system_prompt or new_examples) and meta.get("origin") != "community":
                 examples_json = json.dumps(new_examples) if new_examples else "[]"
                 existing_role = meta.get("role", "tool")
                 mem_manager.cold.register_nerve_rich(name, effective_desc, new_system_prompt, examples_json, role=existing_role)

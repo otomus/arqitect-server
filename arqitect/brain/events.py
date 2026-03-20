@@ -8,7 +8,7 @@ import threading
 from arqitect.brain.adapters import resolve_prompt as _resolve_adapter, get_temperature, get_max_tokens
 from arqitect.brain.config import r, mem
 from arqitect.brain.safety import check_output as _safety_check_output
-from arqitect.brain.types import Channel, NerveRole, RedisKey, Tone
+from arqitect.types import Channel, NerveRole, RedisKey, Tone
 from arqitect.senses.communication.envelope import build_envelope, merge_nerve_result_into_envelope
 
 # Task origin — simple dict, not thread-local, because think() runs in a
@@ -123,10 +123,31 @@ def publish_nerve_details(name: str):
         meta = mem.cold.get_nerve_metadata(name) or {}
         tools = mem.cold.get_nerve_tools(name)
 
+        _overlay_community_metadata(meta, nerve_name=name)
         details = _build_nerve_details(name, info, meta, tools, qual)
         r.hset("synapse:nerve_details", name, json.dumps(details))
     except Exception as e:
         print(f"[WARN] publish_nerve_details({name}): {e}")
+
+
+def _overlay_community_metadata(meta: dict, nerve_name: str = "") -> None:
+    """For community nerves, resolve system_prompt and examples from cache.
+
+    Mutates meta in place with values from the community cache context.json.
+    Logs a warning if resolution fails — never silently drops errors.
+    """
+    if meta.get("origin") != "community":
+        return
+    try:
+        from arqitect.brain.adapters import resolve_nerve_prompt
+        ctx = resolve_nerve_prompt(nerve_name, meta.get("role", "tool"))
+        if ctx:
+            if ctx.get("system_prompt"):
+                meta["system_prompt"] = ctx["system_prompt"]
+            if ctx.get("few_shot_examples"):
+                meta["examples"] = ctx["few_shot_examples"]
+    except Exception as exc:
+        print(f"[WARN] Failed to resolve community metadata for '{nerve_name}': {exc}")
 
 
 def _build_nerve_details(name: str, info: dict, meta: dict, tools: list, qual: dict | None) -> dict:
@@ -171,7 +192,9 @@ def _publish_all_nerve_details_bulk(all_nerve_data: dict):
                 "role": data["role"],
                 "system_prompt": data["system_prompt"],
                 "examples": data["examples"],
+                "origin": data.get("origin", "local"),
             }
+            _overlay_community_metadata(meta, nerve_name=name)
             details = _build_nerve_details(name, info, meta, data["tools"], data["qualification"])
             r.hset("synapse:nerve_details", name, json.dumps(details))
     except Exception as e:

@@ -260,24 +260,28 @@ def bootstrap_user_session(user_id: str):
 
 
 def _check_and_pull_models():
-    """Ensure all required models are loaded in the inference engine.
+    """Eagerly preload each role's model via the configured provider.
 
-    Uses the legacy get_engine() for model loading/listing since the router
-    doesn't expose load_from_registry. Vision and embedding still use the
-    old engine path.
+    Cloud providers treat preload as a no-op (always ready).
+    Local providers (e.g. GGUF) load model weights into memory.
     """
-    # Warm up the router's provider cache for each role
-    from arqitect.inference.router import get_role_provider, VALID_ROLES
-    loaded_providers = set()
+    from arqitect.inference.router import (
+        get_role_provider, _resolve_role_config, VALID_ROLES,
+    )
+    from arqitect.brain.adapters import get_max_context
+
+    reported_providers: set[str] = set()
     for role in VALID_ROLES:
         try:
             provider = get_role_provider(role)
+            _, model_name = _resolve_role_config(role)
+            n_ctx = get_max_context(role)
+            provider.preload(model_name, n_ctx=n_ctx)
+
             pname = type(provider).__name__
-            if pname not in loaded_providers:
-                loaded_providers.add(pname)
-                # GGUF providers expose list_loaded()
-                if hasattr(provider, "list_loaded"):
-                    models = provider.list_loaded()
-                    print(f"[BRAIN] {pname} models loaded: {models}")
+            if pname not in reported_providers:
+                reported_providers.add(pname)
+                models = provider.list_loaded()
+                print(f"[BRAIN] {pname} models loaded: {models}")
         except Exception as e:
             print(f"[BRAIN] Provider for role '{role}' not available: {e}")

@@ -1,13 +1,13 @@
 {
   "sense": "sight",
-  "timestamp": 1773911014.7347379,
+  "timestamp": 1774024820.8587809,
   "platform": "Darwin",
-  "status": "degraded",
+  "status": "operational",
   "capabilities": {
     "image_analysis": {
-      "available": false,
-      "provider": null,
-      "notes": "Vision GGUF model not downloaded. Restart to auto-download."
+      "available": true,
+      "provider": "vision",
+      "notes": ""
     },
     "screenshot": {
       "available": true,
@@ -20,15 +20,15 @@
       "notes": ""
     },
     "video_stream": {
-      "available": false,
-      "provider": null,
+      "available": true,
+      "provider": "vision",
       "notes": ""
     }
   },
   "dependencies": {
     "vision": {
-      "installed": false,
-      "version": "",
+      "installed": true,
+      "version": "latest",
       "install_hint": ""
     },
     "ffmpeg": {

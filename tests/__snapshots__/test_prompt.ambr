@@ -1,0 +1,43 @@
+# serializer version: 1
+# name: TestBuildCalibrationPromptSection.test_calibration_snapshot
+  '''
+        - sight [calibrated]: camera (missing: lidar)
+  
+  '''
+# ---
+# name: TestBuildFewShotSection.test_few_shot_snapshot
+  '''
+  
+  Examples:
+    User: "hi" → hello
+    User: "bye" → goodbye
+  
+  '''
+# ---
+# name: TestBuildSessionInfo.test_session_info_snapshot
+  '''
+  
+  
+  KNOWN USER CONTEXT:
+    Location: Berlin, Germany
+    Timezone: Europe/Berlin
+  
+  '''
+# ---
+# name: TestGetSystemPrompt.test_full_prompt_snapshot
+  '''
+  You are Sentient.
+  
+  Core senses (live calibration status):
+        - sight [calibrated]: camera
+  
+  Examples:
+    User: "greet" → Hello!
+  
+  
+  KNOWN USER CONTEXT:
+    Location: Tokyo, Japan
+    Timezone: Asia/Tokyo
+  
+  '''
+# ---

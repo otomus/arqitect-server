@@ -55,7 +55,7 @@ class TestAuthMessage:
         user_id = mem.cold.create_user_with_email("a@b.com", "dashboard", "dash_abc")
         mem.cold.set_user_display_name(user_id, "Alice")
 
-        token = create_token(user_id, "a@b.com", "user", "Alice")
+        token = create_token(user_id, "user", "Alice")
         srv._client_sessions[fake_ws] = "dash_abc"
         srv.connected_clients.add(fake_ws)
 
@@ -107,7 +107,7 @@ class TestTaskIdentity:
         srv = bridge_state
         from arqitect.auth.token import decode_token, create_token
 
-        token = create_token("uid_1", "a@b.com", "user", "Alice")
+        token = create_token("uid_1", "user", "Alice")
         claims = decode_token(token)
         srv._client_sessions[fake_ws] = "dash_abc"
         srv._client_user[fake_ws] = claims

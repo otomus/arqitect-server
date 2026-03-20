@@ -1,4 +1,8 @@
-"""Model downloader — fetches GGUF files from HuggingFace Hub."""
+"""Model downloader — fetches GGUF files from HuggingFace Hub.
+
+All model information (file, source) comes from arqitect.yaml via MODEL_REGISTRY.
+No hardcoded model lists — users configure what they need in yaml.
+"""
 
 import os
 import sys
@@ -9,15 +13,21 @@ from arqitect.inference.model_registry import MODEL_REGISTRY
 def ensure_model(name: str, models_dir: str) -> str | None:
     """Ensure a model file exists locally, downloading if needed.
 
+    Looks up ``name`` in MODEL_REGISTRY (built from yaml config).
+    If the file is missing and a ``source`` (HF repo) is configured,
+    downloads it automatically.
+
     Returns the path to the GGUF file, or None if unavailable.
     """
     entry = MODEL_REGISTRY.get(name)
     if not entry:
         return None
 
-    filename = entry["file"]
-    path = os.path.join(models_dir, filename)
+    filename = entry.get("file", "")
+    if not filename:
+        return None
 
+    path = os.path.join(models_dir, filename)
     if os.path.exists(path):
         return path
 
@@ -34,7 +44,6 @@ def download_gguf(repo_id: str, filename: str, dest_dir: str) -> str | None:
     Returns the local path on success, None on failure.
     """
     os.makedirs(dest_dir, exist_ok=True)
-    dest_path = os.path.join(dest_dir, filename)
 
     try:
         from huggingface_hub import hf_hub_download
@@ -50,41 +59,3 @@ def download_gguf(repo_id: str, filename: str, dest_dir: str) -> str | None:
     except Exception as e:
         print(f"[DOWNLOAD] Failed to download {filename}: {e}", file=sys.stderr)
         return None
-
-
-# Known GGUF models available for download, grouped by size class.
-# Each entry: (display_name, gguf_filename, hf_repo, size_label, n_ctx)
-AVAILABLE_MODELS = [
-    {
-        "name": "Qwen2.5-Coder-1.5B",
-        "file": "Qwen2.5-Coder-1.5B.gguf",
-        "source": "Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF",
-        "size_class": "tiny",
-        "size_label": "~1.2 GB",
-        "n_ctx": 2048,
-    },
-    {
-        "name": "Qwen2.5-Coder-7B",
-        "file": "Qwen2.5-Coder-7B.gguf",
-        "source": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
-        "size_class": "small",
-        "size_label": "~4.7 GB",
-        "n_ctx": 4096,
-    },
-    {
-        "name": "Qwen2.5-Coder-14B",
-        "file": "Qwen2.5-Coder-14B.gguf",
-        "source": "Qwen/Qwen2.5-Coder-14B-Instruct-GGUF",
-        "size_class": "medium",
-        "size_label": "~9.0 GB",
-        "n_ctx": 4096,
-    },
-    {
-        "name": "Qwen2.5-Coder-32B",
-        "file": "Qwen2.5-Coder-32B.gguf",
-        "source": "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
-        "size_class": "large",
-        "size_label": "~20 GB",
-        "n_ctx": 4096,
-    },
-]

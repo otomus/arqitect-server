@@ -36,25 +36,7 @@ PROVIDER_META: dict[str, dict] = {
         "model_prompt": "file_picker",
         "extra_config": [],
     },
-    "ollama": {
-        "label": "Ollama (local)",
-        "category": "local",
-        "auth_type": "none",
-        "secret_key": None,
-        "secret_label": None,
-        "default_model": "qwen2.5-coder:7b",
-        "model_prompt": "text",
-        "extra_config": [
-            {
-                "key": "ollama_host",
-                "label": "Ollama host",
-                "default": "http://localhost:11434",
-                "store_in": "inference",
-                "before_model": False,
-            },
-        ],
-    },
-    # ── Cloud providers (existing) ───────────────────────────────────────
+    # ── Cloud providers ─────────────────────────────────────────────────
     "anthropic": {
         "label": "Anthropic (cloud)",
         "category": "cloud",
@@ -164,7 +146,6 @@ PROVIDER_REGISTRY: dict[str, str] = {
     "groq": "arqitect.inference.providers.groq:GroqProvider",
     "openai": "arqitect.inference.providers.openai_compat:OpenAICompatProvider",
     "openai_compat": "arqitect.inference.providers.openai_compat:OpenAICompatProvider",
-    "ollama": "arqitect.inference.providers.ollama:OllamaProvider",
     "gguf": "arqitect.inference.providers.gguf:GGUFProvider",
     "deepseek": "arqitect.inference.providers.deepseek:DeepSeekProvider",
     "mistral": "arqitect.inference.providers.mistral:MistralProvider",
