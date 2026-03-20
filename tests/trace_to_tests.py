@@ -239,8 +239,9 @@ def generate_test_file(flows: list[FlowCapture], output_path: str) -> str:
         for j, llm_call in enumerate(flow.llm_calls):
             var_prefix = f'FLOW_{i}_LLM_{j}'
             test_lines.append(f'{var_prefix}_ROLE = {json.dumps(llm_call.role)!s}')
-            # Truncate long prompts for readability but keep enough to match
-            prompt_substr = llm_call.prompt[:200] if llm_call.prompt else ""
+            # Extract a stable matching substring that won't change between runs.
+            # Nerve catalog prefixes change — use task text or system prompt instead.
+            prompt_substr = _extract_stable_substr(llm_call)
             test_lines.append(f'{var_prefix}_PROMPT_SUBSTR = {json.dumps(prompt_substr)!s}')
             test_lines.append(f'{var_prefix}_RESPONSE = {json.dumps(llm_call.response)!s}')
             test_lines.append('')
@@ -365,8 +366,17 @@ def generate_test_file(flows: list[FlowCapture], output_path: str) -> str:
         test_lines.append('            assert response is not None')
         test_lines.append('            assert len(response) > 0')
         test_lines.append('')
-        test_lines.append('            # Brain reached thinking stage')
-        test_lines.append('            assert trace.has_event("brain:thought", data_contains={"stage": "thinking"})')
+        # Flows with a dispatch span go through "thinking" stage;
+        # flows routed by the planner go through "recipe_chain" stage.
+        if flow.dispatch_action:
+            test_lines.append('            # Brain reached thinking stage (dispatch path)')
+            test_lines.append('            assert trace.has_event("brain:thought", data_contains={"stage": "thinking"})')
+        else:
+            test_lines.append('            # Brain routed through planner recipe chain')
+            test_lines.append('            assert (')
+            test_lines.append('                trace.has_event("brain:thought", data_contains={"stage": "recipe_chain"})')
+            test_lines.append('                or trace.has_event("brain:thought", data_contains={"stage": "thinking"})')
+            test_lines.append('            )')
 
         if flow.dispatch_action == "invoke_nerve" and flow.dispatch_nerve:
             test_lines.append('')
@@ -391,6 +401,43 @@ def generate_test_file(flows: list[FlowCapture], output_path: str) -> str:
         f.write(content)
 
     return content
+
+
+def _extract_stable_substr(llm_call: LLMCall) -> str:
+    """Extract a substring from the LLM call that stays stable across runs.
+
+    The nerve catalog changes between live and test runs. Instead of using
+    the first 200 chars of the prompt (which includes the catalog), extract
+    the task text or a unique system prompt fragment that won't change.
+    """
+    prompt = llm_call.prompt
+    system = llm_call.system
+
+    # Intent classification: "Classify this message:\n\n{task}"
+    if "Classify this message" in prompt:
+        return prompt  # Short enough, stable
+
+    # Brain routing: "...\n\nTask: {task}" — extract the Task line
+    if "Task:" in prompt:
+        idx = prompt.index("Task:")
+        return prompt[idx:idx + 200]
+
+    # Communication rewrite: contains "The user asked:" or "nerve" + "failed"
+    if "The user asked:" in prompt:
+        idx = prompt.index("The user asked:")
+        return prompt[idx:idx + 200]
+    if "nerve" in prompt.lower() and "failed" in prompt.lower():
+        return prompt[:200]
+
+    # Personality rewrite: "Original message:"
+    if "Original message:" in prompt:
+        return prompt[:200]
+
+    # Fallback: use system prompt if it's unique enough, otherwise prompt start
+    if system and len(system) > 20:
+        return system[:100]
+
+    return prompt[:200]
 
 
 def _slugify(text: str) -> str:

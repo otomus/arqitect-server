@@ -613,6 +613,16 @@ def _handle_recipe_chain(task: str, recipe_decision: dict) -> str:
 
 def think(task: str, history: list[str] | None = None, depth: int = 0) -> str:
     """Main reasoning loop — take a task and process it."""
+    from arqitect.telemetry import span as _tspan
+    with _tspan("brain.think", task=task[:500], depth=depth) as _ts:
+        result = _think_inner(task, history=history, depth=depth)
+        _ts.set_attribute("response_length", len(result) if result else 0)
+        _ts.set_attribute("response_preview", (result or "")[:300])
+        return result
+
+
+def _think_inner(task: str, history: list[str] | None = None, depth: int = 0) -> str:
+    """Inner think logic — wrapped by think() for tracing."""
     user_id = get_task_origin().get("user_id", "")
     if depth == 0:
         get_consolidator().wake()
@@ -1077,8 +1087,9 @@ def listen_redis():
             # Onboarding: platform connectors (Telegram, WhatsApp) always send
             # connector_user_id. Bridge handles its own onboarding — sends
             # empty connector_user_id for anon users.
-            user_id = ""
-            if connector_user_id and source:
+            # Test bypass: if user_id is provided directly, skip onboarding.
+            user_id = data.get("user_id", "")
+            if not user_id and connector_user_id and source:
                 from arqitect.brain.onboarding import handle_onboarding
                 onboarding_msg, user_id = handle_onboarding(
                     mem.cold, source, connector_user_id, task

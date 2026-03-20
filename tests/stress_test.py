@@ -318,6 +318,33 @@ CASES = [
 ]
 
 
+STRESS_TEST_USER_ID = "stress-test-user-001"
+STRESS_TEST_EMAIL = "stress-test@arqitect.local"
+
+
+def setup_test_user(r_pub):
+    """Create a test user in cold memory so the brain treats us as identified.
+
+    Bypasses onboarding by inserting the user directly into knowledge.db
+    and passing user_id in every task message.
+    """
+    db_path = os.path.join(os.path.dirname(__file__), "..", "knowledge.db")
+    if not os.path.exists(db_path):
+        print(f"[SETUP] knowledge.db not found at {db_path} — skipping user setup")
+        return
+
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    # Insert user if not exists
+    conn.execute(
+        "INSERT OR IGNORE INTO users (user_id, display_name) VALUES (?, ?)",
+        (STRESS_TEST_USER_ID, "Stress Tester"),
+    )
+    conn.commit()
+    conn.close()
+    print(f"[SETUP] Test user ready: {STRESS_TEST_USER_ID}")
+
+
 def run_case(case, r_pub, r_sub, timeout):
     """Send messages for one case, collect responses. Returns result dict."""
     case_id = case["id"]
@@ -357,9 +384,13 @@ def run_case(case, r_pub, r_sub, timeout):
         listener = threading.Thread(target=listen_for_response, daemon=True)
         listener.start()
 
-        # Publish task
+        # Publish task with test user identity
         start_time = time.time()
-        r_pub.publish("brain:task", json.dumps({"task": msg, "source": "stress_test"}))
+        r_pub.publish("brain:task", json.dumps({
+            "task": msg,
+            "source": "stress_test",
+            "user_id": STRESS_TEST_USER_ID,
+        }))
 
         # Wait for response or timeout
         got_response = response_event.wait(timeout=timeout)
@@ -404,7 +435,7 @@ def _wait_for_qualification(r_pub, max_wait=15):
     This ensures nerves finish their first qualification round before the next task.
     """
     import sqlite3
-    db_path = os.path.join(os.path.dirname(__file__), "..", "memory", "knowledge.db")
+    db_path = os.path.join(os.path.dirname(__file__), "..", "knowledge.db")
     if not os.path.exists(db_path):
         return
 
@@ -474,6 +505,9 @@ def main():
     except redis.ConnectionError:
         print("ERROR: Redis not running. Start arqitect first: bash start.sh")
         sys.exit(1)
+
+    # Set up test user so the brain treats us as identified
+    setup_test_user(r_pub)
 
     # Select cases
     if args.only:

@@ -881,6 +881,20 @@ def dispatch_action(ctx: DispatchContext) -> str | None:
     Returns:
         Response string, or None if unknown action triggers re-think.
     """
+    from arqitect.telemetry import span as _tspan
+    import json as _json
+    with _tspan("brain.dispatch") as _ds:
+        _ds.set_attribute("dispatch.action", ctx.decision.get("action", "unknown"))
+        _ds.set_attribute("dispatch.nerve", ctx.decision.get("name", ""))
+        _ds.set_attribute("dispatch.depth", ctx.depth)
+        _ds.set_attribute("dispatch.decision", _json.dumps(ctx.decision, default=str)[:1000])
+        result = _dispatch_inner(ctx)
+        _ds.set_attribute("dispatch.response_length", len(result) if result else 0)
+        return result
+
+
+def _dispatch_inner(ctx: DispatchContext) -> str | None:
+    """Inner dispatch logic — wrapped by dispatch_action() for tracing."""
     # Step 1: normalize
     action, decision = normalize_action(ctx.decision, ctx.nerve_catalog)
     ctx.decision = decision
