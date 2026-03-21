@@ -1,78 +1,1027 @@
 [
   {
     "id": 1,
-    "tag": "greeting",
+    "tag": "eml-1",
     "steps": [
       {
-        "msg": "hello",
+        "msg": "Fetch the complete raw HTML source code from https://example.com — I need the full markup with all t",
+        "status": "STUCK",
+        "elapsed": 180.0,
+        "response": ""
+      }
+    ],
+    "overall": "STUCK"
+  },
+  {
+    "id": 2,
+    "tag": "eml-1",
+    "steps": [
+      {
+        "msg": "Get the raw HTML and all CSS rules (from <style> tags and linked stylesheets) from https://example.c",
         "status": "ok",
-        "elapsed": 11.1,
-        "response": "{\"error\":\"I can't handle that request. Please try something else.\"}"
+        "elapsed": 24.4,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 3,
+    "tag": "eml-1",
+    "steps": [
+      {
+        "msg": "Read the HTML file at /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures",
+        "status": "ok",
+        "elapsed": 4.7,
+        "response": "{\"error\": \"Requested tokens (3267) exceed context window of 2048. Try breaking it into smaller chunks.\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 4,
+    "tag": "eml-1",
+    "steps": [
+      {
+        "msg": "Fetch the full HTML from https://httpbin.org/html preserving all element classes, IDs, and data attr",
+        "status": "ok",
+        "elapsed": 5.4,
+        "response": "Error: Requested tokens (3261) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 5,
+    "tag": "eml-1",
+    "steps": [
+      {
+        "msg": "Read /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_raw_html/samp",
+        "status": "ok",
+        "elapsed": 6.7,
+        "response": "Error: Requested tokens (3348) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 6,
+    "tag": "eml-2",
+    "steps": [
+      {
+        "msg": "Detect the website platform from this HTML: <div class='w-section'><div class='w-container'><div cla",
+        "status": "ok",
+        "elapsed": 5.0,
+        "response": "Error: Requested tokens (3409) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 7,
+    "tag": "eml-2",
+    "steps": [
+      {
+        "msg": "What platform built this HTML: <div class='framer-abc123' data-framer-component-type='RichTextContai",
+        "status": "ok",
+        "elapsed": 6.7,
+        "response": "Error: Requested tokens (3470) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 8,
+    "tag": "eml-2",
+    "steps": [
+      {
+        "msg": "Identify the platform from this HTML: <div class='elementor-section elementor-top-section' data-elem",
+        "status": "ok",
+        "elapsed": 6.5,
+        "response": "Error: Requested tokens (3490) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 9,
+    "tag": "eml-2",
+    "steps": [
+      {
+        "msg": "Read the HTML at /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_r",
+        "status": "ok",
+        "elapsed": 5.8,
+        "response": "{\"title\":\"Error\",\"body\":\"Requested tokens (3581) exceed context window of 2048. Sorry about that!\",\"footer\":\"Try breaking it up into smaller chunks. I'm here to help!\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 10,
+    "tag": "eml-2",
+    "steps": [
+      {
+        "msg": "Detect the platform from: <header class='site-header'><nav class='main-nav'><ul><li><a href='/'>Home",
+        "status": "ok",
+        "elapsed": 6.0,
+        "response": "{\"title\":\"Error: Requested Tokens Exceed Context Window\",\"body\":\"Uh-oh! Looks like your request is a bit too big for the chat. Maybe break it down into smaller chunks? 😅\",\"footer\":\"Stay tuned for more"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 11,
+    "tag": "eml-3",
+    "steps": [
+      {
+        "msg": "Extract the color theme from this CSS and map each color to its Wix EML --wst-* theme variable. CSS:",
+        "status": "ok",
+        "elapsed": 25.3,
+        "response": "{\"error\": \"Unknown command: css_to_wix_theme\", \"available\": [\"read\", \"write\", \"append\", \"list\", \"ls\", \"tree\", \"search\", \"find\", \"exists\", \"copy\", \"cp\"]}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 12,
+    "tag": "eml-3",
+    "steps": [
+      {
+        "msg": "Extract fonts from this CSS and resolve each to a Wix-supported font: body { font-family: 'Inter', s",
+        "status": "ok",
+        "elapsed": 26.9,
+        "response": "{\n  \"title\": \"CSS Font Extraction and Resolution\",\n  \"body\": \"The extracted fonts from your CSS are:\\n- body: 'Inter', sans-serif\\n- h1, h2: 'Playfair Display', serif, weight\\nPrettier than ever!\",\n  "
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 13,
+    "tag": "eml-3",
+    "steps": [
+      {
+        "msg": "Extract CSS variables from: :root { --primary: #2563eb; --secondary: #7c3aed; --bg: #f8fafc; --text:",
+        "status": "ok",
+        "elapsed": 17.2,
+        "response": "{\n  \"title\": \"Error: File Not Found\",\n  \"body\": \"The path you provided does not exist. Please check the path and try again.\",\n  \"footer\": \"If you need further assistance, feel free to ask.\"\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 14,
+    "tag": "eml-3",
+    "steps": [
+      {
+        "msg": "Read /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_raw_html/samp",
+        "status": "ok",
+        "elapsed": 23.9,
+        "response": "{\n  \"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\",\n  \"sense\": \"touch\"\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 15,
+    "tag": "eml-3",
+    "steps": [
+      {
+        "msg": "Extract theme from CSS with complex colors for Wix EML mapping: .hero { background: rgba(255, 107, 1",
+        "status": "ok",
+        "elapsed": 15.3,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 16,
+    "tag": "eml-3",
+    "steps": [
+      {
+        "msg": "I have these site colors: background=#ffffff, text=#1e293b, heading=#0f172a, accent=#2563eb, accentA",
+        "status": "ok",
+        "elapsed": 5.8,
+        "response": "Error: Requested tokens (4027) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 17,
+    "tag": "eml-4",
+    "steps": [
+      {
+        "msg": "Read /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_raw_html/samp",
+        "status": "ok",
+        "elapsed": 13.7,
+        "response": "{\n  \"title\": \"Error Encountered\",\n  \"body\": \"The specified path does not exist. Please check the path and try again.\",\n  \"footer\": \"If you need further assistance, please contact support.\"\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 18,
+    "tag": "eml-4",
+    "steps": [
+      {
+        "msg": "Split this HTML into sections for EML conversion: <header><nav>Logo Menu</nav></header><section clas",
+        "status": "ok",
+        "elapsed": 19.6,
+        "response": "{\"path\": \"/Users/oronmozes/Documents/projects/sentient-server/sandbox\", \"entries\": [{\"name\": \"CSS\", \"type\": \"file\", \"size\": 498}, {\"name\": \"HTML\", \"type\": \"file\", \"size\": 1234}, {\"name\": \"index.js\", \""
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 19,
+    "tag": "eml-4",
+    "steps": [
+      {
+        "msg": "Read /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_raw_html/samp",
+        "status": "ok",
+        "elapsed": 19.9,
+        "response": "{\n  \"path\": \"/Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_raw_html/sample_page.html\",\n  \"header\": {\n    \"position\": \"sticky\",\n    \"is_fixed\": true\n  }\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 20,
+    "tag": "eml-4",
+    "steps": [
+      {
+        "msg": "Split deeply nested HTML into EML sections: <body><div class='page-wrapper'><div class='content-wrap",
+        "status": "ok",
+        "elapsed": 18.6,
+        "response": "{\n  \"title\": \"Error in File Path\",\n  \"body\": \"The path /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\": could not be found.\",\n  \"footer\": \"Check the file path, or maybe you need "
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 21,
+    "tag": "eml-4",
+    "steps": [
+      {
+        "msg": "Split HTML with no semantic tags into EML sections: <body><div id='nav'><a>Logo</a><a>Link</a></div>",
+        "status": "ok",
+        "elapsed": 15.0,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 22,
+    "tag": "eml-4",
+    "steps": [
+      {
+        "msg": "Split a single-section page for EML: <body><div class='page'><h1>One Page</h1><p>Just one block of c",
+        "status": "ok",
+        "elapsed": 5.4,
+        "response": "Error: Requested tokens (3876) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 23,
+    "tag": "eml-5",
+    "steps": [
+      {
+        "msg": "Build a Wix EML component tree from this hero HTML. Classify each element as a Wix EML type (Section",
+        "status": "ok",
+        "elapsed": 28.9,
+        "response": "{\n  \"section\": {\n    \"id\": \"hero\",\n    \"background\": \"#0f172a\",\n    \"padding\": \"120px 24px\",\n    \"text-align\": \"center\",\n    \"container\": \"max-width: 1200px; margin: 0 auto;\"\n  }\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 24,
+    "tag": "eml-5",
+    "steps": [
+      {
+        "msg": "Build a Wix EML component tree from a 3-column features grid. Each card has icon+title+description. ",
+        "status": "ok",
+        "elapsed": 7.0,
+        "response": "Error: Requested tokens (4168) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 25,
+    "tag": "eml-5",
+    "steps": [
+      {
+        "msg": "Build a Wix EML component tree for a navigation header. In EML, this uses the Header component (NOT ",
+        "status": "ok",
+        "elapsed": 22.1,
+        "response": "{\n  \"title\": \"Error: Path Not Found\",\n  \"body\": \"The path provided does not exist. Please double-check the path and try again.\",\n  \"footer\": \"If you need further assistance, please contact support.\"\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 26,
+    "tag": "eml-5",
+    "steps": [
+      {
+        "msg": "Build a Wix EML component tree for a testimonial card. Map quote text to Text with richText, avatar ",
+        "status": "ok",
+        "elapsed": 4.9,
+        "response": "{\"error\": \"Requested tokens (4145) exceed context window of 2048. 🤖\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 27,
+    "tag": "eml-5",
+    "steps": [
+      {
+        "msg": "Build Wix EML component tree with an <hr> element. In EML, <hr> maps to the Line component. HTML: <s",
+        "status": "ok",
+        "elapsed": 17.0,
+        "response": "{\"path\": \"/Users/oronmozes/Documents/projects/sentient-server/sandbox\", \"entries\": [{\"name\": \"CSS\", \"type\": \"file\", \"size\": 498}, {\"name\": \"HTML\", \"type\": \"file\", \"size\": 213}] }"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 28,
+    "tag": "eml-5",
+    "steps": [
+      {
+        "msg": "Read the component tree at /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fix",
+        "status": "ok",
+        "elapsed": 18.1,
+        "response": "{\n  \"title\": \"Error Report\",\n  \"body\": \"Step 1: The path /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/05_component_trees/01-hero.json was not found. 🤔\",\n  \"footer\": \""
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 29,
+    "tag": "eml-6",
+    "steps": [
+      {
+        "msg": "Convert these CSS properties to Wix EML-compatible Tailwind classes. IMPORTANT: Wix EML has specific",
+        "status": "ok",
+        "elapsed": 16.4,
+        "response": "{\n  \"title\": \"CSS to Wix EML Tailwind Conversion\",\n  \"body\": \"display:flex; flex-direction:column; justify-content:center; align-items:center; gap:20px; padding:40px; Here's a quick tip: Use Tailwind'"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 30,
+    "tag": "eml-6",
+    "steps": [
+      {
+        "msg": "Convert to Wix EML Tailwind: width:100%; max-width:1200px; margin:0 auto; padding:60px 24px; backgro",
+        "status": "ok",
+        "elapsed": 5.5,
+        "response": "Error: Requested tokens (4016) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 31,
+    "tag": "eml-6",
+    "steps": [
+      {
+        "msg": "Convert these TEXT styles for Wix EML: font-size:56px; font-weight:800; line-height:1.1; color:white",
+        "status": "ok",
+        "elapsed": 6.3,
+        "response": "{\"Error: Requested tokens (4076) exceed context window of 2048. 🤬 Adjust your request or split it up.\"\n  :\n  \"It's like asking for too many cookies in one sitting. Maybe try splitting it into smaller "
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 32,
+    "tag": "eml-6",
+    "steps": [
+      {
+        "msg": "Convert a 3-column grid for Wix EML Tailwind: display:grid; grid-template-columns:repeat(3,1fr); gap",
+        "status": "ok",
+        "elapsed": 6.4,
+        "response": "Error: Requested tokens (4076) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 33,
+    "tag": "eml-6",
+    "steps": [
+      {
+        "msg": "Convert button styles for Wix EML: padding:16px 32px; background:#2563eb; color:white; border-radius",
+        "status": "ok",
+        "elapsed": 17.8,
+        "response": "{\n  \"title\": \"Wix EML Button Style Conversion\",\n  \"body\": \"Hey there! To make those Wix EML buttons pop, you need to split the CSS properties just right. Here’s how you can do it:\\n\\n**\\n\\nQuick tip: "
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 34,
+    "tag": "eml-6",
+    "steps": [
+      {
+        "msg": "Convert child positioning for Wix EML: element at x=100, y=50, width=600 inside parent width=1200. W",
+        "status": "ok",
+        "elapsed": 19.8,
+        "response": "{\"error\": \"Unknown command: convert_positioning\", \"available\": [\"read\", \"write\", \"append\", \"list\", \"ls\", \"tree\", \"search\", \"find\", \"exists\", \"copy\", \"cp\", \"move\"]}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 35,
+    "tag": "eml-6",
+    "steps": [
+      {
+        "msg": "Convert edge-case CSS to Wix EML Tailwind: gap:1.5px; position:sticky; z-index:100;. Wix EML forbids",
+        "status": "ok",
+        "elapsed": 18.1,
+        "response": "{\n  \"title\": \"CSS to Wix EML Tailwind Conversion\",\n  \"body\": \"For the given CSS properties:\\n\\n- `gap: 1.5px;`: Use `gap-2` as the closest alternative. That’s close enough for most folks.\\n\\nQuick tip"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 36,
+    "tag": "eml-7",
+    "steps": [
+      {
+        "msg": "Map these extracted site colors to Wix Harmony --wst-* theme variables: background=#ffffff, text=#33",
+        "status": "ok",
+        "elapsed": 16.8,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 37,
+    "tag": "eml-7",
+    "steps": [
+      {
+        "msg": "Map fonts to Wix theme: heading font 'Montserrat' 700, body font 'Inter' 400. First check if these f",
+        "status": "ok",
+        "elapsed": 34.0,
+        "response": "{\n  \"title\": \"Font Mapping for Wix Theme\",\n  \"body\": \"I double-checked the fonts you provided, and 'Montserrat' and 'Inter' are definitely available in Wix. Here’s how you can map them to the Wix them"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 38,
+    "tag": "eml-7",
+    "steps": [
+      {
+        "msg": "Map a dark theme to Wix --wst-* variables: bg=#0f172a, text=#e0e0e0, heading=#ffffff, accent=#2563eb",
+        "status": "ok",
+        "elapsed": 20.5,
+        "response": "{\"path\": \"/Users/oronmozes/Documents/projects/sentient-server/sandbox\", \"entries\": [{\"name\": \"CSS\", \"type\": \"file\", \"size\": 498}, {\"name\": \"HTML\", \"type\": \"file\", \"size\": 321}]}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 39,
+    "tag": "eml-7",
+    "steps": [
+      {
+        "msg": "Read the extracted theme at /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fi",
+        "status": "ok",
+        "elapsed": 13.6,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 40,
+    "tag": "eml-7",
+    "steps": [
+      {
+        "msg": "I have 6 accent colors but Wix only supports --wst-accent-1 through accent-3. Colors by importance: ",
+        "status": "ok",
+        "elapsed": 17.3,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 41,
+    "tag": "eml-7",
+    "steps": [
+      {
+        "msg": "Resolve the font 'Poppins' for Wix EML. Is it available in Wix? If so, which variant (Regular, Bold,",
+        "status": "ok",
+        "elapsed": 15.4,
+        "response": "{\n  \"title\": \"Wix EML Font Availability\",\n  \"body\": \"Hey there! The font 'Poppins' is definitely available in Wix EML. The options are Regular, Bold, and Semi Bold. Just set the --wst, and you're good"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 42,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Generate valid Wix EML JSX for a hero section. Use the flex-column-centered layout pattern. Requirem",
+        "status": "ok",
+        "elapsed": 31.3,
+        "response": "{\n  \"title\": \"Wix EML JSX for Hero Section\",\n  \"body\": \"Let's jazz up that hero section with some Wix EML JSX! 🚀\\n\\n<section style='background-color: var(--wst-shade-1-color); display: flex; flex-dire"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 43,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Generate Wix EML JSX for a 3-column features grid. Use the flex-row-three-column layout pattern. Sec",
+        "status": "ok",
+        "elapsed": 29.4,
+        "response": "{\n  \"title\": \"Wix EML JSX for 3-Column Features Grid\",\n  \"body\": \"<div style=\\\"display: flex; flex-direction: row; justify-content: space-between; background-color: var(--wst-sh\",\n  \"footer\": \"Quick t"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 44,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Generate Wix EML JSX for a site header. CRITICAL: use <Header> root tag, NOT <Section>. In Header, r",
+        "status": "ok",
+        "elapsed": 18.7,
+        "response": "{\n  \"title\": \"Error: Path Not Found\",\n  \"body\": \"The path /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\": could not be found.\",\n  \"footer\": \"Please check the directory and try a"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 45,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Generate Wix EML JSX for a site footer. CRITICAL: use <Footer> root tag, NOT <Section>. In Footer, r",
+        "status": "ok",
+        "elapsed": 6.4,
+        "response": "{\"title\":\"Max Tokens Exceeded\",\"body\":\"Looks like your request went a bit too far. The context window is 2048 tokens, but you asked for 3855. Maybe break it up into smaller chunks?\",\"footer\":\"Or try a"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 46,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Generate Wix EML JSX for a testimonial card. Container with Background element (cssCustomProperties.",
+        "status": "ok",
+        "elapsed": 5.4,
+        "response": "{\"error\": \"Requested tokens (4018) exceed context window of 2048. Try breaking it into smaller chunks, buddy.\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 47,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Generate Wix EML JSX for a CTA section. Section with dark Background, centered Text h2, Text subtitl",
+        "status": "ok",
+        "elapsed": 6.1,
+        "response": "{\"title\": \"Uh Oh!\", \"body\": \"Requested tokens (3844) exceed context window of 2048. Sorry about that! Try breaking it up into smaller chunks.\", \"footer\": \"Got it? 👍\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 48,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Read the component tree at /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fix",
+        "status": "ok",
+        "elapsed": 21.9,
+        "response": "{\n  \"title\": \"Error in Nerve.py\",\n  \"body\": \"It seems like there's a string literal issue in your Nerve.py script. Specifically, the error is: SyntaxError: unterminated string literal (detected). Chec"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 49,
+    "tag": "eml-8",
+    "steps": [
+      {
+        "msg": "Generate the minimum valid Wix EML JSX for an empty section. Check the Section component spec for re",
+        "status": "ok",
+        "elapsed": 11.8,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 50,
+    "tag": "eml-9",
+    "steps": [
+      {
+        "msg": "Validate the EML file at /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtu",
+        "status": "ok",
+        "elapsed": 20.5,
+        "response": "{\n  \"title\": \"Validation Report for 01-hero.eml.jsx\",\n  \"body\": {\n    \"JSX Syntax\": \"Fail, man. It's like trying to read a bad joke.\",\n    \"Component Hierarchy\": \"Fail, it's a tangled mess.\",\n    \"Req"
       }
     ],
     "overall": "ok"
   },
   {
     "id": 51,
-    "tag": "identity",
+    "tag": "eml-9",
     "steps": [
       {
-        "msg": "who are you",
+        "msg": "Validate this Wix EML and list ALL errors: <Section><Container classes='flex gap-1.5'><Text data={{r",
         "status": "ok",
-        "elapsed": 11.5,
-        "response": "{\"error\": \"I'm sorry, but I couldn't understand that request. Could you please rephrase it?\"}"
+        "elapsed": 5.6,
+        "response": "{\"text\":\"Sorry, but I can't assist with that. The message contains harmful content, and I can't validate it.\"}"
       }
     ],
     "overall": "ok"
   },
   {
-    "id": 200,
-    "tag": "fun",
+    "id": 52,
+    "tag": "eml-9",
     "steps": [
       {
-        "msg": "what's a fun fact about space",
+        "msg": "Validate this Image in Wix EML: <Image id='img1' data={{image:{uri:'https://example.com/photo.jpg',w",
+        "status": "ok",
+        "elapsed": 17.8,
+        "response": "{ \"title\": \"Validation of Image in Wix EML\", \"body\": \"Hey there! There are a few issues with the image data in your Wix EML. The image tag is missing the required 'type' attribute, which should be \" }"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 53,
+    "tag": "eml-9",
+    "steps": [
+      {
+        "msg": "Validate this Text in Wix EML: <Text classes='text-[36px] font-bold' data={{richText:{type:'Builder.",
+        "status": "ok",
+        "elapsed": 12.2,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 54,
+    "tag": "eml-9",
+    "steps": [
+      {
+        "msg": "Validate this Footer Text in Wix EML: <Footer id='f1'><Text id='t1' data={{richText:{type:'Builder.R",
+        "status": "ok",
+        "elapsed": 17.6,
+        "response": "{\n  \"title\": \"Footer Validation Error\",\n  \"body\": \"Hey there! The footer text in your Wix EML contains an invalid `type` field in the `richText` object. This violates the critical rule that `type` mus"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 55,
+    "tag": "eml-9",
+    "steps": [
+      {
+        "msg": "Validate this Section for cssProperties placement: <Section id='s1' classes='h-auto' cssProperties={",
+        "status": "ok",
+        "elapsed": 6.4,
+        "response": "{\"response\": \"I understand your concern, and I appreciate your effort to keep things safe. Let's focus on sharing content that's helpful and enjoyable for everyone.\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 56,
+    "tag": "eml-10",
+    "steps": [
+      {
+        "msg": "Create an EML output folder at sandbox/eml-output/acme-saas-com for a Wix EML conversion. Site has 1",
+        "status": "ok",
+        "elapsed": 26.9,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 57,
+    "tag": "eml-10",
+    "steps": [
+      {
+        "msg": "Create sections.json at sandbox/eml-output/acme-saas-com/pages/home/ listing 6 EML sections with: in",
+        "status": "ok",
+        "elapsed": 45.2,
+        "response": "{\n  \"path\": \"/Users/oronmozes/Documents/projects/sentient-server/sandbox\",\n  \"entries\": [\n    {\n      \"name\": \"index\",\n      \"type\": \"file\",\n      \"size\": 0,\n      \"note\": \"Looks like we're starting f"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 58,
+    "tag": "eml-10",
+    "steps": [
+      {
+        "msg": "Write website-metadata.json at sandbox/eml-output/acme-saas-com/ with: platform, wix_theme (--wst-* ",
+        "status": "ok",
+        "elapsed": 19.5,
+        "response": "{\n  \"title\": \"Error: Path Not Found\",\n  \"body\": \"The path `/Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":` was not found. Double-check the path and give it another go!\",\n  \"foo"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 59,
+    "tag": "eml-10",
+    "steps": [
+      {
+        "msg": "Read /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/10_output/expect",
+        "status": "ok",
+        "elapsed": 17.7,
+        "response": "{\n  \"title\": \"Error in Nerve.py\",\n  \"body\": \"There's a syntax error in your Nerve.py file. The issue is with an unterminated string literal at line 144. Make sure to properly escape the string. Don't "
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 60,
+    "tag": "eml-10",
+    "steps": [
+      {
+        "msg": "Create EML output structure for URL https://my-site.co.uk/landing-page?utm_source=google. Sanitize d",
+        "status": "ok",
+        "elapsed": 15.3,
+        "response": "{\n  \"title\": \"Error in EML Output Structure Creation\",\n  \"body\": \"An error occurred while creating the EML output structure for the URL <https://my-site.co.uk/landing-page?utm_source=google>. The erro"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 61,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_component_spec tool to look up the Section component spec for Wix EML. Then generate a m",
+        "status": "ok",
+        "elapsed": 6.4,
+        "response": "Error: Requested tokens (3744) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 62,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_list_components tool to get all available Wix EML component types. Then pick the ones ne",
+        "status": "ok",
+        "elapsed": 10.3,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 63,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_theme_variables tool to get the full list of Wix --wst-* theme variables. Then use eml_m",
+        "status": "ok",
+        "elapsed": 12.1,
+        "response": "{\n  \"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\",\n  \"sense\": \"touch\"\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 64,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_resolve_font tool to check if 'Montserrat' is available in Wix. Then use eml_font_list t",
         "status": "ok",
         "elapsed": 16.0,
-        "response": "{ \"card\": { \"title\": \"Fun Fact About Space\", \"body\": \"Did you know that space isn't blue? It appears black because there's nothing in the way to scatter light like Earth's atmosphere does! 😄\", \"footer"
+        "response": "{\n  \"title\": \"Oopsie!\",\n  \"body\": \"It seems there's an issue with the path provided in Step 2. The error message indicates that the path '/Users/oronmozes/Documents/projects/sentient-server/sandbox..."
       }
     ],
     "overall": "ok"
   },
   {
-    "id": 231,
-    "tag": "weather",
+    "id": 65,
+    "tag": "eml-11",
     "steps": [
       {
-        "msg": "what's the weather today",
+        "msg": "Use the eml_tailwind_rules tool to get the Wix EML Tailwind restrictions. Then use eml_css_to_tailwi",
         "status": "ok",
-        "elapsed": 12.7,
-        "response": "{\"title\": \"Weather Update\", \"body\": \"I couldn't fetch the weather today. Please check a weather app or website for the latest info.\", \"footer\": \"Sorry for the inconvenience!\"}"
+        "elapsed": 10.5,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\" }"
       }
     ],
     "overall": "ok"
   },
   {
-    "id": 271,
-    "tag": "math",
+    "id": 66,
+    "tag": "eml-11",
     "steps": [
       {
-        "msg": "what is 2 + 2",
+        "msg": "Use the eml_layout_pattern tool to get the 'flex-column-centered' layout pattern for Wix EML. Adapt ",
+        "status": "ok",
+        "elapsed": 10.0,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 67,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_validation_rules tool to get the full Wix EML validation checklist. Then validate this E",
         "status": "ok",
         "elapsed": 12.0,
-        "response": "{ \"title\": \"Error\", \"body\": \"I couldn't calculate that. Try again or provide more details.\", \"footer\": \"Remember, I'm just a chatbot, not a supercomputer.\" }"
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
       }
     ],
     "overall": "ok"
   },
   {
-    "id": 411,
-    "tag": "writing",
+    "id": 68,
+    "tag": "eml-11",
     "steps": [
       {
-        "msg": "summarize the concept of machine learning in 3 sentences",
+        "msg": "Use the eml_richtext_format tool to get the richText specification for Wix EML. Then create a valid ",
         "status": "ok",
-        "elapsed": 18.1,
-        "response": "{\"card\": {\"title\": \"Summarize Machine Learning\", \"body\": \"Machine learning is a type of artificial intelligence that lets computers learn from and improve on a task without being explicitly programmed"
+        "elapsed": 12.4,
+        "response": "{\"richText\": {\"type\": \"heading\", \"text\": \"Welcome to Our Site\", \"fontSize\": \"48px\", \"color\": \"#1e293b\"}}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 69,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_background_rules tool to learn how Section backgrounds work in Wix EML. Create a Section",
+        "status": "ok",
+        "elapsed": 12.2,
+        "response": "{\n  \"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"tool\\\":\",\n  \"sense\": \"touch\"\n}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 70,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_animation_spec tool to get all 'entrance' animations available in Wix EML. Pick FadeIn a",
+        "status": "ok",
+        "elapsed": 16.9,
+        "response": "{\n  \"title\": \"Error encountered\",\n  \"body\": \"A little hiccup happened while trying to access that path. Double-check the path and give it another whirl.\",\n  \"footer\": \"If the issue hangs around, check"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 71,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use the eml_manifest_filters tool to check which CSS properties are allowed on which Wix EML compone",
+        "status": "ok",
+        "elapsed": 15.8,
+        "response": "{\"path\": \"/Users/oronmozes/Documents/projects/sentient-server/sandbox\", \"entries\": [{\"name\": \"CSS\", \"type\": \"file\", \"size\": 498}, {\"name\": \"HTML\", \"type\": \"file\", \"size\": 1024}]}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 72,
+    "tag": "eml-11",
+    "steps": [
+      {
+        "msg": "Use eml_component_spec to look up the Header component. Then use eml_component_spec again for Footer",
+        "status": "ok",
+        "elapsed": 16.4,
+        "response": "{\n  \"title\": \"Critical Difference in richText.type Handling\",\n  \"body\": \"When using eml_component_spec to look up the Header and Footer components, the critical difference in how richText.type is hand"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 73,
+    "tag": "eml-12",
+    "steps": [
+      {
+        "msg": "Convert /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_raw_html/s",
+        "status": "ok",
+        "elapsed": 16.7,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 74,
+    "tag": "eml-12",
+    "steps": [
+      {
+        "msg": "Read /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixtures/01_raw_html/samp",
+        "status": "ok",
+        "elapsed": 18.9,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 75,
+    "tag": "eml-12",
+    "steps": [
+      {
+        "msg": "Convert just the hero section from /Users/oronmozes/Documents/projects/sentient-server/tests/html_to",
+        "status": "ok",
+        "elapsed": 5.8,
+        "response": "Error: Requested tokens (3812) exceed context window of 2048"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 76,
+    "tag": "eml-12",
+    "steps": [
+      {
+        "msg": "Convert the features section from /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_",
+        "status": "ok",
+        "elapsed": 19.1,
+        "response": "{\n  \"title\": \"Error in Path\",\n  \"body\": \"The path specified in Step 1 does not exist. Please verify the path and try again.\",\n  \"footer\": \"If you need further assistance, please reach out to support"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 77,
+    "tag": "eml-12",
+    "steps": [
+      {
+        "msg": "Convert this minimal HTML to valid Wix EML JSX: <html><body><section style='background:#f0f0f0;paddi",
+        "status": "ok",
+        "elapsed": 18.9,
+        "response": "{\"error\": \"Path not found: /Users/oronmozes/Documents/projects/sentient-server/sandbox/{\\\"mode\\\":\", \"sense\": \"touch\"}"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 78,
+    "tag": "eml-12",
+    "steps": [
+      {
+        "msg": "Full Wix EML package from /Users/oronmozes/Documents/projects/sentient-server/tests/html_to_eml/fixt",
+        "status": "ok",
+        "elapsed": 22.2,
+        "response": "{\n  \"title\": \"Error Encountered\",\n  \"body\": \"Oops! Looks like there's a syntax error in your code. The string literal wasn't terminated properly at line 144. Make sure you've escaped the end. Quick fi"
+      }
+    ],
+    "overall": "ok"
+  },
+  {
+    "id": 79,
+    "tag": "eml-12",
+    "steps": [
+      {
+        "msg": "Use eml_list_components to get all Wix EML types, eml_list_layouts to get all layout patterns, and e",
+        "status": "ok",
+        "elapsed": 35.4,
+        "response": "{\n  \"title\": \"Error in Path\",\n  \"body\": \"Hey there! The path in Step 2 seems a little off. It looks like the string isn't quite closed off. Double-check that it's all wrapped up in double quotes. Shou"
       }
     ],
     "overall": "ok"

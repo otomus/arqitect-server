@@ -367,8 +367,13 @@ def generate_test_file(flows: list[FlowCapture], output_path: str) -> str:
         test_lines.append('            assert len(response) > 0')
         test_lines.append('')
         # Flows with a dispatch span go through "thinking" stage;
-        # flows routed by the planner go through "recipe_chain" stage.
-        if flow.dispatch_action:
+        # flows routed by the planner go through "recipe_chain" stage;
+        # safety-blocked flows emit "safety_block" stage.
+        is_safety_block = _is_safety_blocked(flow)
+        if is_safety_block:
+            test_lines.append('            # Brain blocked this input (safety filter)')
+            test_lines.append('            assert trace.has_event("brain:thought", data_contains={"stage": "safety_block"})')
+        elif flow.dispatch_action:
             test_lines.append('            # Brain reached thinking stage (dispatch path)')
             test_lines.append('            assert trace.has_event("brain:thought", data_contains={"stage": "thinking"})')
         else:
@@ -401,6 +406,19 @@ def generate_test_file(flows: list[FlowCapture], output_path: str) -> str:
         f.write(content)
 
     return content
+
+
+def _is_safety_blocked(flow: FlowCapture) -> bool:
+    """Check if a flow was blocked by the safety filter.
+
+    Safety-blocked flows have no dispatch span, no LLM calls, and the
+    response contains safety-related language.
+    """
+    if flow.dispatch_action or flow.llm_calls:
+        return False
+    resp = (flow.response or "").lower()
+    safety_keywords = ["harmful", "can't assist", "safety", "blocked", "inappropriate"]
+    return any(kw in resp for kw in safety_keywords)
 
 
 def _extract_stable_substr(llm_call: LLMCall) -> str:
