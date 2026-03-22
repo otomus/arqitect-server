@@ -768,6 +768,124 @@ body::after {
     width: 160px;
     height: 20px;
   }
+
+  .arq-nav {
+    padding: 0 1rem;
+  }
+
+  .arq-wip-banner {
+    font-size: 0.65rem;
+    padding: 0.4rem 0.5rem;
+    letter-spacing: 0.15em;
+  }
+
+  /* Content padding and overflow */
+  .vp-doc {
+    padding: 0 0.5rem !important;
+  }
+
+  /* Headings — reduce letter-spacing on small screens */
+  .vp-doc h1 {
+    font-size: 1.4rem;
+    letter-spacing: 0.04em;
+  }
+
+  .vp-doc h2 {
+    font-size: 1.1rem;
+    letter-spacing: 0.04em;
+  }
+
+  .vp-doc h3 {
+    font-size: 0.95rem;
+    letter-spacing: 0.02em;
+  }
+
+  /* Tables — horizontal scroll */
+  .vp-doc table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    white-space: nowrap;
+  }
+
+  /* Code blocks — prevent overflow */
+  .vp-doc div[class*='language-'] {
+    margin-left: -0.5rem;
+    margin-right: -0.5rem;
+    border-radius: 0;
+  }
+
+  .vp-doc div[class*='language-'] pre {
+    overflow-x: auto;
+  }
+
+  .vp-doc div[class*='language-'] code {
+    font-size: 0.75rem;
+  }
+
+  /* Inline code — prevent line breaks */
+  .vp-doc :not(pre) > code {
+    font-size: 0.78rem;
+    word-break: break-word;
+  }
+
+  /* Custom blocks */
+  .vp-doc .custom-block {
+    padding: 0.75rem !important;
+  }
+
+  /* Hero */
+  .VPHero .name {
+    letter-spacing: 0.1em !important;
+  }
+
+  /* Feature cards */
+  .VPFeature .title {
+    font-size: 0.75rem;
+  }
+
+  .VPFeature .details {
+    font-size: 0.78rem;
+  }
+
+  /* Footer */
+  .arq-footer {
+    padding: 1.5rem 1rem;
+    font-size: 0.78rem;
+  }
+
+  .arq-footer-links {
+    gap: 1rem;
+  }
+
+  /* Sidebar section headers */
+  .VPSidebarItem.level-0 .text {
+    font-size: 0.65rem;
+  }
+
+  .VPSidebarItem .text {
+    font-size: 0.78rem;
+  }
+}
+
+/* Small phones */
+@media (max-width: 480px) {
+  .arq-nav-logo {
+    width: 130px;
+    height: 16px;
+  }
+
+  .vp-doc h1 {
+    font-size: 1.2rem;
+  }
+
+  .vp-doc h2 {
+    font-size: 1rem;
+  }
+
+  .vp-doc {
+    font-size: 0.9rem;
+  }
 }
 
 /* Ensure VitePress content doesn't overlap custom nav */
