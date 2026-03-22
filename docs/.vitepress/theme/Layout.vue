@@ -11,6 +11,7 @@ const menuOpen = ref(false)
 const navLinks = [
   { text: 'Docs', href: '/arqitect-server/guide/getting-started' },
   { text: 'Architecture', href: '/arqitect-server/architecture/overview' },
+  { text: 'Monitoring', href: '/arqitect-server/monitoring' },
   { text: 'Community', href: 'https://otomus.github.io/arqitect-community/' },
   { text: 'Dashboard', href: 'https://otomus.github.io/arqitect-dashboard/' },
 ]
