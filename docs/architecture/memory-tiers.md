@@ -40,7 +40,7 @@ Warm memory uses SQLite. It survives restarts. It's indexed for fast similarity 
 
 Cold memory is the knowledge graph. It's the largest and most permanent tier, storing everything arqitect has learned:
 
-- **Nerves** — every nerve definition, system prompt, tool binding, and calibration score
+- **Nerves** — every nerve definition, system prompt, tool binding, calibration score, and cached embedding vectors
 - **Tools** — MCP tool registrations and capability metadata
 - **Users** — identity, preferences, permission grants
 - **Personality** — the system's configured voice and behavior rules

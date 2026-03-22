@@ -107,6 +107,31 @@ Not all instances are the same — some run large models, some small. The permis
 See [Community](/guide/community) for sync, contribution, and family dynamics.
 :::
 
+## Embeddings
+
+Arqitect uses ONNX-based embeddings (all-MiniLM-L6-v2, 384 dimensions) for semantic matching throughout the system. Rather than relying on keyword matching alone, the brain uses a hybrid scoring system to find the right nerve for a task.
+
+### Hybrid Matching
+
+When a task arrives, the nerve catalog is pre-filtered before the LLM sees it:
+
+1. **Embed the task** — compute a 384-dim vector via the ONNX model
+2. **Score each nerve** — blend keyword matching (40%) with embedding cosine similarity (60%)
+3. **Filter to top 20** — only the most relevant nerves enter the LLM routing context
+4. **Boost core senses** — senses always make the cut regardless of score
+
+This keeps the LLM's context window focused and reduces hallucinated nerve selections.
+
+### Caching
+
+Nerve embeddings are cached at three levels:
+
+1. **In-memory LRU** — 100 most recent, sub-millisecond lookup
+2. **Cold memory (SQLite)** — persists across restarts in the `nerve_registry` table
+3. **Compute fresh** — via ONNX embedder on cache miss, then persisted back
+
+If ONNX is unavailable, the system falls back to the LLM engine's embed function. If both are unavailable, keyword-only matching is used.
+
 ## Permissions
 
 Access control at two levels:

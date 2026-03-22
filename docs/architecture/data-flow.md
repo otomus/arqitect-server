@@ -17,7 +17,11 @@ The first decision: is this a **workflow** or a **direct** request?
 
 Intent classification happens before the LLM is called. It's a lightweight check that shapes the rest of the pipeline.
 
-### 2. Typed Action Decisions
+### 2. Embedding Pre-Filter
+
+Before the LLM decides, the nerve catalog is narrowed down using hybrid matching — a blend of keyword scoring (40%) and ONNX embedding cosine similarity (60%). Only the top 20 most relevant nerves (plus all core senses) are included in the LLM's routing context. This keeps decisions fast and focused. See [Architecture Overview — Embeddings](/architecture/overview#embeddings) for details.
+
+### 3. Typed Action Decisions
 
 The brain doesn't generate free-form text. It generates a **typed decision** — a structured object that the dispatch layer can validate and route.
 
@@ -35,7 +39,7 @@ Seven decision types:
 
 The LLM picks exactly one. The decision carries all the data needed for execution — nerve name, parameters, clarification questions, whatever the type demands.
 
-### 3. Normalize, Validate, Dispatch
+### 4. Normalize, Validate, Dispatch
 
 The typed decision passes through a three-stage pipeline before execution:
 
@@ -45,7 +49,7 @@ The typed decision passes through a three-stage pipeline before execution:
 
 **Dispatch** — routes the validated decision to the correct handler function. Each decision type has a dedicated handler. No switch statements, no type-checking at runtime — the dispatch table is built at startup.
 
-### 4. Execution
+### 5. Execution
 
 The handler runs the decision. For `InvokeDecision`, this means:
 
@@ -56,7 +60,7 @@ The handler runs the decision. For `InvokeDecision`, this means:
 
 The nerve has full autonomy within its subprocess. It can call tools, use senses, make LLM calls — whatever its system prompt dictates. When it finishes, it returns a structured result.
 
-### 5. Result Processing
+### 6. Result Processing
 
 The result flows back through the brain:
 

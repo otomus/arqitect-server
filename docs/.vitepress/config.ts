@@ -73,6 +73,8 @@ export default defineConfig({
     },
     socialLinks: [
       { icon: 'github', link: 'https://github.com/otomus/arqitect-server' },
+      { icon: 'discord', link: 'https://discord.gg/AYjJgWuS' },
+      { icon: 'slack', link: 'https://join.slack.com/t/arqitectworkspace/shared_invite/zt-3t6zqf442-yMtBciurcPd_J66gZ1l1wA' },
     ],
   },
 })

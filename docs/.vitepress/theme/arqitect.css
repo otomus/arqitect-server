@@ -729,15 +729,26 @@ body::after {
   border-top: 1px solid var(--arq-border);
   padding: 2rem;
   text-align: center;
-  font-size: 0.75rem;
-  color: var(--arq-text-dim);
+  font-size: 0.85rem;
+  color: var(--arq-text-primary);
   margin-top: 4rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.arq-footer-links {
+  display: flex;
+  gap: 1.25rem;
+  align-items: center;
 }
 
 .arq-footer a {
   color: var(--arq-text-secondary);
   text-decoration: none;
   transition: all 0.2s;
+  display: inline-flex;
 }
 
 .arq-footer a:hover {
