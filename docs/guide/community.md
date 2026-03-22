@@ -322,6 +322,12 @@ Not all instances are equal. The permission system gates capabilities by model s
 
 The community adapters bridge the gap. A nerve contributed by a large instance includes size-class-specific `context.json` files with prompts optimized for smaller models — shorter, more structured, with more examples. The `meta.json` includes tuning configs calibrated per size class (smaller LoRA rank, fewer training examples required).
 
+### Tuning: Local vs Cloud
+
+**Local models (GGUF)** get the full tuning pipeline: LoRA adapter training, few-shot optimization, and prompt refinement — all automated during dream state.
+
+**Cloud providers (Anthropic, OpenAI, Gemini, etc.)** are tuned at the prompt level only — temperature, max_tokens, system prompts, and few-shot examples via `context.json`. LoRA training does not apply to cloud models. Cloud instances always map to the `large` size class and benefit from community-contributed prompts optimized for frontier models.
+
 ::: tip Related
 See [Dream State](/guide/dream-state) for when sync and contribution happen, and [Architecture Overview](/architecture/overview) for how the community fits into the nervous system.
 :::

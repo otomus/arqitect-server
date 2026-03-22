@@ -198,12 +198,41 @@ _nerve_embedding_cache = _LRUCache()
 def _get_nerve_embedding(name: str, description: str) -> list[float] | None:
     """Get or compute embedding for a nerve description. Returns None on failure.
 
-    Lookup order: in-memory LRU → compute fresh.
+    Lookup order: in-memory LRU → cold memory cache → compute fresh via ONNX.
     """
     cache_key = f"{name}:{description[:80]}"
     cached = _nerve_embedding_cache.get(cache_key)
     if cached is not None:
         return cached
+
+    # Try cold memory cache
+    try:
+        from arqitect.memory.cold import ColdMemory
+        cold = ColdMemory()
+        cold_emb = cold.get_nerve_embedding(name)
+        if cold_emb is not None:
+            _nerve_embedding_cache.put(cache_key, cold_emb)
+            return cold_emb
+    except Exception:
+        pass
+
+    # Compute fresh via ONNX embedder
+    try:
+        from arqitect.inference.embeddings import get_embedder
+        embed_fn = get_embedder()
+        if embed_fn is not None:
+            emb = embed_fn(description)
+            _nerve_embedding_cache.put(cache_key, emb)
+            # Persist to cold memory for future sessions
+            try:
+                cold.set_nerve_embedding(name, emb)
+            except Exception:
+                pass
+            return emb
+    except Exception:
+        pass
+
+    # Final fallback: try the LLM engine
     try:
         from arqitect.inference.engine import get_engine
         emb = get_engine().embed(description)
@@ -233,11 +262,21 @@ def match_nerves(task: str, nerve_catalog: dict, threshold: float = 1.0) -> list
 
     # Second pass: embedding similarity (graceful fallback to keyword-only)
     task_emb = None
+    cosine_similarity = None
     try:
-        from arqitect.inference.engine import get_engine, cosine_similarity
-        task_emb = get_engine().embed(task)
+        from arqitect.inference.embeddings import get_embedder
+        embed_fn = get_embedder()
+        if embed_fn is not None:
+            task_emb = embed_fn(task)
+            from arqitect.inference.engine import cosine_similarity
     except Exception:
-        pass  # Fall back to keyword-only
+        pass
+    if task_emb is None:
+        try:
+            from arqitect.inference.engine import get_engine, cosine_similarity
+            task_emb = get_engine().embed(task)
+        except Exception:
+            pass  # Fall back to keyword-only
 
     scored = []
     for name, kw_score in keyword_scored.items():
@@ -288,6 +327,72 @@ def best_match_nerve(task: str, nerve_catalog: dict, threshold: float = 1.0) -> 
     return ranked[0][0] if ranked else None
 
 
+
+
+def filter_nerve_catalog(task: str, nerve_catalog: dict[str, str],
+                         limit: int = 20) -> dict[str, str]:
+    """Pre-filter a nerve catalog to the top-N most relevant nerves for a task.
+
+    Uses embedding cosine similarity when available, falls back to keyword scoring.
+    Core senses are always included regardless of score.
+
+    Args:
+        task: The user's task string.
+        nerve_catalog: Full {name: description} catalog.
+        limit: Maximum number of nerves to return.
+
+    Returns:
+        Filtered {name: description} dict with at most ``limit`` entries.
+    """
+    if len(nerve_catalog) <= limit:
+        return nerve_catalog
+
+    # Always include core senses
+    result: dict[str, str] = {}
+    remaining: dict[str, str] = {}
+    for name, desc in nerve_catalog.items():
+        if name in CORE_SENSES:
+            result[name] = desc
+        else:
+            remaining[name] = desc
+
+    slots = limit - len(result)
+    if slots <= 0 or not remaining:
+        return result
+
+    # Try embedding-based ranking
+    task_emb = None
+    try:
+        from arqitect.inference.embeddings import get_embedder
+        embed_fn = get_embedder()
+        if embed_fn is not None:
+            task_emb = embed_fn(task)
+    except Exception:
+        pass
+
+    if task_emb is not None:
+        from arqitect.inference.engine import cosine_similarity
+        scored = []
+        for name, desc in remaining.items():
+            nerve_emb = _get_nerve_embedding(name, desc)
+            if nerve_emb is not None:
+                sim = cosine_similarity(task_emb, nerve_emb)
+                scored.append((name, sim))
+            else:
+                scored.append((name, 0.0))
+        scored.sort(key=lambda x: x[1], reverse=True)
+    else:
+        # Fallback to keyword scoring
+        scored = []
+        for name, desc in remaining.items():
+            s = match_score(task, name, desc)
+            scored.append((name, s))
+        scored.sort(key=lambda x: x[1], reverse=True)
+
+    for name, _ in scored[:slots]:
+        result[name] = nerve_catalog[name]
+
+    return result
 
 
 def find_duplicate_nerves(catalog: dict[str, str], threshold: float = 3.0) -> list[tuple[str, str, float]]:

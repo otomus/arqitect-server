@@ -6,6 +6,10 @@ All configuration lives in `arqitect.yaml` at the project root. The quickest way
 cp arqitect.yaml.example arqitect.yaml
 ```
 
+::: warning Auto-generated file
+`arqitect.yaml` is generated from a template by the setup wizard. It is recommended to use `make init` to change your configuration rather than editing the file by hand — manual edits may be overwritten or may conflict with template defaults.
+:::
+
 ## How Config Loading Works
 
 Configuration is resolved in three layers, merged with a deep-merge strategy:
@@ -38,7 +42,7 @@ The core decision: what powers the brain and each specialized role.
 
 ```yaml
 inference:
-  provider: gguf        # Default provider for all roles
+  provider: ''          # Required — set via make init (e.g. gguf, anthropic, openai)
 
   models:
     brain:
@@ -89,19 +93,15 @@ inference:
 
 ### Model Format
 
-Each model entry can be a simple string or a dict:
+Each model entry is a dict with a `file` (local filename) and an optional `source` (HuggingFace repo) for auto-download:
 
 ```yaml
-# String — just the filename
-brain: 'Qwen2.5-Coder-7B.gguf'
-
-# Dict — filename plus metadata for auto-download
 brain:
   file: 'Qwen2.5-Coder-7B.gguf'
   source: 'Qwen/Qwen2.5-Coder-7B-Instruct-GGUF'
 ```
 
-If a model file is missing, the `source` field is used to auto-download from HuggingFace.
+If the model file is missing locally, the `source` field is used to auto-download it from HuggingFace.
 
 ### Per-Role Providers
 
@@ -149,6 +149,8 @@ personality:
 ```
 
 Personality affects how the communication sense rewrites responses. The `preset` value loads a predefined set of traits. Use `custom` to define your own.
+
+These settings define the **initial shape** of the personality. As you interact with arqitect over time, it naturally evolves and refines its own personality through conversation — while always staying true to the baseline you configured here.
 
 ## Senses
 

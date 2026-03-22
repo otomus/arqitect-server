@@ -10,6 +10,7 @@ context-appropriate refusal message suitable for returning to the user.
 """
 
 import json
+import re
 
 from arqitect.inference.router import generate_for_role
 
@@ -74,14 +75,45 @@ _CATEGORY_LABELS = {
 
 _CLASSIFY_MAX_CHARS = 4000
 
+# Patterns that indicate programming code or markup content
+_CODE_PATTERNS = [
+    re.compile(r"<\w+[\s>]"),              # HTML tags
+    re.compile(r"```"),                     # Fenced code blocks
+    re.compile(r"\{[^}]*:\s*[^}]+\}"),     # CSS-like blocks
+    re.compile(r"\b(function|def|class|import|const|let|var)\s+\w+"),  # Code constructs
+    re.compile(r"=>"),                      # Arrow functions
+    re.compile(r"<script|<style|<div|<span", re.IGNORECASE),  # Common HTML tags
+]
+
+_CODE_CONTEXT_NOTE = (
+    "\n\nIMPORTANT: The content below contains programming code, HTML, CSS, or markup. "
+    "Code constructs (tags, functions, variables, selectors) are inherently safe. "
+    "Only flag this content if it contains genuinely unsafe natural-language instructions "
+    "or real exposed credentials — NOT because of code syntax."
+)
+
+
+def _contains_code_content(text: str) -> bool:
+    """Detect whether text contains programming code or markup.
+
+    Returns True when 2+ code signal patterns are found, indicating the
+    content is predominantly code rather than natural language.
+    """
+    hits = sum(1 for pattern in _CODE_PATTERNS if pattern.search(text))
+    return hits >= 2
+
 
 def _classify(text: str) -> dict:
     """Ask the LLM to classify content safety. Returns parsed JSON or safe default."""
     try:
+        system = _CLASSIFY_SYSTEM
+        if _contains_code_content(text):
+            system = _CLASSIFY_SYSTEM + _CODE_CONTEXT_NOTE
+
         raw = generate_for_role(
             "nerve",
             _CLASSIFY_PROMPT.format(text=text[:_CLASSIFY_MAX_CHARS]),
-            system=_CLASSIFY_SYSTEM,
+            system=system,
             max_tokens=50,
             temperature=0.0,
             json_mode=True,

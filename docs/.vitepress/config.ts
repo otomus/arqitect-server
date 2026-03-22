@@ -4,6 +4,9 @@ export default defineConfig({
   title: 'Arqitect',
   description: 'A self-evolving AI agent server — sense, act, grow.',
   base: '/arqitect-server/',
+  markdown: {
+    theme: { light: 'github-light', dark: 'github-light' },
+  },
   head: [
     ['link', { rel: 'preconnect', href: 'https://fonts.googleapis.com' }],
     ['link', { rel: 'preconnect', href: 'https://fonts.gstatic.com', crossorigin: '' }],
@@ -16,6 +19,7 @@ export default defineConfig({
       { text: 'Guide', link: '/guide/getting-started' },
       { text: 'Architecture', link: '/architecture/overview' },
       { text: 'Community', link: 'https://otomus.github.io/arqitect-community/' },
+      { text: 'Monitoring', link: '/monitoring' },
       { text: 'Dashboard', link: 'https://otomus.github.io/arqitect-dashboard/' },
     ],
     sidebar: {

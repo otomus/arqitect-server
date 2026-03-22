@@ -270,6 +270,13 @@ def _check_and_pull_models():
     )
     from arqitect.brain.adapters import get_max_context
 
+    # Preload ONNX embedding model for nerve matching
+    try:
+        from arqitect.inference.download import ensure_onnx_embedding_model
+        ensure_onnx_embedding_model()
+    except Exception as e:
+        print(f"[BRAIN] ONNX embedding model preload skipped: {e}")
+
     reported_providers: set[str] = set()
     for role in VALID_ROLES:
         try:

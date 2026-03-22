@@ -63,7 +63,7 @@
   --vp-nav-height: 64px;
   --vp-sidebar-width: 272px;
 
-  --vp-code-block-bg: var(--arq-bg-primary);
+  --vp-code-block-bg: #f6f8fa;
   --vp-code-tab-active-bar-color: var(--arq-cyan);
   --vp-code-copy-code-hover-bg: var(--arq-bg-card);
 

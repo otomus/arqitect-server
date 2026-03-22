@@ -741,7 +741,11 @@ def _think_inner(task: str, history: list[str] | None = None, depth: int = 0) ->
     if len(task) > _MAX_TASK_LENGTH:
         task = task[:_MAX_TASK_LENGTH] + "... [truncated]"
 
-    # Build context for LLM — full catalog, LLM decides routing
+    # Pre-filter catalog to top-20 most relevant nerves to avoid blowing up context
+    from arqitect.matching import filter_nerve_catalog
+    nerve_catalog = filter_nerve_catalog(task, nerve_catalog, limit=20)
+
+    # Build context for LLM — filtered catalog, LLM decides routing
     nerve_list = "\n".join(f"  - {n}: {d}" for n, d in nerve_catalog.items())
     if nerve_catalog:
         context = f"Available nerves:\n{nerve_list}\n\nTask: {task}"

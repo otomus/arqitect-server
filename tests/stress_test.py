@@ -478,6 +478,8 @@ def main():
     parser.add_argument("--only", type=str, default="", help="Comma-separated case IDs")
     parser.add_argument("--timeout", type=int, default=TIMEOUT_DEFAULT, help="Seconds to wait per message")
     parser.add_argument("--tag", type=str, default="", help="Run only cases with this tag")
+    parser.add_argument("--dream-wait", type=int, default=0,
+                        help="Seconds to wait after cases for dreamstate (0=skip, 300=5min)")
     args = parser.parse_args()
 
     # Load the appropriate case suite
@@ -569,6 +571,36 @@ def main():
                 stuck_steps = [s for s in r["steps"] if s["status"] == "STUCK"]
                 for s in stuck_steps:
                     print(f"  Case {r['id']} [{r['tag']}]: {s['msg'][:60]}")
+
+    # ── Dreamstate wait ──
+    if args.dream_wait > 0:
+        print(f"\n{'='*60}")
+        print(f"DREAMSTATE WAIT — pausing {args.dream_wait}s for brain to enter dreamstate")
+        print(f"(Brain idle threshold is 120s — dreamstate starts after that)")
+        print(f"{'='*60}")
+        # Subscribe to brain:thought to see dreamstate events
+        dream_ps = r_sub.pubsub()
+        dream_ps.subscribe("brain:thought")
+        dream_events = []
+        start_wait = time.time()
+        while time.time() - start_wait < args.dream_wait:
+            msg = dream_ps.get_message(timeout=5)
+            if msg and msg["type"] == "message":
+                try:
+                    data = json.loads(msg["data"])
+                    stage = data.get("stage", "")
+                    elapsed = int(time.time() - start_wait)
+                    print(f"  [DREAM {elapsed}s] stage={stage}: {data.get('message', '')[:100]}", flush=True)
+                    dream_events.append(data)
+                except Exception:
+                    pass
+            else:
+                elapsed = int(time.time() - start_wait)
+                if elapsed % 30 == 0:
+                    print(f"  [DREAM {elapsed}s] waiting...", flush=True)
+        dream_ps.unsubscribe()
+        dream_ps.close()
+        print(f"\n  Captured {len(dream_events)} dreamstate events")
 
     # Save full report
     report_path = os.path.join(os.path.dirname(__file__), "stress_report.json")

@@ -353,6 +353,33 @@ class ColdMemory:
             ).fetchone()
         return row["last_invoked_at"] if row and row["last_invoked_at"] else None
 
+    # ── Nerve Embeddings ──────────────────────────────────────────────────
+
+    def get_nerve_embedding(self, name: str) -> list[float] | None:
+        """Retrieve cached embedding vector for a nerve. Returns None if not cached."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT embedding FROM nerve_registry WHERE name=?", (name,)
+            ).fetchone()
+        if not row or not row["embedding"]:
+            return None
+        try:
+            emb = json.loads(row["embedding"])
+            if isinstance(emb, list) and len(emb) > 0:
+                return emb
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return None
+
+    def set_nerve_embedding(self, name: str, embedding: list[float]):
+        """Cache an embedding vector for a nerve in the registry."""
+        with self._lock:
+            self.conn.execute(
+                "UPDATE nerve_registry SET embedding=? WHERE name=?",
+                (json.dumps(embedding), name),
+            )
+            self.conn.commit()
+
     # ── Senses (Protected Nerves) ─────────────────────────────────────────
 
     def register_sense(self, name: str, description: str, system_prompt: str = "", examples_json: str = "[]"):

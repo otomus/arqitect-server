@@ -423,15 +423,47 @@ def _fetch_mcp_tools() -> dict:
         return {}
 
 
+def _sanitize_description_for_template(description: str) -> str:
+    """Make a description safe for insertion into triple-double-quoted strings.
+
+    Escapes sequences that would break the generated nerve.py syntax:
+    triple quotes, lone backslashes, and trailing backslashes.
+    """
+    description = description.replace("\\", "\\\\")
+    description = description.replace('"""', '\\"\\"\\"')
+    return description.rstrip("\\")
+
+
+def _validate_nerve_source(source: str, name: str) -> bool:
+    """Validate that generated nerve source compiles without syntax errors."""
+    try:
+        compile(source, f"{name}/nerve.py", "exec")
+        return True
+    except SyntaxError as e:
+        logger.warning("Generated nerve '%s' has syntax error: %s", name, e)
+        return False
+
+
 def _create_nerve_files(name: str, role: str, description: str) -> tuple[str, str]:
     """Create the nerve directory and write nerve.py from template. Returns (nerve_dir, nerve_path)."""
     nerve_dir = os.path.join(NERVES_DIR, name)
     os.makedirs(nerve_dir, exist_ok=True)
     nerve_path = os.path.join(nerve_dir, "nerve.py")
+
+    safe_desc = _sanitize_description_for_template(description)
+    content = (NERVE_TEMPLATE.replace("{{NERVE_NAME}}", name)
+                              .replace("{{NERVE_ROLE}}", role)
+                              .replace("{{DESCRIPTION}}", safe_desc))
+
+    if not _validate_nerve_source(content, name):
+        # Fall back to a safe description derived from the nerve name
+        fallback_desc = name.replace("_nerve", "").replace("_", " ")
+        content = (NERVE_TEMPLATE.replace("{{NERVE_NAME}}", name)
+                                  .replace("{{NERVE_ROLE}}", role)
+                                  .replace("{{DESCRIPTION}}", fallback_desc))
+
     with open(nerve_path, "w") as f:
-        f.write(NERVE_TEMPLATE.replace("{{NERVE_NAME}}", name)
-                               .replace("{{NERVE_ROLE}}", role)
-                               .replace("{{DESCRIPTION}}", description))
+        f.write(content)
     os.chmod(nerve_path, 0o755)
     return nerve_dir, nerve_path
 

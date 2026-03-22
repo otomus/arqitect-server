@@ -1619,87 +1619,347 @@ class Dreamstate:
         self._worker_thread.start()
 
     def _dream(self):
-        """The dream cycle — consolidate, reconcile, upgrade. Yields on any wake signal."""
+        """The dream cycle — consolidate, then per-nerve improvement loop.
+
+        Correct flow:
+        1. community_sync
+        2. consolidation
+        3. FOR EACH nerve invoked this session:
+           a. fanout (scoped to this nerve)
+           b. ensure full test bank (500 cases)
+           c. FOR iteration 1..7:
+              i.   tune (LoRA training)
+              ii.  check tool errors -> self-heal
+              iii. qualify (run test bank)
+              iv.  if score improved -> open/update PR
+              v.   if score >= 0.95 -> stop early
+        4. usage_report
+        5. personality
+        """
+        from arqitect.telemetry import span as _tspan
         logger.info("[DREAMSTATE] Brain is dreaming...")
-        # Clear pre-dream conversation so LLM context is clean
+        self._last_dream_ended_at = getattr(self, "_last_dream_ended_at", None)
         mem.hot.clear_conversation()
 
-        # Dream Phase 0: Community sync — pull new nerves/tools someone may have added
-        if not self._interrupted.is_set():
-            self._dream_community_sync()
+        phases = [
+            ("community_sync", self._dream_community_sync),
+            ("consolidation", lambda: consolidate_nerves(interrupted=self._interrupted)),
+            ("nerve_improvement", self._dream_nerve_improvement_loop),
+            ("usage_report", self._dream_usage_report),
+            ("personality", self._dream_personality),
+        ]
 
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after community sync")
-            return
+        with _tspan("dreamstate.cycle") as _ds:
+            completed = 0
+            for phase_name, phase_fn in phases:
+                if self._interrupted.is_set():
+                    logger.info("[DREAMSTATE] Woken up after %s", phase_name)
+                    _ds.set_attribute("dreamstate.interrupted_after", phase_name)
+                    break
+                with _tspan(f"dreamstate.{phase_name}") as _ps:
+                    try:
+                        phase_fn()
+                        _ps.set_attribute("dreamstate.phase", phase_name)
+                        _ps.set_attribute("dreamstate.completed", True)
+                        completed += 1
+                    except Exception as e:
+                        logger.warning("[DREAMSTATE] %s error: %s", phase_name, e)
+                        _ps.set_attribute("dreamstate.error", str(e))
 
-        # Dream Phase 1: Consolidation
-        if not self._interrupted.is_set():
-            try:
-                consolidate_nerves(interrupted=self._interrupted)
-            except Exception as e:
-                logger.warning("[DREAMSTATE] Consolidation error: %s", e)
+            _ds.set_attribute("dreamstate.phases_completed", completed)
+            _ds.set_attribute("dreamstate.total_phases", len(phases))
 
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after consolidation")
-            return
-
-        # Dream Phase 2: MCP Fanout — wire new external tools into nerves BEFORE evaluation
-        if not self._interrupted.is_set():
-            self._dream_mcp_fanout()
-
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after MCP fanout")
-            return
-
-        # Dream Phase 3: Reconciliation (nerves now have fresh tools)
-        if not self._interrupted.is_set():
-            self._dream_reconcile()
-
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after reconciliation")
-            return
-
-        # Dream Phase 4: Brain upgrade (capability provisioning)
-        if not self._interrupted.is_set():
-            self._dream_upgrade()
-
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after upgrade")
-            return
-
-        # Dream Phase 5: LoRA fine-tuning — train adapters for nerves with data
-        if not self._interrupted.is_set():
-            self._dream_finetune()
-
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after fine-tuning")
-            return
-
-        # Dream Phase 6: Contribute — push nerves/adapters back to community
-        if not self._interrupted.is_set():
-            self._dream_contribute()
-
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after contribution")
-            return
-
-        # Dream Phase 7: Usage report — write nerve/tool stats to community for visibility
-        if not self._interrupted.is_set():
-            self._dream_usage_report()
-
-        if self._interrupted.is_set():
-            logger.info("[DREAMSTATE] Woken up after usage report")
-            return
-
-        # Dream Phase 8: Personality observation + evolution
-        if not self._interrupted.is_set():
-            self._dream_personality()
-
-        # Final sync — ensure Redis reflects all nerve state changes from this dream cycle
         publish_nerve_status()
-        # Clear stale conversation context so wake starts fresh
         mem.hot.clear_conversation()
+        self._last_dream_ended_at = time.time()
         logger.info("[DREAMSTATE] Dream cycle complete — brain resting")
+
+    # ── Per-nerve improvement loop (THE CRITICAL FIX) ────────────────────
+
+    def _collect_session_nerves(self) -> list[str]:
+        """Query warm memory for nerves invoked since the last dream ended.
+
+        Falls back to all invoked nerves if no dream timestamp is recorded.
+        """
+        try:
+            all_nerves = mem.cold.list_nerves()
+            invoked = []
+            for name in all_nerves:
+                if name in CORE_SENSES or mem.cold.is_sense(name):
+                    continue
+                last = mem.cold.get_last_invoked_at(name)
+                if not last:
+                    continue
+                # If we have a dream-end timestamp, only include nerves invoked after it
+                if self._last_dream_ended_at:
+                    ts = _ts_key(last)
+                    if ts <= self._last_dream_ended_at:
+                        continue
+                invoked.append(name)
+            return invoked
+        except Exception as e:
+            logger.warning("[DREAMSTATE] Failed to collect session nerves: %s", e)
+            return []
+
+    def _dream_nerve_improvement_loop(self):
+        """For each nerve invoked this session: fanout, test bank, tune/qualify/contribute loop."""
+        session_nerves = self._collect_session_nerves()
+        if not session_nerves:
+            logger.info("[DREAMSTATE] No session nerves to improve")
+            # Fall back to standard reconciliation + upgrade + finetune + contribute
+            self._dream_mcp_fanout()
+            if not self._interrupted.is_set():
+                self._dream_reconcile()
+            if not self._interrupted.is_set():
+                self._dream_upgrade()
+            if not self._interrupted.is_set():
+                self._dream_finetune()
+            if not self._interrupted.is_set():
+                self._dream_contribute()
+            return
+
+        logger.info("[DREAMSTATE] Improving %d session nerve(s): %s",
+                    len(session_nerves), session_nerves)
+
+        for nerve_name in session_nerves:
+            if self._interrupted.is_set():
+                break
+
+            info = mem.cold.get_nerve_info(nerve_name)
+            if not info:
+                continue
+            description = info.get("description", nerve_name.replace("_", " "))
+            role = info.get("role", "tool")
+
+            mem.hot.clear_conversation()
+            logger.info("[DREAMSTATE] === Improving nerve '%s' ===", nerve_name)
+
+            # Step A: Fanout scoped to this nerve
+            if not self._interrupted.is_set():
+                self._fanout_single_nerve(nerve_name, description)
+
+            # Step B: Ensure full test bank
+            if not self._interrupted.is_set():
+                self._ensure_full_test_bank(nerve_name, description, role)
+
+            # Step C: 7-iteration tune/qualify/contribute loop
+            MAX_IMPROVE_ITERATIONS = 7
+            best_score = 0.0
+            qual = mem.cold.get_qualification("nerve", nerve_name)
+            if qual:
+                best_score = qual.get("score", 0.0)
+
+            for iteration in range(1, MAX_IMPROVE_ITERATIONS + 1):
+                if self._interrupted.is_set():
+                    break
+
+                logger.info("[DREAMSTATE] '%s' iteration %d/%d (score: %.0f%%)",
+                            nerve_name, iteration, MAX_IMPROVE_ITERATIONS, best_score * 100)
+
+                # i. Tune (LoRA training)
+                if not self._interrupted.is_set():
+                    try:
+                        from arqitect.inference.tuner import train_nerve_adapter
+                        train_nerve_adapter(nerve_name, role=role, interrupted=self._interrupted)
+                    except Exception as e:
+                        logger.warning("[DREAMSTATE] Tuning failed for '%s': %s", nerve_name, e)
+
+                # ii. Check tool errors & self-heal
+                if not self._interrupted.is_set():
+                    self._heal_nerve_tools(nerve_name)
+
+                # iii. Qualify (run test bank)
+                new_score = best_score
+                if not self._interrupted.is_set():
+                    try:
+                        from arqitect.critic.qualify_nerve import qualify_nerve
+                        qual_result = qualify_nerve(nerve_name, description, "", mem)
+                        new_score = qual_result.get("score", 0.0)
+                        logger.info("[DREAMSTATE] '%s' qualification: %.0f%%", nerve_name, new_score * 100)
+                    except Exception as e:
+                        logger.warning("[DREAMSTATE] Qualification failed for '%s': %s", nerve_name, e)
+
+                # iv. If score improved, open/update PR
+                if new_score > best_score and not self._interrupted.is_set():
+                    best_score = new_score
+                    self._contribute_nerve_progress(nerve_name)
+
+                # v. If score >= 0.95, stop early
+                if best_score >= HIGH_QUALITY_SCORE:
+                    logger.info("[DREAMSTATE] '%s' reached %.0f%% — stopping early",
+                                nerve_name, best_score * 100)
+                    break
+
+            logger.info("[DREAMSTATE] '%s' final score: %.0f%%", nerve_name, best_score * 100)
+
+        publish_nerve_status()
+
+    def _fanout_single_nerve(self, nerve_name: str, nerve_desc: str):
+        """Run MCP fanout scoped to a single nerve."""
+        try:
+            from arqitect.brain.catalog import list_mcp_tools_with_info
+            from arqitect.brain.helpers import llm_generate, extract_json
+            from arqitect.matching import match_tools
+
+            all_tools = list_mcp_tools_with_info()
+            if not all_tools:
+                return
+
+            existing_tools = set(mem.cold.get_nerve_tools(nerve_name))
+
+            # Sibling discovery
+            sibling_candidates = _discover_tool_siblings(
+                nerve_name, nerve_desc, existing_tools, all_tools, self._interrupted,
+            )
+            _fabricate_sibling_tools(
+                nerve_name, sibling_candidates, existing_tools, all_tools, self._interrupted,
+            )
+
+            # Keyword matching for additional tools
+            matches = match_tools(nerve_desc, all_tools, threshold=2.0)
+            for tool_name, score in matches[:5]:
+                if tool_name not in existing_tools:
+                    mem.cold.add_nerve_tool(nerve_name, tool_name)
+                    existing_tools.add(tool_name)
+                    logger.info("[FANOUT] Wired '%s' -> '%s' (score=%.1f)", tool_name, nerve_name, score)
+
+        except Exception as e:
+            logger.warning("[DREAMSTATE] Fanout failed for '%s': %s", nerve_name, e)
+
+    def _ensure_full_test_bank(self, nerve_name: str, description: str,
+                                role: str, target: int = 500):
+        """Generate test cases up to target count without a size gate.
+
+        Uses the brain model to generate and a cheaper model to review.
+        """
+        try:
+            from arqitect.critic.qualify_nerve import generate_test_cases
+
+            current_bank = mem.cold.get_test_bank(nerve_name)
+            if len(current_bank) >= target:
+                return
+
+            existing_inputs = {t.get("input", "") for t in current_bank}
+            rounds = 0
+            max_rounds = 50  # Safety limit
+
+            while len(current_bank) < target and rounds < max_rounds:
+                if self._interrupted.is_set():
+                    break
+                rounds += 1
+
+                new_tests = generate_test_cases(
+                    nerve_name, description, role=role,
+                    existing_inputs=existing_inputs,
+                )
+                if not new_tests:
+                    break
+
+                unique = [t for t in new_tests if t.get("input", "") not in existing_inputs]
+                if not unique:
+                    break
+
+                current_bank.extend(unique)
+                existing_inputs.update(t.get("input", "") for t in unique)
+                mem.cold.set_test_bank(nerve_name, current_bank)
+
+                if rounds % 5 == 0:
+                    logger.info("[DREAMSTATE] '%s' test bank: %d/%d",
+                                nerve_name, len(current_bank), target)
+
+            logger.info("[DREAMSTATE] '%s' test bank final: %d cases", nerve_name, len(current_bank))
+
+        except Exception as e:
+            logger.warning("[DREAMSTATE] Test bank expansion failed for '%s': %s", nerve_name, e)
+
+    def _heal_nerve_tools(self, nerve_name: str):
+        """Check tools wired to a nerve for errors and self-heal."""
+        try:
+            tools = mem.cold.get_nerve_tools(nerve_name)
+            for tool_name in tools:
+                if self._interrupted.is_set():
+                    break
+                try:
+                    rows = mem.cold.conn.execute(
+                        "SELECT total_calls, failures FROM tool_stats WHERE name=?",
+                        (tool_name,),
+                    ).fetchone()
+                    if not rows:
+                        continue
+                    total = rows["total_calls"]
+                    failures = rows["failures"]
+                    if total >= 3 and failures / total >= TOOL_FAILURE_RATE_THRESHOLD:
+                        logger.info("[NERVE-HEAL] Tool '%s' failing at %.0f%%, healing...",
+                                    tool_name, (failures / total) * 100)
+                        # Reuse the existing tool healing logic
+                        self._heal_single_tool(tool_name)
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning("[DREAMSTATE] Nerve tool healing failed for '%s': %s", nerve_name, e)
+
+    def _heal_single_tool(self, tool_name: str):
+        """Heal a single MCP tool with high failure rate."""
+        from arqitect.brain.helpers import llm_generate, strip_markdown_fences
+        from arqitect.brain.config import CODE_MODEL
+        from arqitect.config.loader import get_mcp_tools_dir
+        mcp_dir = get_mcp_tools_dir()
+
+        tool_path = os.path.join(mcp_dir, f"{tool_name}.py")
+        if not os.path.isfile(tool_path):
+            return
+        try:
+            with open(tool_path) as f:
+                tool_code = f.read()
+        except OSError:
+            return
+
+        fix_prompt = (
+            f"This MCP tool '{tool_name}' has a high failure rate.\n\n"
+            f"Current code:\n```python\n{tool_code}\n```\n\n"
+            "Fix the tool. Add proper error handling. Keep the same function signature.\n"
+            "Output ONLY the complete fixed Python code, no explanation."
+        )
+        try:
+            fixed_code = strip_markdown_fences(
+                llm_generate(CODE_MODEL, fix_prompt,
+                             system="You fix Python tools. Output ONLY valid Python code.")
+            ).strip()
+            if not fixed_code or len(fixed_code) < MIN_TOOL_CODE_LENGTH:
+                return
+            compile(fixed_code, f"{tool_name}.py", "exec")
+            bak_path = f"{tool_path}.bak"
+            shutil.copy2(tool_path, bak_path)
+            with open(tool_path, "w") as f:
+                f.write(fixed_code)
+            logger.info("[NERVE-HEAL] Fixed tool '%s'", tool_name)
+        except SyntaxError:
+            logger.warning("[NERVE-HEAL] Fix for '%s' had syntax errors", tool_name)
+        except Exception as e:
+            logger.warning("[NERVE-HEAL] Failed to fix '%s': %s", tool_name, e)
+
+    def _contribute_nerve_progress(self, nerve_name: str):
+        """Open or update a PR to arqitect-community for a nerve (no adapter.gguf gate)."""
+        community_dir = self._find_community_dir()
+        if not community_dir:
+            return
+
+        try:
+            bundle = self._build_nerve_bundle(nerve_name)
+            if not bundle:
+                return
+
+            if not self._community_has_nerve(community_dir, nerve_name):
+                self._contribute_nerve_bundle(community_dir, nerve_name, bundle)
+            else:
+                from arqitect.brain.adapters import get_active_variant
+                role = bundle.get("role", "tool")
+                size_class = get_active_variant(role)
+                self._contribute_nerve_model_adapter(community_dir, nerve_name, size_class)
+
+            logger.info("[CONTRIBUTE] Contributed progress for '%s'", nerve_name)
+        except Exception as e:
+            logger.warning("[CONTRIBUTE] Failed to contribute '%s': %s", nerve_name, e)
 
     def _dream_community_sync(self):
         """Pull latest community manifest, seed new nerves/tools, and build tool environments.
@@ -2881,12 +3141,6 @@ class Dreamstate:
 
             role = data.get("role", "tool")
             size_class = get_active_variant(role)
-
-            # Don't contribute until LoRA adapter is trained
-            local_adapter = os.path.join(NERVES_DIR, name, "adapter", "adapter.gguf")
-            if not os.path.isfile(local_adapter):
-                logger.info("[CONTRIBUTE] Skipping '%s' — no adapter.gguf yet", name)
-                continue
 
             if not self._community_has_nerve(community_dir, name):
                 # Case 1: New nerve — push full bundle

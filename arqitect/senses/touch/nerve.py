@@ -383,6 +383,23 @@ def calibrate() -> dict:
     return result
 
 
+def _looks_like_json(text: str) -> bool:
+    """Return True if text appears to be a JSON object or array."""
+    stripped = text.strip()
+    return stripped.startswith("{") or stripped.startswith("[")
+
+
+def _try_parse_json(text: str) -> dict | None:
+    """Attempt to parse text as JSON. Returns parsed dict or None."""
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            return parsed
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return None
+
+
 def _parse_natural_language(raw: str) -> dict:
     """Parse natural language input into a structured command.
 
@@ -394,6 +411,13 @@ def _parse_natural_language(raw: str) -> dict:
       'create /some/dir'
     """
     raw = raw.strip()
+
+    # Guard: if input looks like JSON, parse it directly instead of
+    # treating slashes in JSON values as file paths
+    if _looks_like_json(raw):
+        parsed = _try_parse_json(raw)
+        if parsed is not None:
+            return parsed
 
     # Try to detect command from first word
     parts = raw.split(None, 1)

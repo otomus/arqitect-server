@@ -91,6 +91,7 @@ How will users talk to arqitect? The dashboard is always included.
 
 - **Telegram** — provide your bot token from @BotFather
 - **WhatsApp** — enable and configure
+- **Web SDK** — embed arqitect into your own website or app via the WebSocket bridge. Connect to `ws://your-host:3000` (or `wss://` with SSL), authenticate with a JWT, and exchange messages using the [bridge protocol](/guide/bridge). Supports text, voice, image, and real-time streaming of brain activity
 
 ### Step 7: Touch
 
@@ -126,7 +127,7 @@ Configure where data lives.
 
 - Your name and email
 - JWT secret — auto-generated, cryptographically secure
-- Optional SMTP configuration for email notifications
+- Optional SMTP configuration for email notifications — highly recommended when using the Web SDK, since only users with verified identity can request fabricated nerves on demand (prevents anonymous users from overloading the system)
 
 ## What Happens Next
 
@@ -180,3 +181,7 @@ make start
 ## Configuration File
 
 The wizard generates `arqitect.yaml` in your project root. You can edit it at any time — changes take effect on restart. See [Configuration](/guide/configuration) for the full reference.
+
+::: tip Reconfigure at any time
+You can re-run `make init` whenever you want to change your configuration. The wizard will walk you through the same steps and regenerate `arqitect.yaml` with your new choices.
+:::

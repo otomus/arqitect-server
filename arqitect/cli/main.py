@@ -307,6 +307,12 @@ def cmd_status(args):
         print(f"  {name.capitalize()}: {status}")
 
 
+def cmd_traces(args):
+    """Open the trace viewer UI in the browser."""
+    from arqitect.cli.traces import serve
+    serve(port=args.port)
+
+
 def cmd_qualify(args):
     """Run brain/nerve qualification."""
     _ensure_venv()
@@ -530,6 +536,8 @@ def main():
     sub.add_parser("stop", help="Stop all services")
     sub.add_parser("status", help="Show service status")
     sub.add_parser("qualify", help="Run qualification")
+    traces_parser = sub.add_parser("traces", help="Open trace viewer UI")
+    traces_parser.add_argument("--port", type=int, default=7681, help="Port (default: 7681)")
 
     # Adapters
     adapters_parser = sub.add_parser("adapters", help="Manage LoRA adapters")
@@ -557,6 +565,7 @@ def main():
         "stop": cmd_stop,
         "status": cmd_status,
         "qualify": cmd_qualify,
+        "traces": cmd_traces,
         "adapters": cmd_adapters,
         "nerve": cmd_nerve,
         "contribute": cmd_contribute,

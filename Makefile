@@ -3,7 +3,7 @@ PYTHON := $(VENV)/bin/python3
 PID_DIR := .pids
 LOG := brain.log
 
-.PHONY: init start stop restart status logs seed-deps setup
+.PHONY: init start stop restart status logs traces seed-deps setup
 
 init:
 	@$(PYTHON) -m arqitect.cli.main init
@@ -19,10 +19,13 @@ start: seed-deps $(PID_DIR)
 	@$(PYTHON) -m arqitect.mcp.server >> $(LOG) 2>&1 & echo $$! > $(PID_DIR)/mcp.pid
 	@echo "Starting bridge..."
 	@$(PYTHON) -m arqitect.bridge.server >> $(LOG) 2>&1 & echo $$! > $(PID_DIR)/bridge.pid
+	@echo "Starting trace viewer..."
+	@$(PYTHON) -m arqitect.cli.traces >> $(LOG) 2>&1 & echo $$! > $(PID_DIR)/traces.pid
 	@echo "All services started. PIDs in $(PID_DIR)/"
+	@echo "Trace viewer: http://localhost:7681"
 
 stop:
-	@for svc in brain mcp bridge; do \
+	@for svc in brain mcp bridge traces; do \
 		if [ -f $(PID_DIR)/$$svc.pid ]; then \
 			pid=$$(cat $(PID_DIR)/$$svc.pid); \
 			if kill -0 $$pid 2>/dev/null; then \
@@ -37,13 +40,14 @@ stop:
 	@pkill -f 'arqitect\.brain\.brain' 2>/dev/null && echo "Killed stray brain process(es)" || true
 	@pkill -f 'arqitect\.mcp\.server' 2>/dev/null && echo "Killed stray mcp process(es)" || true
 	@pkill -f 'arqitect\.bridge\.server' 2>/dev/null && echo "Killed stray bridge process(es)" || true
+	@pkill -f 'arqitect\.cli\.traces' 2>/dev/null && echo "Killed stray traces process(es)" || true
 
 restart: stop
 	@sleep 2
 	@$(MAKE) start
 
 status:
-	@for svc in brain mcp bridge; do \
+	@for svc in brain mcp bridge traces; do \
 		if [ -f $(PID_DIR)/$$svc.pid ]; then \
 			pid=$$(cat $(PID_DIR)/$$svc.pid); \
 			if kill -0 $$pid 2>/dev/null; then \
@@ -58,6 +62,9 @@ status:
 
 logs:
 	@tail -f $(LOG)
+
+traces:
+	@$(PYTHON) -m arqitect.cli.traces
 
 setup:
 	@echo "=== Arqitect Server Setup ==="
