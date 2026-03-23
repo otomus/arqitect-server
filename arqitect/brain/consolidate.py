@@ -466,6 +466,114 @@ def _fabricate_sibling_tools(nerve_name: str, candidates: list[dict],
     return fabricated
 
 
+def _system_prompt_to_plain_text(system_prompt: str, tool_names: list[str] | None = None) -> str:
+    """Convert a JSON-structured system_prompt to community-format plain text.
+
+    If already plain text, returns as-is. JSON prompts with goal/output/boundary
+    keys are flattened into readable paragraphs.
+
+    Args:
+        system_prompt: Raw system prompt (JSON object string or plain text).
+        tool_names: Optional list of tool names to include in the prompt.
+
+    Returns:
+        Plain-text system prompt suitable for community contribution.
+    """
+    try:
+        prompt_obj = json.loads(system_prompt)
+        if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
+            parts = [prompt_obj["goal"]]
+            if prompt_obj.get("output"):
+                parts.append(f"Output: {prompt_obj['output']}")
+            if prompt_obj.get("boundary"):
+                parts.append(f"Boundary: {prompt_obj['boundary']}")
+            if tool_names:
+                parts.append(f"Available tools: {', '.join(tool_names)}.")
+            return "\n\n".join(parts)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return system_prompt
+
+
+def _resolve_tool_source(mcp_tools_dir: str, tool_name: str, lang: str) -> str | None:
+    """Find the source file for a tool, checking both directory and flat layouts.
+
+    Args:
+        mcp_tools_dir: Path to the mcp_tools/ directory.
+        tool_name: Name of the tool to find.
+        lang: Language key (e.g. 'python', 'javascript', 'typescript').
+
+    Returns:
+        Absolute path to the tool source file, or None if not found.
+    """
+    ext = {
+        "python": ".py",
+        "javascript": ".js",
+        "typescript": ".ts",
+    }.get(lang, ".py")
+
+    # Directory layout: tool_name/run.py
+    dir_path = os.path.join(mcp_tools_dir, tool_name, f"run{ext}")
+    if os.path.isfile(dir_path):
+        return dir_path
+
+    # Flat layout: tool_name.py
+    flat_path = os.path.join(mcp_tools_dir, f"{tool_name}{ext}")
+    if os.path.isfile(flat_path):
+        return flat_path
+
+    return None
+
+
+def _adapt_prompt_for_size(system_prompt: str, size_class: str,
+                           tool_names: list[str] | None = None) -> str:
+    """Adapt a system prompt to a model's capacity.
+
+    Converts JSON-object prompts to plain text first, then trims based on
+    model size. All size classes produce plain text output.
+
+    Args:
+        system_prompt: Raw system prompt (JSON or plain text).
+        size_class: One of 'large', 'medium', 'small', 'tinylm'.
+        tool_names: Optional tool names for context lines.
+
+    Returns:
+        Plain-text prompt adapted for the target size class.
+    """
+    plain = _system_prompt_to_plain_text(system_prompt, tool_names)
+    context_block = "CONTEXT: Use userDetails, location, timezone, messages from context when available."
+
+    if size_class == "large":
+        return f"{plain}\n\nHandle edge cases and provide detailed responses.\n\n{context_block}"
+
+    if size_class == "medium":
+        return f"{plain}\n\nReturn tool calls as JSON when appropriate.\n\n{context_block}"
+
+    # Extract goal for smaller models
+    goal = plain
+    try:
+        prompt_obj = json.loads(system_prompt)
+        if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
+            goal = prompt_obj["goal"]
+    except (json.JSONDecodeError, TypeError):
+        # For plain text, use first line as goal
+        lines = plain.strip().splitlines()
+        if lines:
+            goal = lines[0]
+
+    if size_class == "small":
+        tools_sentence = ""
+        if tool_names:
+            tools_sentence = f" Use tools: {', '.join(tool_names)}."
+        return f"{goal}{tools_sentence}\n\n{context_block}"
+
+    # tinylm: minimal prompt
+    tools_csv = ""
+    if tool_names:
+        tools_csv = f"\nTools: {','.join(tool_names)}"
+    return f"{goal}{tools_csv}\nRespond with JSON tool calls."
+
+
 def _contribute_pr(community_dir: str, add_path: str, commit_msg: str,
                    pr_title: str, pr_body: str, branch_prefix: str,
                    search_key: str) -> str | None:
@@ -516,18 +624,27 @@ def _contribute_pr(community_dir: str, add_path: str, commit_msg: str,
             _run(["git", "pull", "origin", "main"])
             _run(["git", "checkout", "-b", branch_name])
             _run(["git", "add", add_path])
-            _run(["git", "commit", "-m", commit_msg])
+            commit_result = _run(["git", "commit", "-m", commit_msg])
+            if commit_result.returncode != 0:
+                logger.warning("[CONTRIBUTE] Commit failed: %s", commit_result.stderr[:200])
+                _run(["git", "checkout", "main"])
+                return None
             _run(["git", "pull", "--rebase", "origin", "main"])
-            _run(["git", "push", "-u", "origin", branch_name], timeout=60)
-            pr_result = _run(["gh", "pr", "create", "--fill", "--auto",
+            push_result = _run(["git", "push", "-u", "origin", branch_name], timeout=60)
+            if push_result.returncode != 0:
+                logger.warning("[CONTRIBUTE] Push failed: %s", push_result.stderr[:200])
+                _run(["git", "checkout", "main"])
+                return None
+            pr_result = _run(["gh", "pr", "create",
                               "--title", pr_title, "--body", pr_body], timeout=60)
             _run(["git", "checkout", "main"])
-            if pr_result.returncode == 0:
-                url = pr_result.stdout.strip()
+            url = pr_result.stdout.strip()
+            if pr_result.returncode == 0 or url.startswith("http"):
                 logger.info("[CONTRIBUTE] PR created: %s", url)
                 return url
             else:
-                logger.warning("[CONTRIBUTE] PR creation failed: %s", pr_result.stderr[:200])
+                logger.warning("[CONTRIBUTE] PR creation failed: %s",
+                               (pr_result.stderr or pr_result.stdout)[:200])
                 return None
 
     except subprocess.TimeoutExpired:
@@ -1574,20 +1691,24 @@ class Dreamstate:
         self._schedule()
 
     def wake(self):
-        """Brain wakes up — stop ALL dreamstate activity immediately.
+        """Signal brain to wake up after current nerve improvement finishes.
 
-        Blocks until the dreamstate worker has fully stopped and released
-        all LLM locks, so think() can safely use the models.
-        Clears conversation buffer so the new session starts fresh.
+        Sets the interrupted flag so dreamstate will stop after completing
+        the current nerve's improvement cycle (non-interruptible per-nerve).
+        Waits briefly (30s) for dreamstate to reach a safe yield point.
+        If dreamstate is in a non-interruptible phase (sync, consolidation,
+        or nerve improvement), the brain proceeds to handle the task anyway —
+        dreamstate will finish in the background and check the flag at the
+        next interruptible point.
         """
         self._last_activity = time.time()
         self._interrupted.set()
         worker = self._worker_thread
         if worker and worker.is_alive():
-            logger.info("[DREAMSTATE] Waking up — waiting for dreamstate to yield...")
-            worker.join(timeout=60)
+            logger.info("[DREAMSTATE] Waking up — signaling dreamstate to yield...")
+            worker.join(timeout=30)
             if worker.is_alive():
-                logger.warning("[DREAMSTATE] Dreamstate did not yield in 60s — proceeding anyway")
+                logger.info("[DREAMSTATE] Dreamstate still running (non-interruptible phase) — proceeding with task")
             else:
                 logger.info("[DREAMSTATE] Dreamstate yielded — brain is awake")
             # Clear stale pre-dream conversation so wake session starts fresh
@@ -1603,13 +1724,20 @@ class Dreamstate:
             self._timer = threading.Timer(IDLE_THRESHOLD, self._enter_dreamstate)
             self._timer.daemon = True
             self._timer.start()
+            logger.debug("[DREAMSTATE] Scheduled timer for %ds", IDLE_THRESHOLD)
 
     def _enter_dreamstate(self):
         """Enter dreamstate if brain has been idle long enough."""
         elapsed = time.time() - self._last_activity
-        if elapsed < IDLE_THRESHOLD:
+        logger.info("[DREAMSTATE] Timer fired — idle %.1fs (threshold %ds)", elapsed, IDLE_THRESHOLD)
+        if elapsed < IDLE_THRESHOLD - 5:
+            # Large tolerance (5s) to avoid race with timer scheduling jitter.
+            # If the timer fired, we're close enough — reschedule for safety.
+            logger.info("[DREAMSTATE] Not idle long enough (%.1fs), rescheduling", elapsed)
+            self._schedule()
             return
         if self._worker_thread and self._worker_thread.is_alive():
+            logger.info("[DREAMSTATE] Worker thread still alive, skipping")
             return
 
         self._interrupted.clear()
@@ -1636,10 +1764,25 @@ class Dreamstate:
         4. usage_report
         5. personality
         """
+        try:
+            self._dream_inner()
+        except Exception as e:
+            logger.error("[DREAMSTATE] FATAL dream error: %s", e, exc_info=True)
+
+    def _dream_inner(self):
+        """Inner dream implementation — separated for top-level error catching."""
         from arqitect.telemetry import span as _tspan
         logger.info("[DREAMSTATE] Brain is dreaming...")
         self._last_dream_ended_at = getattr(self, "_last_dream_ended_at", None)
         mem.hot.clear_conversation()
+
+        # Setup phases (sync + consolidation) and nerve_improvement are
+        # non-interruptible — they always run to completion once dreamstate
+        # enters. Without this, a task arriving during community_sync would
+        # set _interrupted, causing the loop to break before consolidation
+        # even starts, and nerve_improvement would never be reached.
+        # Only usage_report and personality are skippable.
+        _NON_INTERRUPTIBLE = {"community_sync", "consolidation", "nerve_improvement"}
 
         phases = [
             ("community_sync", self._dream_community_sync),
@@ -1652,9 +1795,9 @@ class Dreamstate:
         with _tspan("dreamstate.cycle") as _ds:
             completed = 0
             for phase_name, phase_fn in phases:
-                if self._interrupted.is_set():
-                    logger.info("[DREAMSTATE] Woken up after %s", phase_name)
-                    _ds.set_attribute("dreamstate.interrupted_after", phase_name)
+                if self._interrupted.is_set() and phase_name not in _NON_INTERRUPTIBLE:
+                    logger.info("[DREAMSTATE] Woken up — skipping %s (and remaining phases)", phase_name)
+                    _ds.set_attribute("dreamstate.interrupted_before", phase_name)
                     break
                 with _tspan(f"dreamstate.{phase_name}") as _ps:
                     try:
@@ -1702,7 +1845,14 @@ class Dreamstate:
             return []
 
     def _dream_nerve_improvement_loop(self):
-        """For each nerve invoked this session: fanout, test bank, tune/qualify/contribute loop."""
+        """For each nerve invoked this session: fanout, test bank, tune/qualify/contribute loop.
+
+        This phase is non-interruptible per-nerve: once we start improving a nerve,
+        we finish all 7 iterations before moving to the next nerve. We only check
+        _interrupted between nerves, not within a single nerve's cycle.
+        Without this, rapid task arrival (e.g. stress tests) starves the loop
+        and zero PRs ever get created.
+        """
         session_nerves = self._collect_session_nerves()
         if not session_nerves:
             logger.info("[DREAMSTATE] No session nerves to improve")
@@ -1722,8 +1872,6 @@ class Dreamstate:
                     len(session_nerves), session_nerves)
 
         for nerve_name in session_nerves:
-            if self._interrupted.is_set():
-                break
 
             info = mem.cold.get_nerve_info(nerve_name)
             if not info:
@@ -1735,12 +1883,10 @@ class Dreamstate:
             logger.info("[DREAMSTATE] === Improving nerve '%s' ===", nerve_name)
 
             # Step A: Fanout scoped to this nerve
-            if not self._interrupted.is_set():
-                self._fanout_single_nerve(nerve_name, description)
+            self._fanout_single_nerve(nerve_name, description)
 
             # Step B: Ensure full test bank
-            if not self._interrupted.is_set():
-                self._ensure_full_test_bank(nerve_name, description, role)
+            self._ensure_full_test_bank(nerve_name, description, role)
 
             # Step C: 7-iteration tune/qualify/contribute loop
             MAX_IMPROVE_ITERATIONS = 7
@@ -1750,37 +1896,38 @@ class Dreamstate:
                 best_score = qual.get("score", 0.0)
 
             for iteration in range(1, MAX_IMPROVE_ITERATIONS + 1):
-                if self._interrupted.is_set():
-                    break
-
                 logger.info("[DREAMSTATE] '%s' iteration %d/%d (score: %.0f%%)",
                             nerve_name, iteration, MAX_IMPROVE_ITERATIONS, best_score * 100)
 
                 # i. Tune (LoRA training)
-                if not self._interrupted.is_set():
-                    try:
-                        from arqitect.inference.tuner import train_nerve_adapter
-                        train_nerve_adapter(nerve_name, role=role, interrupted=self._interrupted)
-                    except Exception as e:
-                        logger.warning("[DREAMSTATE] Tuning failed for '%s': %s", nerve_name, e)
+                tuned = False
+                try:
+                    from arqitect.inference.tuner import train_nerve_adapter
+                    tuned = train_nerve_adapter(nerve_name, role=role)
+                except Exception as e:
+                    logger.warning("[DREAMSTATE] Tuning failed for '%s': %s", nerve_name, e)
 
                 # ii. Check tool errors & self-heal
-                if not self._interrupted.is_set():
-                    self._heal_nerve_tools(nerve_name)
+                healed = self._heal_nerve_tools(nerve_name)
+
+                # Skip qualification if nothing changed this iteration
+                if not tuned and not healed and iteration > 1:
+                    logger.info("[DREAMSTATE] '%s' iteration %d: no tuning or healing — skipping re-qualification",
+                                nerve_name, iteration)
+                    continue
 
                 # iii. Qualify (run test bank)
                 new_score = best_score
-                if not self._interrupted.is_set():
-                    try:
-                        from arqitect.critic.qualify_nerve import qualify_nerve
-                        qual_result = qualify_nerve(nerve_name, description, "", mem)
-                        new_score = qual_result.get("score", 0.0)
-                        logger.info("[DREAMSTATE] '%s' qualification: %.0f%%", nerve_name, new_score * 100)
-                    except Exception as e:
-                        logger.warning("[DREAMSTATE] Qualification failed for '%s': %s", nerve_name, e)
+                try:
+                    from arqitect.critic.qualify_nerve import qualify_nerve
+                    qual_result = qualify_nerve(nerve_name, description, "", mem)
+                    new_score = qual_result.get("score", 0.0)
+                    logger.info("[DREAMSTATE] '%s' qualification: %.0f%%", nerve_name, new_score * 100)
+                except Exception as e:
+                    logger.warning("[DREAMSTATE] Qualification failed for '%s': %s", nerve_name, e)
 
                 # iv. If score improved, open/update PR
-                if new_score > best_score and not self._interrupted.is_set():
+                if new_score > best_score:
                     best_score = new_score
                     self._contribute_nerve_progress(nerve_name)
 
@@ -1791,6 +1938,11 @@ class Dreamstate:
                     break
 
             logger.info("[DREAMSTATE] '%s' final score: %.0f%%", nerve_name, best_score * 100)
+
+            # Final contribute: retry PR if bundle was written but PR creation
+            # failed earlier (e.g. due to uncommitted files in community repo).
+            if best_score > baseline_score:
+                self._contribute_nerve_progress(nerve_name)
 
         publish_nerve_status()
 
@@ -1827,7 +1979,7 @@ class Dreamstate:
             logger.warning("[DREAMSTATE] Fanout failed for '%s': %s", nerve_name, e)
 
     def _ensure_full_test_bank(self, nerve_name: str, description: str,
-                                role: str, target: int = 500):
+                                role: str, target: int = 100):
         """Generate test cases up to target count without a size gate.
 
         Uses the brain model to generate and a cheaper model to review.
@@ -1843,6 +1995,9 @@ class Dreamstate:
             rounds = 0
             max_rounds = 50  # Safety limit
 
+            consecutive_failures = 0
+            MAX_CONSECUTIVE_FAILURES = 3
+
             while len(current_bank) < target and rounds < max_rounds:
                 if self._interrupted.is_set():
                     break
@@ -1853,11 +2008,21 @@ class Dreamstate:
                     existing_inputs=existing_inputs,
                 )
                 if not new_tests:
-                    break
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.info("[DREAMSTATE] '%s' test bank: %d consecutive parse failures, stopping",
+                                    nerve_name, MAX_CONSECUTIVE_FAILURES)
+                        break
+                    continue
 
                 unique = [t for t in new_tests if t.get("input", "") not in existing_inputs]
                 if not unique:
-                    break
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        break
+                    continue
+
+                consecutive_failures = 0
 
                 current_bank.extend(unique)
                 existing_inputs.update(t.get("input", "") for t in unique)
@@ -1872,8 +2037,12 @@ class Dreamstate:
         except Exception as e:
             logger.warning("[DREAMSTATE] Test bank expansion failed for '%s': %s", nerve_name, e)
 
-    def _heal_nerve_tools(self, nerve_name: str):
-        """Check tools wired to a nerve for errors and self-heal."""
+    def _heal_nerve_tools(self, nerve_name: str) -> bool:
+        """Check tools wired to a nerve for errors and self-heal.
+
+        Returns True if any tool was healed, False otherwise.
+        """
+        healed_any = False
         try:
             tools = mem.cold.get_nerve_tools(nerve_name)
             for tool_name in tools:
@@ -1891,12 +2060,13 @@ class Dreamstate:
                     if total >= 3 and failures / total >= TOOL_FAILURE_RATE_THRESHOLD:
                         logger.info("[NERVE-HEAL] Tool '%s' failing at %.0f%%, healing...",
                                     tool_name, (failures / total) * 100)
-                        # Reuse the existing tool healing logic
                         self._heal_single_tool(tool_name)
+                        healed_any = True
                 except Exception:
                     continue
         except Exception as e:
             logger.warning("[DREAMSTATE] Nerve tool healing failed for '%s': %s", nerve_name, e)
+        return healed_any
 
     def _heal_single_tool(self, tool_name: str):
         """Heal a single MCP tool with high failure rate."""
@@ -1984,11 +2154,18 @@ class Dreamstate:
             # Build tool environments for any tools that need it
             self._dream_build_tool_envs()
 
-            # Smart hydration — only fetch bundles for nerves that need work
+            # Smart hydration — only fetch bundles for nerves that need work.
+            # Cap at 20 to avoid long HTTP download sessions that destabilize
+            # the process. Overlap candidates are lower priority than invoked nerves.
+            MAX_HYDRATION = 20
             candidates = _select_hydration_candidates()
             if not candidates:
                 logger.info("[DREAMSTATE] No nerves need hydration")
                 return
+
+            if len(candidates) > MAX_HYDRATION:
+                logger.info("[DREAMSTATE] %d candidates, capping at %d", len(candidates), MAX_HYDRATION)
+                candidates = candidates[:MAX_HYDRATION]
 
             logger.info("[DREAMSTATE] Hydrating %d nerve(s) (smart filter)", len(candidates))
             for nerve_name, reason in candidates:
@@ -2782,13 +2959,13 @@ class Dreamstate:
             logger.warning("[CONTRIBUTE] Failed to contribute %s/%s: %s", role, variant, e)
 
     def _find_community_dir(self) -> str | None:
-        """Locate the local clone of sentient-community."""
+        """Locate the local clone of arqitect-community."""
         from arqitect.brain.community import _cache_dir
         for candidate in [
-            os.path.join(os.path.dirname(_cache_dir()), "sentient-community"),
+            os.path.join(os.path.dirname(_cache_dir()), "arqitect-community"),
             os.path.join(
                 os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                "..", "sentient-community",
+                "..", "arqitect-community",
             ),
         ]:
             if os.path.isdir(os.path.join(candidate, ".git")):
@@ -2820,7 +2997,12 @@ class Dreamstate:
             return False
 
     def _build_nerve_bundle(self, name: str) -> dict | None:
-        """Build a bundle.json from local nerve data for contribution."""
+        """Build a bundle.json from local nerve data for contribution.
+
+        Ensures description is meaningful (not just the nerve name), generates
+        tags from the resolved description, and falls back to local context.json
+        for examples when cold memory is empty.
+        """
         from arqitect.brain.adapters import get_active_variant
         nerve_meta = mem.cold.get_nerve_metadata(name)
         if not nerve_meta:
@@ -2829,6 +3011,16 @@ class Dreamstate:
         description = nerve_meta.get("description", "")
         role = nerve_meta.get("role", "tool")
         system_prompt = nerve_meta.get("system_prompt", "")
+
+        # Description fallback: if it's just the nerve name, extract goal from system_prompt
+        if not description or description == name or " " not in description:
+            try:
+                prompt_obj = json.loads(system_prompt)
+                if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
+                    description = prompt_obj["goal"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         examples = nerve_meta.get("examples", [])
         if isinstance(examples, str):
             try:
@@ -2836,14 +3028,35 @@ class Dreamstate:
             except (json.JSONDecodeError, TypeError):
                 examples = []
 
+        # Examples fallback: read from local adapter context.json
+        if not examples:
+            try:
+                from arqitect.brain.adapters import resolve_nerve_prompt
+                ctx = resolve_nerve_prompt(name, role)
+                if ctx and ctx.get("few_shot_examples"):
+                    examples = ctx["few_shot_examples"]
+            except (ImportError, ValueError):
+                pass
+
         tool_entries = self._collect_tool_entries(name)
+
+        # Build semantic tags from role + name stem + platform targets
+        name_stem = name.replace("_nerve", "").replace("_", "-")
+        tags = [role, name_stem, "desktop", "server"]
+        # Add description-derived tags (split on spaces, keep short words)
+        for word in description.lower().split():
+            tag = word.strip(".,;:!?()[]{}\"'")
+            if 3 <= len(tag) <= 20 and tag not in tags and tag.isalpha():
+                tags.append(tag)
+                if len(tags) >= 10:
+                    break
 
         bundle = {
             "name": name,
             "version": "1.0.0",
             "description": description,
             "role": role,
-            "tags": [role, name.replace("_nerve", "").replace("_", "-")],
+            "tags": tags,
             "authors": [{"github": "otomus"}],
             "arqitect_version": ">=0.1.0",
             "tools": tool_entries,
@@ -2852,7 +3065,11 @@ class Dreamstate:
         return bundle
 
     def _collect_tool_entries(self, name: str) -> list[dict]:
-        """Gather tool entries for a nerve bundle, filtering low-use and self-references."""
+        """Gather tool entries for a nerve bundle, filtering phantom and low-use tools.
+
+        Only includes tools that actually exist on disk (directory or flat layout).
+        Reads tool.json for directory-based tools to pick up optional mcp field.
+        """
         tools_with_counts = mem.cold.get_nerve_tools_with_counts(name)
         from arqitect.config.loader import get_mcp_tools_dir
         mcp_tools_dir = str(get_mcp_tools_dir())
@@ -2863,10 +3080,32 @@ class Dreamstate:
                 continue
             if tool_name == name:
                 continue
-            entry = {"name": tool_name, "spec": f"mcp_tools/{tool_name}/spec.json", "implementations": {}}
-            for ext, lang in _EXT_TO_LANG.items():
-                if os.path.isfile(os.path.join(mcp_tools_dir, f"{tool_name}{ext}")):
-                    entry["implementations"][lang] = f"mcp_tools/{tool_name}/tool{ext}"
+
+            # Validate tool exists on disk with at least one implementation
+            implementations = {}
+            for lang in _EXT_TO_LANG.values():
+                src = _resolve_tool_source(mcp_tools_dir, tool_name, lang)
+                if src:
+                    ext = os.path.splitext(src)[1]
+                    implementations[lang] = f"mcp_tools/{tool_name}/tool{ext}"
+
+            if not implementations:
+                logger.debug("[CONTRIBUTE] Skipping phantom tool '%s' (not found on disk)", tool_name)
+                continue
+
+            entry = {"name": tool_name, "implementations": implementations}
+
+            # Pick up optional mcp field from directory-based tool.json
+            tool_json_path = os.path.join(mcp_tools_dir, tool_name, "tool.json")
+            if os.path.isfile(tool_json_path):
+                try:
+                    with open(tool_json_path) as f:
+                        tool_meta = json.load(f)
+                    if "mcp" in tool_meta:
+                        entry["mcp"] = tool_meta["mcp"]
+                except (json.JSONDecodeError, OSError):
+                    pass
+
             entries.append(entry)
         return entries
 
@@ -2896,18 +3135,27 @@ class Dreamstate:
         logger.info("[CONTRIBUTE] Included LoRA adapter for %s/%s/%s", name, size_class, model_slug)
 
     def _copy_tool_implementations(self, name: str, bundle: dict, nerve_dir: str):
-        """Copy tool source files from local mcp_tools/ into the community nerve directory."""
+        """Copy tool source files from local mcp_tools/ into the community nerve directory.
+
+        Uses _resolve_tool_source to find implementations in both directory and
+        flat layouts. Prunes implementations entries in-place when source is not found.
+        """
         from arqitect.config.loader import get_mcp_tools_dir
         mcp_tools_dir = str(get_mcp_tools_dir())
         for tool in bundle.get("tools", []):
             tool_name = tool["name"]
+            missing_langs = []
             for lang, rel_path in tool.get("implementations", {}).items():
-                ext = ".py" if lang == "python" else ".js" if lang == "javascript" else ""
-                src = os.path.join(mcp_tools_dir, f"{tool_name}{ext}")
-                if os.path.isfile(src):
+                src = _resolve_tool_source(mcp_tools_dir, tool_name, lang)
+                if src:
                     dest_dir = os.path.join(nerve_dir, os.path.dirname(rel_path))
                     os.makedirs(dest_dir, exist_ok=True)
                     shutil.copy2(src, os.path.join(nerve_dir, rel_path))
+                else:
+                    missing_langs.append(lang)
+            # Prune implementations that couldn't be copied
+            for lang in missing_langs:
+                tool["implementations"].pop(lang, None)
 
     def _write_test_cases(self, name: str, nerve_dir: str):
         """Write test_cases.json from cold memory into the community nerve directory."""
@@ -2917,26 +3165,24 @@ class Dreamstate:
                 json.dump(test_bank, f, indent=2)
 
     def _write_nerve_adapter_files(self, name: str, role: str, nerve_dir: str):
-        """Write context.json and meta.json for our model into the nerve directory.
+        """Write context.json and meta.json for ALL size classes into the nerve directory.
 
-        Creates: {nerve_dir}/{size_class}/context.json, meta.json
-                 {nerve_dir}/{size_class}/{model_slug}/context.json, meta.json
+        Community nerves must serve all model sizes. Each size class gets:
+        - A plain-text system prompt adapted to the model's capacity
+        - Size-appropriate few_shot_limit, max_context, max_messages
+        - Our exact model gets an additional model-specific subdirectory
+
+        Creates: {nerve_dir}/{size_class}/context.json, meta.json  (for each of 4 sizes)
+                 {nerve_dir}/{active_size}/{model_slug}/context.json, meta.json
         """
-        try:
-            from arqitect.brain.adapters import (
-                get_active_variant, get_model_name_for_role,
-                get_tuning_config, get_temperature, build_meta_json,
-            )
-            size_class = get_active_variant(role)
-            model_slug = get_model_name_for_role(role)
-        except (ImportError, ValueError):
-            return
-
-        if not size_class or not model_slug:
-            return
+        from arqitect.brain.adapters import (
+            SIZE_CLASSES, get_active_variant, get_model_name_for_role,
+            get_temperature, build_meta_json,
+        )
 
         nerve_meta = mem.cold.get_nerve_metadata(name)
         system_prompt = nerve_meta.get("system_prompt", "")
+        description = nerve_meta.get("description", "")
         examples = nerve_meta.get("examples", [])
         if isinstance(examples, str):
             try:
@@ -2944,52 +3190,105 @@ class Dreamstate:
             except (json.JSONDecodeError, TypeError):
                 examples = []
 
-        tuning_cfg = get_tuning_config(role)
-        few_shot_limit = tuning_cfg.get("few_shot_limit", 5)
+        # Examples fallback: read from local adapter context.json
+        if not examples:
+            try:
+                from arqitect.brain.adapters import resolve_nerve_prompt
+                ctx = resolve_nerve_prompt(name, role)
+                if ctx and ctx.get("few_shot_examples"):
+                    examples = ctx["few_shot_examples"]
+            except (ImportError, ValueError):
+                pass
+
+        # Description fallback: extract goal from JSON system_prompt
+        if not description or description == name or " " not in description:
+            try:
+                prompt_obj = json.loads(system_prompt)
+                if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
+                    description = prompt_obj["goal"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # Collect tool names for prompt adaptation
+        tools_with_counts = mem.cold.get_nerve_tools_with_counts(name)
+        tool_names = [t["tool"] for t in tools_with_counts
+                      if t["tool"] != name and t["use_count"] >= MIN_TOOL_USES_FOR_CONTRIBUTION]
+
+        # Use qualification score (from test bank), not invocation success ratio
+        qual = mem.cold.get_qualification("nerve", name)
+        score = qual.get("score", 0.0) if qual else 0.0
         temperature = get_temperature(role)
 
-        total = nerve_meta.get("total_invocations", 0) or 0
-        successes = nerve_meta.get("successes", 0) or 0
-        score = successes / total if total > 0 else 0
-        has_lora = os.path.isfile(os.path.join(NERVES_DIR, name, "adapter", "adapter.gguf"))
-
-        # Size-class level (defaults for all models in this class)
-        sc_dir = os.path.join(nerve_dir, size_class)
-        os.makedirs(sc_dir, exist_ok=True)
-
-        context = {
-            "system_prompt": system_prompt,
-            "few_shot_examples": examples[:few_shot_limit],
-            "temperature": temperature,
-            "qualification_score": round(score, 2),
+        # Size-class-specific defaults: context budget, few-shot count, prompt style
+        size_configs = {
+            "tinylm": {"few_shot_limit": 2, "max_context": 2048, "max_messages": 1, "include_summary": True},
+            "small":  {"few_shot_limit": 3, "max_context": 4096, "max_messages": 5, "include_summary": True},
+            "medium": {"few_shot_limit": 5, "max_context": 8192, "max_messages": 20, "include_summary": False},
+            "large":  {"few_shot_limit": 8, "max_context": 16384, "max_messages": 100, "include_summary": False},
         }
-        meta = build_meta_json(role, size_class, size_class, score=score, has_lora=False)
 
-        if not os.path.exists(os.path.join(sc_dir, "context.json")):
+        for sc in SIZE_CLASSES:
+            cfg = size_configs.get(sc, size_configs["medium"])
+            sc_dir = os.path.join(nerve_dir, sc)
+            os.makedirs(sc_dir, exist_ok=True)
+
+            adapted_prompt = _adapt_prompt_for_size(system_prompt, sc, tool_names=tool_names)
+            context = {
+                "system_prompt": adapted_prompt,
+                "few_shot_examples": examples[:cfg["few_shot_limit"]],
+                "temperature": temperature,
+                "qualification_score": round(score, 2),
+            }
+
+            meta = build_meta_json(role, sc, sc, score=score, has_lora=False)
+            meta["capabilities"] = {
+                "json_mode": True,
+                "tool_calling": True,
+                "max_context": cfg["max_context"],
+                "max_messages": cfg["max_messages"],
+                "include_summary": cfg["include_summary"],
+            }
+            meta["description"] = description
+
             with open(os.path.join(sc_dir, "context.json"), "w") as f:
                 json.dump(context, f, indent=2)
-        if not os.path.exists(os.path.join(sc_dir, "meta.json")):
             with open(os.path.join(sc_dir, "meta.json"), "w") as f:
                 json.dump(meta, f, indent=2)
 
-        # Model-specific level (our exact model)
-        model_dir = os.path.join(sc_dir, model_slug)
+        # Model-specific level: our exact model gets its own subdirectory
+        try:
+            active_sc = get_active_variant(role)
+            model_slug = get_model_name_for_role(role)
+        except (ImportError, ValueError):
+            return
+        if not active_sc or not model_slug:
+            return
+
+        has_lora = os.path.isfile(os.path.join(NERVES_DIR, name, "adapter", "adapter.gguf"))
+        model_dir = os.path.join(nerve_dir, active_sc, model_slug)
         os.makedirs(model_dir, exist_ok=True)
 
-        model_meta = build_meta_json(role, model_slug, size_class, score=score, has_lora=has_lora)
+        active_cfg = size_configs.get(active_sc, size_configs["medium"])
+        model_context = {
+            "system_prompt": _adapt_prompt_for_size(system_prompt, active_sc, tool_names=tool_names),
+            "few_shot_examples": examples[:active_cfg["few_shot_limit"]],
+            "temperature": temperature,
+            "qualification_score": round(score, 2),
+        }
+        model_meta = build_meta_json(role, model_slug, active_sc, score=score, has_lora=has_lora)
         model_meta["score"] = round(score, 2)
         model_meta["qualified_by"] = "dreamstate"
 
         with open(os.path.join(model_dir, "context.json"), "w") as f:
-            json.dump(context, f, indent=2)
+            json.dump(model_context, f, indent=2)
         with open(os.path.join(model_dir, "meta.json"), "w") as f:
             json.dump(model_meta, f, indent=2)
 
     def _contribute_nerve_bundle(self, community_dir: str, name: str, bundle: dict):
         """Push a new nerve bundle to the community repo via PR.
 
-        Writes bundle.json (identity + tools) and per-size-class context.json +
-        meta.json files matching the community nerve directory structure.
+        Copies tool implementations first (which prunes missing entries in-place),
+        then writes bundle.json so the committed file reflects only real tools.
         """
         import shutil
         from arqitect.config.loader import get_mcp_tools_dir
@@ -2997,10 +3296,13 @@ class Dreamstate:
         nerve_dir = os.path.join(community_dir, "nerves", name)
         os.makedirs(nerve_dir, exist_ok=True)
 
+        # Copy tools first — prunes implementations in-place for missing sources
+        self._copy_tool_implementations(name, bundle, nerve_dir)
+
+        # Write bundle.json after pruning so it reflects only real tools
         with open(os.path.join(nerve_dir, "bundle.json"), "w") as f:
             json.dump(bundle, f, indent=2)
 
-        self._copy_tool_implementations(name, bundle, nerve_dir)
         self._write_test_cases(name, nerve_dir)
 
         role = bundle.get("role", "tool")
@@ -3351,7 +3653,7 @@ class Dreamstate:
         logger.info("[DREAMSTATE] Fine-tuning: trained %d adapter(s)", trained)
 
     def _dream_usage_report(self):
-        """Write nerve/tool usage stats to sentient-community for community visibility.
+        """Write nerve/tool usage stats to arqitect-community for community visibility.
 
         Reads from the dedicated monitoring.db (not knowledge.db) and writes
         a JSON report to the community repo's reports/ directory.

@@ -631,26 +631,10 @@ class TestRunNerveWithInput:
         assert result["timed_out"] is False
 
     def test_timeout(self, _patch_module_globals):
+        """In-process path fails → subprocess fallback raises TimeoutExpired."""
         from arqitect.critic.qualify_nerve import run_nerve_with_input
         nerves_dir = _patch_module_globals["nerves_dir"]
         nerve_dir = os.path.join(nerves_dir, "slow")
-        os.makedirs(nerve_dir)
-        with open(os.path.join(nerve_dir, "nerve.py"), "w") as f:
-            f.write("import time; time.sleep(999)\n")
-
-        mem_mgr = MagicMock()
-        mem_mgr.get_env_for_nerve.return_value = {}
-
-        with patch("arqitect.critic.qualify_nerve.subprocess.run",
-                   side_effect=subprocess.TimeoutExpired(cmd="python", timeout=60)):
-            result = run_nerve_with_input("slow", "hello", mem_mgr)
-        assert result["timed_out"] is True
-        assert result["exit_code"] == -1
-
-    def test_exception_during_run(self, _patch_module_globals):
-        from arqitect.critic.qualify_nerve import run_nerve_with_input
-        nerves_dir = _patch_module_globals["nerves_dir"]
-        nerve_dir = os.path.join(nerves_dir, "bad")
         os.makedirs(nerve_dir)
         with open(os.path.join(nerve_dir, "nerve.py"), "w") as f:
             f.write("pass\n")
@@ -658,10 +642,28 @@ class TestRunNerveWithInput:
         mem_mgr = MagicMock()
         mem_mgr.get_env_for_nerve.return_value = {}
 
-        with patch("arqitect.critic.qualify_nerve.subprocess.run",
-                   side_effect=OSError("permission denied")):
-            result = run_nerve_with_input("bad", "hello", mem_mgr)
+        with patch("arqitect.critic.qualify_nerve._run_nerve_in_process",
+                   side_effect=Exception("force fallback")), \
+             patch("arqitect.critic.qualify_nerve.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired(cmd="python", timeout=60)):
+            result = run_nerve_with_input("slow", "hello", mem_mgr)
+        assert result["timed_out"] is True
         assert result["exit_code"] == -1
+
+    def test_exception_during_run(self, _patch_module_globals):
+        """In-process execution catches exception and reports it in stderr."""
+        from arqitect.critic.qualify_nerve import run_nerve_with_input
+        nerves_dir = _patch_module_globals["nerves_dir"]
+        nerve_dir = os.path.join(nerves_dir, "bad")
+        os.makedirs(nerve_dir)
+        with open(os.path.join(nerve_dir, "nerve.py"), "w") as f:
+            f.write("raise OSError('permission denied')\n")
+
+        mem_mgr = MagicMock()
+        mem_mgr.get_env_for_nerve.return_value = {}
+
+        result = run_nerve_with_input("bad", "hello", mem_mgr)
+        assert result["exit_code"] != 0
         assert "permission denied" in result["raw_stderr"]
 
     def test_result_shape_on_success(self, _patch_module_globals):
