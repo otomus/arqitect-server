@@ -95,8 +95,10 @@ def _regenerate_specific_prompt(name: str, description: str, domain: str) -> str
 def delete_nerve(name: str):
     """Fully delete a nerve — filesystem, cold memory, and Redis."""
     nerve_dir = os.path.join(NERVES_DIR, name)
-    if os.path.isdir(nerve_dir):
-        shutil.rmtree(nerve_dir)
+    try:
+        shutil.rmtree(nerve_dir, ignore_errors=True)
+    except Exception:
+        pass
     try:
         mem.cold.delete_nerve(name)
     except Exception:
@@ -299,7 +301,8 @@ def _preseed_matched_tools(name: str, description: str,
 # Background qualification
 # ---------------------------------------------------------------------------
 
-def _start_background_qualification(name: str, description: str, trigger_task: str) -> None:
+def _start_background_qualification(name: str, description: str, trigger_task: str,
+                                    user_id: str = "") -> None:
     """Launch qualification in a background thread. Nerve is usable immediately."""
     if mem.cold.is_qualified("nerve", name):
         print(f"[BRAIN] Nerve '{name}' already qualified — skipping qualification.")
@@ -314,7 +317,11 @@ def _start_background_qualification(name: str, description: str, trigger_task: s
                 "stage": "qualifying", "nerve": name,
                 "message": f"Training nerve '{name}' — testing and tuning for quality. This may take a few minutes."
             })
-            qual_result = qualify_nerve(name, description, trigger_task, mem)
+            # Awake qualification: 3 iterations max, no PR. Dreamstate does the
+            # full 7-iteration loop with tuning and contribution separately.
+            AWAKE_MAX_ITERATIONS = 3
+            qual_result = qualify_nerve(name, description, trigger_task, mem,
+                                        user_id=user_id, max_iterations=AWAKE_MAX_ITERATIONS)
             _report_qualification_result(name, qual_result)
         except Exception as e:
             print(f"[BRAIN] Qualification failed for nerve '{name}': {e}")
@@ -365,20 +372,25 @@ def synthesize_nerve(name: str, description: str, mcp_tools: list[str] | None = 
     """
     name = name.removesuffix(".py")
 
+    # Auto-detect user_id from active task origin (always available during
+    # live request processing — nerves are fabricated for real users).
+    from arqitect.brain.events import get_task_origin
+    user_id = get_task_origin().get("user_id", "")
+
     all_mcp_tools = _fetch_mcp_tools()
     name, mcp_tools = _apply_name_guards(name, description, mcp_tools, all_mcp_tools)
 
     # Community-first: use curated bundle when available
     bundle = find_community_bundle(name)
     if bundle:
-        return _synthesize_from_community(name, bundle, trigger_task)
+        return _synthesize_from_community(name, bundle, trigger_task, user_id)
 
     return _synthesize_from_scratch(name, description, mcp_tools, all_mcp_tools,
-                                    trigger_task, role)
+                                    trigger_task, role, user_id)
 
 
 def _synthesize_from_community(name: str, bundle: dict,
-                               trigger_task: str) -> tuple[str, str]:
+                               trigger_task: str, user_id: str = "") -> tuple[str, str]:
     """Synthesize a nerve using a community bundle as the source of truth."""
     description = bundle.get("description", name)
     role = validate_nerve_role(bundle.get("role", NerveRole.TOOL))
@@ -389,13 +401,14 @@ def _synthesize_from_community(name: str, bundle: dict,
     _write_meta_json(nerve_dir, name, role)
 
     print(f"[BRAIN] Synthesized nerve (community): {name} -> {nerve_path}")
-    _start_background_qualification(name, description, trigger_task)
+    _start_background_qualification(name, description, trigger_task, user_id=user_id)
     return name, nerve_path
 
 
 def _synthesize_from_scratch(name: str, description: str,
                              mcp_tools: list[str] | None, all_mcp_tools: dict,
-                             trigger_task: str, role: str | None) -> tuple[str, str]:
+                             trigger_task: str, role: str | None,
+                             user_id: str = "") -> tuple[str, str]:
     """Synthesize a nerve with LLM-generated metadata and keyword tool matching."""
     description = _generalize_description(name, description)
 
@@ -410,7 +423,7 @@ def _synthesize_from_scratch(name: str, description: str,
     _preseed_nerve_tools(name, description, trigger_task, mcp_tools, all_mcp_tools, role)
 
     print(f"[BRAIN] Synthesized nerve (scratch): {name} -> {nerve_path}")
-    _start_background_qualification(name, description, trigger_task)
+    _start_background_qualification(name, description, trigger_task, user_id=user_id)
     return name, nerve_path
 
 

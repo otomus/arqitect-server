@@ -75,6 +75,32 @@ class TaskChecklist:
             "complete": self.is_complete(),
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> "TaskChecklist":
+        """Reconstruct a TaskChecklist from a serialized dict.
+
+        Used for crash-recovery: restores task_id, goal, and per-step
+        status/result so a chain can be resumed from the last checkpoint.
+
+        Args:
+            data: Dict with keys task_id, goal, and steps (as produced
+                  by to_dict()).
+
+        Returns:
+            A TaskChecklist instance with step statuses restored.
+        """
+        task_id = data.get("task_id", "")
+        goal = data.get("goal", "")
+        raw_steps = data.get("steps", [])
+        # Build with dummy step names — we'll overwrite immediately
+        instance = cls(task_id, goal, [{"name": s.get("name", "")} for s in raw_steps])
+        # Restore saved status and result for each step
+        for i, saved in enumerate(raw_steps):
+            if i < len(instance.steps):
+                instance.steps[i]["status"] = saved.get("status", "pending")
+                instance.steps[i]["result"] = saved.get("result", "")
+        return instance
+
     @staticmethod
     def verify_test_output(output: str) -> tuple[bool, str]:
         """Parse test runner output. Returns (all_passed, summary).

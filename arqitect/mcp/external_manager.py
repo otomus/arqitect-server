@@ -46,7 +46,7 @@ class ExternalMCPManager:
             # create_arqitect not installed (e.g. scaffolded server) — fetch directly
             try:
                 import requests
-                url = "https://raw.githubusercontent.com/otomus/sentient-community/main/manifest.json"
+                url = "https://raw.githubusercontent.com/otomus/arqitect-community/main/manifest.json"
                 resp = requests.get(url, timeout=10)
                 resp.raise_for_status()
                 manifest = resp.json()

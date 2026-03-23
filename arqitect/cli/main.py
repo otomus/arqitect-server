@@ -454,11 +454,11 @@ def _nerve_install(name: str):
 
 
 def cmd_contribute(args):
-    """Package a nerve and submit a PR to otomus/sentient-community."""
+    """Package a nerve and submit a PR to otomus/arqitect-community."""
     name = args.name
     root = str(get_project_root())
-    community_repo = "otomus/sentient-community"
-    community_dir = os.path.join(root, ".community", "sentient-community")
+    community_repo = "otomus/arqitect-community"
+    community_dir = os.path.join(root, ".community", "arqitect-community")
 
     # Validate nerve exists
     from arqitect.config.loader import get_nerves_dir

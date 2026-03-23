@@ -664,7 +664,7 @@ def _handle_invoke(ctx: DispatchContext) -> str | None:
         msg = llm_generate(COMMUNICATION_MODEL, _prompt, system=_sys).strip()
 
     mem.hot.add_message("assistant", msg, user_id=user_id)
-    publish_response(msg, nerve_result=nerve_result, task=task)
+    publish_response(msg, nerve_result=nerve_result, task=task, already_formatted=True)
 
     return msg
 
@@ -758,7 +758,7 @@ def _handle_chain(ctx: DispatchContext) -> str:
 
     _enrich_nerve_result_with_image(last_nerve_result)
     mem.hot.add_message("assistant", msg, user_id=ctx.user_id)
-    publish_response(msg, nerve_result=last_nerve_result, task=ctx.task)
+    publish_response(msg, nerve_result=last_nerve_result, task=ctx.task, already_formatted=True)
 
     return msg
 

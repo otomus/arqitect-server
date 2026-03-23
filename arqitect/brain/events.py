@@ -376,8 +376,23 @@ def _generate_blocked_message(task: str, issue: str) -> str:
     return "Could you try putting that differently?"
 
 
-def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTRAL, task: str = "", request_identity: bool = False):
-    """Publish a rich response envelope to brain:response."""
+def _is_voice_origin() -> bool:
+    """Check whether the current task originated from voice input."""
+    return get_task_origin().get("source", "") == "voice"
+
+
+def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTRAL, task: str = "", request_identity: bool = False, already_formatted: bool = False):
+    """Publish a rich response envelope to brain:response.
+
+    Args:
+        msg: The response text to publish.
+        nerve_result: Optional nerve output dict with media attachments.
+        tone: Communication tone hint.
+        task: The original user task (used for echo detection).
+        request_identity: Whether to request user identity in the envelope.
+        already_formatted: When True, skip the personality LLM rewrite
+            (dispatch.py already rewrote through the communication model).
+    """
     # Get current task for echo detection — prefer explicit param, fallback to conversation
     if not task:
         try:
@@ -408,8 +423,11 @@ def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTR
 
     from arqitect.brain.invoke import invoke_nerve
 
-    # Apply personality rewriting + tone detection in a single LLM call
-    if tone == Tone.NEUTRAL:
+    # Apply personality rewriting only when dispatch hasn't already formatted
+    # the response through the communication model.  When already_formatted is
+    # True the message was rewritten with full task context in dispatch.py, so
+    # a second LLM pass would be redundant and add latency.
+    if not already_formatted and tone == Tone.NEUTRAL:
         msg, tone = _apply_personality(msg, task=task)
 
     envelope = build_envelope(message=msg, tone=tone, markdown=True)
@@ -431,28 +449,30 @@ def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTR
     # Send text response immediately — don't wait for TTS
     publish_event(Channel.BRAIN_RESPONSE, envelope)
 
-    # Generate TTS audio in background thread, publish as separate event
-    def _generate_tts():
-        try:
-            tts_result = invoke_nerve("hearing", json.dumps({"mode": "tts_file", "text": msg}))
-            if isinstance(tts_result, str):
-                tts_result = json.loads(tts_result)
-            audio_path = tts_result.get("audio_path", "") if isinstance(tts_result, dict) else ""
-            if audio_path and os.path.exists(audio_path):
-                with open(audio_path, "rb") as f:
-                    audio_data = base64.b64encode(f.read()).decode("utf-8")
-                mime = "audio/x-aiff" if audio_path.endswith(".aiff") else "audio/wav"
-                audio_payload = {
-                    "audio_b64": audio_data,
-                    "audio_mime": mime,
-                }
-                # Attach task origin so connectors can route audio to the right chat
-                audio_origin = get_task_origin()
-                if audio_origin["source"]:
-                    audio_payload["source"] = audio_origin["source"]
-                if audio_origin["chat_id"]:
-                    audio_payload["chat_id"] = audio_origin["chat_id"]
-                publish_event(Channel.BRAIN_AUDIO, audio_payload)
-        except Exception as e:
-            print(f"[WARN] TTS generation: {e}")
-    threading.Thread(target=_generate_tts, daemon=True).start()
+    # Generate TTS audio only when the original input was voice — text-only
+    # tasks (dashboard, telegram, whatsapp, stress_test) don't need speech.
+    if _is_voice_origin():
+        def _generate_tts():
+            try:
+                tts_result = invoke_nerve("hearing", json.dumps({"mode": "tts_file", "text": msg}))
+                if isinstance(tts_result, str):
+                    tts_result = json.loads(tts_result)
+                audio_path = tts_result.get("audio_path", "") if isinstance(tts_result, dict) else ""
+                if audio_path and os.path.exists(audio_path):
+                    with open(audio_path, "rb") as f:
+                        audio_data = base64.b64encode(f.read()).decode("utf-8")
+                    mime = "audio/x-aiff" if audio_path.endswith(".aiff") else "audio/wav"
+                    audio_payload = {
+                        "audio_b64": audio_data,
+                        "audio_mime": mime,
+                    }
+                    # Attach task origin so connectors can route audio to the right chat
+                    audio_origin = get_task_origin()
+                    if audio_origin["source"]:
+                        audio_payload["source"] = audio_origin["source"]
+                    if audio_origin["chat_id"]:
+                        audio_payload["chat_id"] = audio_origin["chat_id"]
+                    publish_event(Channel.BRAIN_AUDIO, audio_payload)
+            except Exception as e:
+                print(f"[WARN] TTS generation: {e}")
+        threading.Thread(target=_generate_tts, daemon=True).start()

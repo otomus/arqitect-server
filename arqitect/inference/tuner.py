@@ -190,16 +190,19 @@ def train_nerve_adapter(
             return False
 
         # Load GGUF into PyTorch — transformers >= 5.3 supports this directly
-        _log(f"[TUNER] Loading {os.path.basename(base_model_path)} into PyTorch...")
+        # from_pretrained expects the directory containing the GGUF, not the file path
+        gguf_filename = os.path.basename(base_model_path)
+        gguf_dir = os.path.dirname(base_model_path)
+        _log(f"[TUNER] Loading {gguf_filename} into PyTorch...")
         model = AutoModelForCausalLM.from_pretrained(
-            base_model_path,
-            gguf_file=os.path.basename(base_model_path),
+            gguf_dir,
+            gguf_file=gguf_filename,
             device_map="auto",
             torch_dtype=torch.float16,
         )
         tokenizer = AutoTokenizer.from_pretrained(
-            base_model_path,
-            gguf_file=os.path.basename(base_model_path),
+            gguf_dir,
+            gguf_file=gguf_filename,
         )
 
         if interrupted and interrupted.is_set():

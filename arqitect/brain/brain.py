@@ -11,7 +11,10 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
+import uuid
+from dataclasses import dataclass
 
 # Force unbuffered output for daemon mode
 sys.stdout.reconfigure(line_buffering=True)
@@ -55,6 +58,8 @@ from arqitect.brain.checklist import TaskChecklist
 from arqitect.brain.intent import classify_intent
 from arqitect.brain.safety import check_input as _safety_check_input
 from arqitect.brain.planner import plan_task
+from arqitect.brain.plan_session import PlanSession
+from arqitect.brain.plan_router import classify_plan_message
 from arqitect.brain.community import (
     sync_manifest as _sync_community_manifest,
     seed_tools as _seed_community_tools,
@@ -68,8 +73,71 @@ from arqitect.brain.adapters import (
 from arqitect.brain.dispatch import DispatchContext, dispatch_action
 
 
+# Module-level chain progress tracking — lets listen_redis() extend the
+# deadline for long-running chains that are still making forward progress.
+_chain_active = threading.Event()
+_last_chain_progress: float = 0.0
+
+
+
+# Max nerves shown to the routing LLM, keyed by model size class.
+# Smaller models have tighter context budgets (tinylm=2048, small=4096).
+_NERVE_LIMIT_BY_SIZE: dict[str, int] = {
+    "tinylm": 5,
+    "small": 8,
+    "medium": 15,
+    "large": 20,
+}
+_DEFAULT_NERVE_LIMIT = 20
+
 # Maximum task length (chars) fed into the routing prompt
 _MAX_TASK_LENGTH = 4000
+
+# Base timeout for simple (non-chain) tasks
+_BASE_TIMEOUT_S = 120
+# How often we poll the future for completion
+_POLL_INTERVAL_S = 5
+
+
+def _await_future_with_chain_extension(future: "concurrent.futures.Future[str]") -> str:
+    """Poll a future, extending the deadline while a chain makes progress.
+
+    Simple tasks time out after _BASE_TIMEOUT_S (120s).  When a chain is
+    active and reporting progress, the deadline resets from the last progress
+    timestamp — so a chain step that takes up to 120s of *idle* time is still
+    allowed, but one that stalls for 120s with no step completion gets killed.
+
+    Args:
+        future: The Future wrapping the think() call.
+
+    Returns:
+        The result string from think().
+
+    Raises:
+        concurrent.futures.TimeoutError: If the task exceeds its deadline.
+    """
+    import concurrent.futures
+
+    start = time.time()
+    deadline = start + _BASE_TIMEOUT_S
+
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            raise concurrent.futures.TimeoutError()
+
+        poll_timeout = min(_POLL_INTERVAL_S, remaining)
+        try:
+            return future.result(timeout=poll_timeout)
+        except concurrent.futures.TimeoutError:
+            pass  # poll again — check whether chain extended the deadline
+
+        # If a chain is actively running and recently made progress,
+        # push the deadline out from the last progress timestamp.
+        if _chain_active.is_set() and _last_chain_progress > 0:
+            chain_deadline = _last_chain_progress + _BASE_TIMEOUT_S
+            if chain_deadline > deadline:
+                deadline = chain_deadline
 
 
 def _reverse_geocode(lat: float, lon: float) -> str:
@@ -321,6 +389,81 @@ def _tdd_llm_step(step_type: str, task: str, project_facts: dict,
     return strip_markdown_fences(output)
 
 
+@dataclass
+class ChainCheckpoint:
+    """Snapshot of chain progress for crash recovery.
+
+    Attributes:
+        task_id: Unique identifier for this chain execution.
+        chain_type: "tdd" or "recipe".
+        step_index: Zero-based index of the current step.
+        total_steps: Total number of steps in the chain.
+        chain_context: Accumulated output context from prior steps.
+        checklist_dict: Serialized checklist (from TaskChecklist.to_dict()).
+        decision: The original routing decision that spawned this chain.
+        status: One of "running", "complete", or "failed".
+    """
+
+    task_id: str
+    chain_type: str
+    step_index: int
+    total_steps: int
+    chain_context: list
+    checklist_dict: dict
+    decision: dict
+    status: str = "running"
+
+
+def _checkpoint_chain(cp: ChainCheckpoint) -> None:
+    """Persist a chain checkpoint to cold memory.
+
+    Only the last 5 context entries are stored to keep the payload small.
+
+    Args:
+        cp: Snapshot of the current chain state.
+    """
+    state = {
+        "task_id": cp.task_id,
+        "chain_type": cp.chain_type,
+        "step_index": cp.step_index,
+        "total_steps": cp.total_steps,
+        "chain_context": cp.chain_context[-5:],
+        "checklist": cp.checklist_dict,
+        "decision": cp.decision,
+        "status": cp.status,
+        "updated_at": time.time(),
+    }
+    mem.cold.set_fact("chain_state", cp.task_id, json.dumps(state))
+
+
+def _mark_abandoned_chains() -> None:
+    """Scan for chains left in 'running' state from a previous session.
+
+    Called once at startup.  Any chain still marked as running could not
+    have completed (the process crashed or was killed), so we mark it
+    as abandoned and log a warning.
+    """
+    logger = logging.getLogger(__name__)
+    chain_states = mem.cold.get_facts("chain_state")
+    for task_id, raw in chain_states.items():
+        try:
+            state = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if state.get("status") != "running":
+            continue
+        state["status"] = "abandoned"
+        state["updated_at"] = time.time()
+        mem.cold.set_fact("chain_state", task_id, json.dumps(state))
+        logger.warning(
+            "[BRAIN] Abandoned chain detected: task_id=%s chain_type=%s step=%d/%d",
+            task_id,
+            state.get("chain_type", "unknown"),
+            state.get("step_index", -1),
+            state.get("total_steps", -1),
+        )
+
+
 def _handle_tdd_chain(task: str, decision: dict, checklist: TaskChecklist) -> str:
     """Execute a TDD chain using in-process LLM — no nerve subprocesses needed.
 
@@ -331,6 +474,7 @@ def _handle_tdd_chain(task: str, decision: dict, checklist: TaskChecklist) -> st
     steps = decision.get("steps", [])
     project_path = decision.get("project_path", ".")
     project_facts = decision.get("project_facts", {})
+    chain_task_id = str(uuid.uuid4())
 
     print(f"[BRAIN] TDD chain started: {len(steps)} steps for: {task}")
     publish_event(Channel.BRAIN_THOUGHT, {"stage": "tdd_chain", "steps": len(steps), "goal": task})
@@ -348,6 +492,10 @@ def _handle_tdd_chain(task: str, decision: dict, checklist: TaskChecklist) -> st
             impl_file_path = s["target_file"]
             break
 
+    global _last_chain_progress
+    _chain_active.set()
+    _last_chain_progress = time.time()
+
     i = 0
     while i < len(steps):
         chain_step = steps[i]
@@ -357,6 +505,7 @@ def _handle_tdd_chain(task: str, decision: dict, checklist: TaskChecklist) -> st
 
         checklist.activate(i)
         publish_event(Channel.BRAIN_CHECKLIST, checklist.to_dict())
+        get_consolidator().touch()
 
         # ── _touch_exec steps: direct command execution, no LLM ──
         if nerve_name == "_touch_exec":
@@ -408,6 +557,7 @@ def _handle_tdd_chain(task: str, decision: dict, checklist: TaskChecklist) -> st
                                 )
                                 i = impl_step_idx
                                 publish_event(Channel.BRAIN_CHECKLIST, checklist.to_dict())
+                                _last_chain_progress = time.time()
                                 continue
             else:
                 checklist.check(i, True, compressed[:200])
@@ -460,8 +610,25 @@ def _handle_tdd_chain(task: str, decision: dict, checklist: TaskChecklist) -> st
                 chain_context.append("(no code)")
 
         publish_event(Channel.BRAIN_CHECKLIST, checklist.to_dict())
+        _checkpoint_chain(ChainCheckpoint(
+            task_id=chain_task_id, chain_type="tdd", step_index=i,
+            total_steps=len(steps), chain_context=chain_context,
+            checklist_dict=checklist.to_dict(), decision=decision,
+        ))
+        _last_chain_progress = time.time()
         print(f"[BRAIN] TDD step {i+1} complete: {checklist.steps[i]['status']}")
         i += 1
+
+    _chain_active.clear()
+
+    # Mark chain complete or failed
+    _tdd_final_status = "complete" if checklist.is_complete() else "failed"
+    _checkpoint_chain(ChainCheckpoint(
+        task_id=chain_task_id, chain_type="tdd", step_index=len(steps),
+        total_steps=len(steps), chain_context=chain_context,
+        checklist_dict=checklist.to_dict(), decision=decision,
+        status=_tdd_final_status,
+    ))
 
     # Build final response
     summary = checklist.summary()
@@ -501,6 +668,7 @@ def _handle_recipe_chain(task: str, recipe_decision: dict) -> str:
     steps = recipe_decision.get("steps", [])
     goal = recipe_decision.get("goal", task)
     recipe_id = recipe_decision.get("recipe_id", "")
+    chain_task_id = str(uuid.uuid4())
     nerve_catalog = discover_nerves()
     available = list(nerve_catalog.keys())
 
@@ -511,6 +679,9 @@ def _handle_recipe_chain(task: str, recipe_decision: dict) -> str:
     final_output = ""
     last_nerve_result = {}
     step_results = []  # for eval
+
+    _chain_active.set()
+    _last_chain_progress = time.time()
 
     for i, chain_step in enumerate(steps):
         nerve_name = re.sub(r"[^a-z0-9_]", "_", chain_step.get("nerve", "").lower()).strip("_")
@@ -569,11 +740,27 @@ def _handle_recipe_chain(task: str, recipe_decision: dict) -> str:
         chain_context.append(str(step_output)[:500])
         final_output = step_output
         step_results.append({"step": i, "nerve": nerve_name, "status": "ok" if step_ok else "error"})
+        get_consolidator().touch()
+        _checkpoint_chain(ChainCheckpoint(
+            task_id=chain_task_id, chain_type="recipe", step_index=i,
+            total_steps=len(steps), chain_context=chain_context,
+            checklist_dict={}, decision=recipe_decision,
+        ))
+        _last_chain_progress = time.time()
         print(f"[BRAIN] Recipe step {i+1} complete: {str(step_output)[:100]}")
+
+    _chain_active.clear()
 
     # Build final response
     combined = str(final_output).strip() if len(chain_context) <= 1 else "\n".join(chain_context)
     _chain_failed = _is_nerve_error(combined)
+
+    _checkpoint_chain(ChainCheckpoint(
+        task_id=chain_task_id, chain_type="recipe", step_index=len(steps),
+        total_steps=len(steps), chain_context=chain_context,
+        checklist_dict={}, decision=recipe_decision,
+        status="complete" if not _chain_failed else "failed",
+    ))
 
     if _chain_failed:
         nerve_names = ", ".join(s.get("nerve", "?") for s in steps)
@@ -619,6 +806,237 @@ def think(task: str, history: list[str] | None = None, depth: int = 0) -> str:
         _ts.set_attribute("response_length", len(result) if result else 0)
         _ts.set_attribute("response_preview", (result or "")[:300])
         return result
+
+
+def _gather_plan_context(plan: PlanSession, task: str, user_id: str) -> None:
+    """Populate a PlanSession with context from past work and the project.
+
+    Mutates plan in place — sets related_plans, related_episodes,
+    project_facts, and matched_recipe.
+
+    Args:
+        plan: The PlanSession to enrich.
+        task: The user's original message.
+        user_id: The user who sent the message.
+    """
+    plan.related_plans = PlanSession.get_past_plans(mem, plan.category, limit=3)
+
+    episodes = mem.warm.recall(task, user_id=user_id) if hasattr(mem, "warm") else []
+    plan.related_episodes = episodes[:3] if episodes else []
+
+    project_path = detect_project_path(task)
+    if project_path:
+        from arqitect.knowledge.project_profiler import get_stored_profile, store_profile
+        plan.project_facts = get_stored_profile(project_path) or store_profile(project_path)
+
+    matched = plan_task(task, plan.category, plan.project_facts)
+    if matched:
+        plan.matched_recipe = matched
+
+
+def _build_planning_prompt(plan: PlanSession) -> str:
+    """Build the LLM prompt from plan context.
+
+    Args:
+        plan: PlanSession with gathered context.
+
+    Returns:
+        Prompt string summarizing goal, past plans, project, and recipes.
+    """
+    parts = [f"The user wants to: {plan.goal}"]
+    if plan.related_plans:
+        summaries = [f"  - {p.get('goal', '?')} (status: {p.get('status', '?')})" for p in plan.related_plans[:3]]
+        parts.append("Related past plans:\n" + "\n".join(summaries))
+    if plan.project_facts:
+        parts.append(f"Project: {plan.project_facts}")
+    if plan.matched_recipe:
+        parts.append(f"Matched existing recipe with {len(plan.matched_recipe.get('steps', []))} steps")
+    return "\n\n".join(parts)
+
+
+_PLAN_START_SYSTEM = (
+    "You are starting a planning phase for a multi-step task. "
+    "Summarize your understanding of what the user wants, reference any "
+    "relevant past work if available, and ask clarifying questions to "
+    "gather requirements before proposing a plan. Be conversational. "
+    "Do NOT propose steps yet — just gather information."
+)
+
+
+def _handle_plan_start(task: str, intent: dict, user_id: str) -> str:
+    """Start a new planning session when intent is classified as 'plan'.
+
+    Args:
+        task: The user's original message.
+        intent: Intent classification dict with 'type' and optional 'category'.
+        user_id: The user who sent the message.
+
+    Returns:
+        The brain's initial planning response.
+    """
+    category = intent.get("category", "")
+    print(f"[BRAIN] Intent: plan (category={category})")
+    publish_event(Channel.PLAN_UPDATE, {"stage": "plan_start", "task": task, "category": category})
+
+    plan = PlanSession.create(user_id, goal=task, category=category)
+    _gather_plan_context(plan, task, user_id)
+    plan.add_message("user", task)
+
+    planning_prompt = _build_planning_prompt(plan)
+
+    response = llm_generate(BRAIN_MODEL, planning_prompt, system=_PLAN_START_SYSTEM)
+    plan.add_message("assistant", response)
+    plan.save(r)
+
+    mem.hot.add_message("user", task, user_id=user_id)
+    mem.hot.add_message("assistant", response, user_id=user_id)
+    publish_event(Channel.PLAN_UPDATE, {"stage": "gathering", "plan_id": plan.plan_id})
+    publish_response(response)
+    return response
+
+
+def _handle_plan_continue(task: str, plan: PlanSession, user_id: str) -> str:
+    """Handle a message that continues an active plan's conversation.
+
+    Adds the user's input to the plan context, generates a brain response that
+    either asks more questions or proposes a plan.
+
+    Args:
+        task: The user's new message.
+        plan: The active PlanSession.
+        user_id: The user who sent the message.
+
+    Returns:
+        The brain's response (gathering more info or proposing a plan).
+    """
+    publish_event(Channel.PLAN_UPDATE, {"stage": "plan_continue", "plan_id": plan.plan_id})
+    plan.add_requirement(task)
+    plan.add_message("user", task)
+
+    # Build context for the brain
+    convo_text = "\n".join(
+        f"{m['role']}: {m['content']}" for m in plan.conversation_context
+    )
+    prompt = (
+        f"Goal: {plan.goal}\n"
+        f"Category: {plan.category}\n"
+        f"Requirements gathered so far: {plan.requirements}\n"
+        f"Conversation:\n{convo_text}\n\n"
+        f"Based on the conversation, either ask more clarifying questions "
+        f"or propose a concrete plan with numbered steps if you have enough info."
+    )
+    system = (
+        "You are in a planning phase for a multi-step task. "
+        "If you have enough requirements, propose a concrete numbered plan "
+        "and ask the user to approve. Otherwise, ask more clarifying questions."
+    )
+    response = llm_generate(BRAIN_MODEL, prompt, system=system)
+
+    # Check if the brain proposed a plan (heuristic: contains numbered steps)
+    if plan.status == "gathering" and _response_contains_plan(response):
+        steps = _extract_plan_steps(response)
+        if steps:
+            plan.propose(steps)
+            publish_event(Channel.PLAN_UPDATE, {"stage": "proposed", "plan_id": plan.plan_id})
+
+    plan.add_message("assistant", response)
+    plan.save(r)
+
+    mem.hot.add_message("user", task, user_id=user_id)
+    mem.hot.add_message("assistant", response, user_id=user_id)
+    publish_response(response)
+    return response
+
+
+def _handle_plan_approve(plan: PlanSession, user_id: str) -> str:
+    """Handle user approval of a proposed plan — transition to execution.
+
+    Args:
+        plan: The active PlanSession (must be in 'proposed' status).
+        user_id: The user who approved.
+
+    Returns:
+        The result of executing the plan as a recipe chain.
+    """
+    publish_event(Channel.PLAN_UPDATE, {"stage": "plan_approve", "plan_id": plan.plan_id})
+
+    if plan.status != "proposed":
+        # Not in a state to approve — treat as continue
+        return _handle_plan_continue("I approve, let's go!", plan, user_id)
+
+    plan.approve()
+    plan.save(r)
+    publish_event(Channel.PLAN_UPDATE, {"stage": "approved", "plan_id": plan.plan_id})
+
+    recipe = plan.to_recipe()
+
+    try:
+        result = _handle_recipe_chain(plan.goal, recipe)
+        plan.complete(success=True)
+    except Exception as exc:
+        print(f"[BRAIN] Plan execution failed: {exc}")
+        plan.complete(success=False)
+        result = f"The plan ran into an issue: {exc}"
+
+    # Archive to cold memory and clean up Redis
+    plan.archive(mem)
+    plan.delete(r)
+    publish_event(Channel.PLAN_UPDATE, {"stage": "done", "plan_id": plan.plan_id})
+    return result
+
+
+def _handle_plan_abort(plan: PlanSession, user_id: str) -> str:
+    """Handle user aborting an active plan.
+
+    Args:
+        plan: The active PlanSession to abandon.
+        user_id: The user who aborted.
+
+    Returns:
+        Confirmation message.
+    """
+    publish_event(Channel.PLAN_UPDATE, {"stage": "plan_abort", "plan_id": plan.plan_id})
+    plan.abandon()
+    plan.archive(mem)
+    plan.delete(r)
+    msg = "Plan cancelled. Let me know if you'd like to start something else."
+    mem.hot.add_message("assistant", msg, user_id=user_id)
+    publish_response(msg)
+    return msg
+
+
+def _response_contains_plan(response: str) -> bool:
+    """Heuristic check: does the LLM response contain a numbered plan proposal?
+
+    Args:
+        response: The brain's response text.
+
+    Returns:
+        True if the response appears to contain a numbered plan.
+    """
+    import re
+    # Look for at least 2 numbered items (e.g., "1." and "2.")
+    numbered = re.findall(r"^\s*\d+\.\s", response, re.MULTILINE)
+    return len(numbered) >= 2
+
+
+def _extract_plan_steps(response: str) -> list[dict]:
+    """Extract numbered steps from a plan proposal response.
+
+    Args:
+        response: The brain's response containing numbered steps.
+
+    Returns:
+        List of step dicts with 'step' number and 'description'.
+    """
+    import re
+    steps = []
+    for match in re.finditer(r"^\s*(\d+)\.\s+(.+?)(?=\n\s*\d+\.|\n\n|$)", response, re.MULTILINE | re.DOTALL):
+        steps.append({
+            "step": int(match.group(1)),
+            "description": match.group(2).strip(),
+        })
+    return steps
 
 
 def _think_inner(task: str, history: list[str] | None = None, depth: int = 0) -> str:
@@ -706,44 +1124,38 @@ def _think_inner(task: str, history: list[str] | None = None, depth: int = 0) ->
     # Context detection is handled by the LLM via the update_context action.
     # No pre-LLM regex bypass — the LLM decides what's a context statement.
 
-    # Intent classification → recipe-based planner for workflows
+    # STAGE 1: Plan gate — check for active plan BEFORE intent classification
+    active_plan = PlanSession.get_active(user_id, r)
+    if active_plan:
+        plan_action = classify_plan_message(task, active_plan)
+        if plan_action == "continue":
+            return _handle_plan_continue(task, active_plan, user_id)
+        elif plan_action == "approve":
+            return _handle_plan_approve(active_plan, user_id)
+        elif plan_action == "abort":
+            return _handle_plan_abort(active_plan, user_id)
+        # "aside" — fall through to normal routing
+
+    # STAGE 2: Intent classification (no active plan, or aside message)
     if not history:
         intent = classify_intent(task)
         intent_type = intent.get("type", IntentType.DIRECT)
 
-        if intent_type == IntentType.WORKFLOW:
-            category = intent.get("category", "")
-            print(f"[BRAIN] Intent: workflow (category={category})")
-
-            # Gather project context if available
-            project_path = detect_project_path(task)
-            project_facts = None
-            if project_path:
-                from arqitect.knowledge.project_profiler import get_stored_profile, store_profile
-                project_facts = get_stored_profile(project_path) or store_profile(project_path)
-
-            # TDD shortcut: coding workflow on existing project with known language
-            if project_facts and project_facts.get("language") and is_coding_task(task):
-                print(f"[BRAIN] TDD chain: {project_path} ({project_facts.get('language')}+{project_facts.get('framework', '?')})")
-                decision, checklist = build_tdd_chain(task, project_facts)
-                return _handle_tdd_chain(task, decision, checklist)
-
-            # General workflow: planner generates/matches a recipe → chain_nerves
-            planned = plan_task(task, category, project_facts)
-            if planned:
-                steps = planned.get("steps", [])
-                goal = planned.get("goal", task)
-                print(f"[BRAIN] Planner recipe: {len(steps)} steps")
-                # Execute as chain_nerves — uses the existing nerve chain handler
-                return _handle_recipe_chain(task, planned)
+        if intent_type == IntentType.PLAN:
+            return _handle_plan_start(task, intent, user_id)
 
     # Truncate excessively long tasks before feeding into the routing prompt
     if len(task) > _MAX_TASK_LENGTH:
         task = task[:_MAX_TASK_LENGTH] + "... [truncated]"
 
-    # Pre-filter catalog to top-20 most relevant nerves to avoid blowing up context
+    # Pre-filter catalog — limit varies by model size class to respect
+    # smaller context budgets (tinylm=2048, small=4096).
     from arqitect.matching import filter_nerve_catalog
-    nerve_catalog = filter_nerve_catalog(task, nerve_catalog, limit=20)
+    from arqitect.brain.adapters import get_active_variant
+
+    size_class = get_active_variant("brain")
+    nerve_limit = _NERVE_LIMIT_BY_SIZE.get(size_class, _DEFAULT_NERVE_LIMIT)
+    nerve_catalog = filter_nerve_catalog(task, nerve_catalog, limit=nerve_limit)
 
     # Build context for LLM — filtered catalog, LLM decides routing
     nerve_list = "\n".join(f"  - {n}: {d}" for n, d in nerve_catalog.items())
@@ -851,6 +1263,9 @@ def listen_redis():
 
         # Clear stale conversations from previous session
         mem.hot.clear_all_conversations()
+
+        # Mark any in-progress chains from a previous session as abandoned
+        _mark_abandoned_chains()
 
         from arqitect.config.loader import get_redis_host_port
         _host, _port = get_redis_host_port()
@@ -1191,17 +1606,20 @@ def listen_redis():
             if task:
                 set_task_origin(source, chat_id, user_id)
                 print(f"\n[BRAIN] Task from {source}: {task}")
-                # Run think() in a thread with a 120s timeout so the brain never freezes
+                # Run think() in a thread — chains that make progress can
+                # exceed the base 120s deadline; idle tasks still time out.
                 import concurrent.futures
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
                     future = executor.submit(think, task)
                     try:
-                        result = future.result(timeout=120)
+                        result = _await_future_with_chain_extension(future)
                         print(f"[RESULT] {result}\n")
                     except concurrent.futures.TimeoutError:
-                        print(f"[BRAIN] Task timed out after 120s: {task}")
+                        elapsed = time.time() - _last_chain_progress if _chain_active.is_set() else -1
+                        print(f"[BRAIN] Task timed out: {task} (chain_idle={elapsed:.0f}s)")
                         publish_response("That request took too long to process. Could you try again, perhaps with a simpler request?")
         except Exception as e:
+            _chain_active.clear()  # Ensure chain flag is reset on any error
             print(f"[BRAIN] Error processing task: {e}")
             import traceback
             traceback.print_exc()

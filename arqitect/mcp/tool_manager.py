@@ -520,9 +520,26 @@ class ToolManager:
                 self._shutdown.wait(timeout=HEALTH_CHECK_INTERVAL)
                 if not self._shutdown.is_set():
                     self.health_check()
+                    self._touch_consolidator_if_active()
 
         self._health_thread = threading.Thread(target=_loop, daemon=True, name="tool-health")
         self._health_thread.start()
+
+    def _touch_consolidator_if_active(self) -> None:
+        """Push the dreamstate idle timer forward when tools are actively running.
+
+        Uses a lazy import to avoid circular dependency with the consolidate
+        module. Silently ignores errors so the health loop is never disrupted.
+        """
+        with self._lock:
+            has_active = bool(self._pool)
+        if not has_active:
+            return
+        try:
+            from arqitect.brain.consolidate import get_consolidator
+            get_consolidator().touch()
+        except Exception:
+            pass
 
     def shutdown(self) -> None:
         """Shut down all tool processes and stop the health check loop."""

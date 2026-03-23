@@ -143,7 +143,7 @@ def parse_json(raw):
     while i < len(raw):
         ch = raw[i]
         if in_string:
-            if ch == "\\" :
+            if ch == "\\\\" :
                 i += 2  # skip escaped character
                 continue
             if ch == '"':

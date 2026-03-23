@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import redis
 
@@ -205,33 +206,158 @@ def generate_test_cases(name: str, description: str, trigger_task: str = "",
     return cases
 
 
-def run_nerve_with_input(nerve_name: str, user_input: str, mem_manager) -> dict:
-    """Run a nerve subprocess with the given input and return structured results."""
+_QUAL_USER_ID = "system_test_user"
+
+# Synthetic user profile for qualification — nerves need profile data to
+# personalize responses, which test cases rightfully expect.
+_QUAL_USER_PROFILE = {
+    "name": "Oron",
+    "first_name": "Oron",
+    "timezone": "Asia/Jerusalem",
+    "language": "en",
+}
+
+
+def _ensure_qual_user_profile(mem_manager):
+    """Seed the qualification test user profile if it doesn't exist yet."""
+    existing = mem_manager.cold.get_user_profile(_QUAL_USER_ID)
+    if not existing:
+        mem_manager.cold.set_user_profile(_QUAL_USER_ID, _QUAL_USER_PROFILE)
+
+
+def _extract_json_from_stdout(stdout: str) -> dict | None:
+    """Extract JSON from nerve stdout that may contain engine loading messages.
+
+    Nerve subprocesses print [ENGINE] loading lines to stdout before the
+    actual JSON response. This scans for the last valid JSON object.
+    """
+    for line in reversed(stdout.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                return json.loads(line)
+            except (json.JSONDecodeError, TypeError):
+                continue
+    return None
+
+
+def _resolve_effective_user(user_id: str, mem_manager) -> str:
+    """Resolve user ID: prefer explicit, fall back to primary user or qual user."""
+    if user_id:
+        return user_id
+    try:
+        row = mem_manager.cold.conn.execute(
+            "SELECT user_id FROM users ORDER BY last_seen DESC LIMIT 1"
+        ).fetchone()
+        if row:
+            return row[0]
+    except Exception:
+        pass
+    _ensure_qual_user_profile(mem_manager)
+    return _QUAL_USER_ID
+
+
+def run_nerve_with_input(nerve_name: str, user_input: str, mem_manager,
+                         user_id: str = "") -> dict:
+    """Run a nerve in-process using the hot engine.
+
+    Sets the nerve's env vars temporarily, imports its module, calls main(),
+    and captures stdout. The engine stays loaded — no subprocess model reload.
+    Falls back to subprocess if in-process execution fails.
+    """
     nerve_path = os.path.join(NERVES_DIR, nerve_name, "nerve.py")
     if not os.path.exists(nerve_path):
-        return {"raw_stdout": "", "raw_stderr": f"Nerve '{nerve_name}' not found", "parsed": None, "exit_code": -1, "timed_out": False}
+        return {"raw_stdout": "", "raw_stderr": f"Nerve '{nerve_name}' not found",
+                "parsed": None, "exit_code": -1, "timed_out": False}
 
+    effective_user_id = _resolve_effective_user(user_id, mem_manager)
+    nerve_env = mem_manager.get_env_for_nerve(nerve_name, user_input, user_id=effective_user_id)
+    nerve_env["SYNAPSE_LAZY_LOAD"] = "1"
+    nerve_env["SYNAPSE_NO_ACQUIRE"] = "1"
+    nerve_env["SYNAPSE_SKIP_FACTS"] = "1"
+
+    try:
+        return _run_nerve_in_process(nerve_name, nerve_path, user_input, nerve_env)
+    except Exception as e:
+        print(f"[CRITIC] In-process nerve run failed for '{nerve_name}': {e}, falling back to subprocess")
+        return _run_nerve_subprocess(nerve_name, nerve_path, user_input, nerve_env)
+
+
+def _run_nerve_in_process(nerve_name: str, nerve_path: str, user_input: str,
+                          nerve_env: dict) -> dict:
+    """Run nerve main() in-process with env vars set temporarily.
+
+    Captures stdout, restores env + sys.argv after execution.
+    Uses the already-loaded GGUF engine — no model reload overhead.
+    """
+    import importlib.util
+    import io
+    import contextlib
+
+    # Save and patch env vars
+    saved_env = {}
+    for key, val in nerve_env.items():
+        saved_env[key] = os.environ.get(key)
+        os.environ[key] = val
+
+    saved_argv = sys.argv
+    sys.argv = [nerve_path, user_input]
+
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    exit_code = 0
+
+    try:
+        # Load nerve module from file path
+        spec = importlib.util.spec_from_file_location(f"nerve_{nerve_name}", nerve_path)
+        module = importlib.util.module_from_spec(spec)
+
+        with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
+            spec.loader.exec_module(module)
+            if hasattr(module, "main"):
+                module.main()
+
+    except SystemExit as e:
+        exit_code = e.code if e.code is not None else 0
+    except Exception as e:
+        stderr_capture.write(str(e))
+        exit_code = 1
+    finally:
+        # Restore env vars
+        for key, original in saved_env.items():
+            if original is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = original
+        sys.argv = saved_argv
+
+    stdout_str = stdout_capture.getvalue()
+    parsed = _extract_json_from_stdout(stdout_str)
+    return {
+        "raw_stdout": stdout_str,
+        "raw_stderr": stderr_capture.getvalue(),
+        "parsed": parsed,
+        "exit_code": exit_code,
+        "timed_out": False,
+    }
+
+
+def _run_nerve_subprocess(nerve_name: str, nerve_path: str, user_input: str,
+                          nerve_env: dict) -> dict:
+    """Fallback: run nerve as subprocess (slow — reloads GGUF model)."""
     env = os.environ.copy()
-    env.update(mem_manager.get_env_for_nerve(nerve_name, user_input, user_id="system_test_user"))
-    # Lazy-load only the model the nerve needs (not all 6)
-    env["SYNAPSE_LAZY_LOAD"] = "1"
-    # Skip expensive tool acquisition during qualification (HTTP searches, fabrication)
-    env["SYNAPSE_NO_ACQUIRE"] = "1"
-    # Skip fact-based answers during qualification — test the nerve's LLM, not fact recall
-    env["SYNAPSE_SKIP_FACTS"] = "1"
+    env.update(nerve_env)
+    project_root = str(Path(__file__).resolve().parent.parent.parent)
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{project_root}:{existing_pp}" if existing_pp else project_root
 
-    _nerve_timeout = 60
     try:
         result = subprocess.run(
             [sys.executable, nerve_path, user_input],
-            capture_output=True, text=True, timeout=_nerve_timeout,
+            capture_output=True, text=True, timeout=60,
             cwd=SANDBOX_DIR, env=env,
         )
-        parsed = None
-        try:
-            parsed = json.loads(result.stdout)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        parsed = _extract_json_from_stdout(result.stdout)
         return {
             "raw_stdout": result.stdout,
             "raw_stderr": result.stderr,
@@ -265,19 +391,32 @@ def _deterministic_check(output: str, user_input: str) -> float | None:
 
 
 def evaluate_nerve_output(test_case: dict, nerve_output: dict) -> dict:
-    """Evaluate nerve output using layered checks: deterministic, embedding, then LLM."""
+    """Evaluate nerve output using layered checks: deterministic, embedding, then LLM.
+
+    Extracts the actual response text from the nerve's JSON envelope
+    (which wraps the response in {"nerve": ..., "input": ..., "response": ...}).
+    Falls back to raw stdout if parsing fails.
+    """
     user_input = test_case.get("input", "")
-    raw_stdout = nerve_output.get("raw_stdout", "")
+    # Extract actual response from parsed JSON envelope — the nerve wraps its
+    # output in {"nerve": "name", "input": "...", "response": "actual answer"}.
+    # Evaluating the raw JSON blob instead of the response field is why all
+    # nerves scored 0% (the evaluator LLM couldn't match JSON against expected text).
+    parsed = nerve_output.get("parsed", {})
+    if isinstance(parsed, dict) and parsed.get("response"):
+        actual_response = str(parsed["response"])
+    else:
+        actual_response = nerve_output.get("raw_stdout", "")
     expected = test_case.get("output", test_case.get("expected_behavior", ""))
 
     # Layer 1: Deterministic check
-    det_score = _deterministic_check(raw_stdout, user_input)
+    det_score = _deterministic_check(actual_response, user_input)
     if det_score is not None:
         passed = det_score >= 0.7
         reason = "empty output" if det_score == 0.0 else "error detected" if det_score == 0.1 else "deterministic pass"
-        if det_score == 0.1 and raw_stdout and user_input:
+        if det_score == 0.1 and actual_response and user_input:
             from difflib import SequenceMatcher
-            if SequenceMatcher(None, raw_stdout.strip().lower(), user_input.strip().lower()).ratio() > 0.85:
+            if SequenceMatcher(None, actual_response.strip().lower(), user_input.strip().lower()).ratio() > 0.85:
                 reason = "echoed input"
         return {"passed": passed, "score": det_score, "reasoning": reason, "issue": reason if not passed else ""}
 
@@ -290,7 +429,7 @@ def evaluate_nerve_output(test_case: dict, nerve_output: dict) -> dict:
         f"Test context: {json.dumps(test_context) if test_context else 'none'}\n"
         f"Expected output: {expected_output}\n"
         f"Category: {test_case.get('category', '')}\n\n"
-        f"Nerve stdout: {nerve_output.get('raw_stdout', '')[:500]}\n"
+        f"Nerve response: {actual_response[:500]}\n"
         f"Nerve stderr: {nerve_output.get('raw_stderr', '')[:300]}\n"
         f"Exit code: {nerve_output.get('exit_code', -1)}\n"
         f"Timed out: {nerve_output.get('timed_out', False)}\n\n"
@@ -772,8 +911,18 @@ def _publish_progress(nerve_name: str, score: float, qualified: bool | None, too
         pass
 
 
-def qualify_nerve(name: str, description: str, trigger_task: str, mem_manager) -> dict:
+def qualify_nerve(name: str, description: str, trigger_task: str, mem_manager,
+                  user_id: str = "", max_iterations: int = 0) -> dict:
     """Main qualification loop: generate tests, run nerve, evaluate, improve if needed.
+
+    Args:
+        user_id: The user who triggered nerve fabrication. Qualification runs
+                 nerves as this user so they have access to the user's profile
+                 for personalization. A nerve is always fabricated in response
+                 to a real user's task — there is no anonymous fabrication.
+        max_iterations: Override the iteration limit. 0 = use community config.
+                        Awake (background) qualification should pass 3 for speed;
+                        dreamstate uses the full 7 from config.
 
     Returns {qualified, score, iterations, test_results}.
     Total timeout: 120 seconds. If exceeded, returns best score so far.
@@ -783,7 +932,7 @@ def qualify_nerve(name: str, description: str, trigger_task: str, mem_manager) -
     _nerve_role = nerve_meta.get("role", "tool")
     from arqitect.brain.adapters import get_tuning_config
     _tcfg = get_tuning_config(_nerve_role)
-    MAX_ITERATIONS = _tcfg["max_qualification_iterations"]
+    MAX_ITERATIONS = max_iterations if max_iterations > 0 else _tcfg["max_qualification_iterations"]
     THRESHOLD = _tcfg["qualification_threshold"]
     TOTAL_TIMEOUT = _tcfg["qualification_timeout"]
 
@@ -849,10 +998,19 @@ def qualify_nerve(name: str, description: str, trigger_task: str, mem_manager) -
             _publish_progress(name, 0.0, False, known_tools, iteration, MAX_ITERATIONS)
             return {"qualified": False, "score": 0.0, "iterations": iteration, "test_results": []}
 
+        # Sample test cases to keep qualification fast (full bank preserved for
+        # statistical confidence, but each iteration samples a manageable subset)
+        MAX_SAMPLE = 30
+        if len(tests) > MAX_SAMPLE:
+            import random
+            sampled_tests = random.sample(tests, MAX_SAMPLE)
+        else:
+            sampled_tests = tests
+
         # Run and evaluate each test (with per-iteration timeout check)
         iteration_results = []
         total_score = 0.0
-        for tc in tests:
+        for tc in sampled_tests:
             # Bail if we're running out of time
             if time.time() - _start_time > TOTAL_TIMEOUT:
                 print(f"[CRITIC] Timeout mid-iteration, stopping tests for '{name}'")
@@ -862,7 +1020,14 @@ def qualify_nerve(name: str, description: str, trigger_task: str, mem_manager) -
             if not user_input:
                 continue
 
-            output = run_nerve_with_input(name, user_input, mem_manager)
+            output = run_nerve_with_input(name, user_input, mem_manager, user_id=user_id)
+            # Debug: log what the nerve subprocess returned
+            _parsed = output.get("parsed")
+            _stdout_preview = (output.get("raw_stdout", "") or "")[:200]
+            _stderr_preview = (output.get("raw_stderr", "") or "")[:200]
+            print(f"[QUALIFY-DBG] nerve={name} input={user_input[:50]} exit={output.get('exit_code')} "
+                  f"parsed_keys={list(_parsed.keys()) if isinstance(_parsed, dict) else type(_parsed).__name__} "
+                  f"stdout={_stdout_preview!r} stderr={_stderr_preview!r}")
             evaluation = evaluate_nerve_output(tc, output)
             evaluation["input"] = user_input
             evaluation["category"] = tc.get("category", "")
@@ -987,7 +1152,7 @@ def qualify_nerve(name: str, description: str, trigger_task: str, mem_manager) -
                         ui = tc.get("input", "")
                         if not ui:
                             continue
-                        out = run_nerve_with_input(name, ui, mem_manager)
+                        out = run_nerve_with_input(name, ui, mem_manager, user_id=user_id)
                         ev = evaluate_nerve_output(tc, out)
                         retest_score += ev["score"]
                         retest_count += 1

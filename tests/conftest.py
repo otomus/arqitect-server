@@ -72,6 +72,9 @@ class FakeLLM:
             if "Data:" in prompt:
                 return prompt.split("Data:")[-1].strip()
             return prompt[:200]
+        # Plan message classification — default to "aside" (fall through)
+        if "active work plan" in system.lower() or "active plan goal" in prompt.lower():
+            return '{"action": "aside"}'
         # Sense arg translation — pass through as-is
         if "Sense:" in prompt and "extract" in system.lower():
             return '{}'
@@ -380,6 +383,7 @@ def setup_brain_patches(fake_llm, mem, test_redis, nerves_dir, sandbox_dir):
         patch("arqitect.brain.dispatch.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.helpers.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.intent.llm_generate", side_effect=fake_llm),
+        patch("arqitect.brain.plan_router.llm_generate", side_effect=fake_llm),
         patch("arqitect.matching._get_nerve_embedding", return_value=None),
         patch("arqitect.brain.synthesis.classify_nerve_role", return_value="tool"),
         patch(
@@ -489,6 +493,7 @@ def setup_brain_patches_no_perms(fake_llm, mem, test_redis, nerves_dir, sandbox_
         patch("arqitect.brain.dispatch.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.helpers.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.intent.llm_generate", side_effect=fake_llm),
+        patch("arqitect.brain.plan_router.llm_generate", side_effect=fake_llm),
         patch("arqitect.matching._get_nerve_embedding", return_value=None),
         patch("arqitect.brain.synthesis.classify_nerve_role", return_value="tool"),
         patch(

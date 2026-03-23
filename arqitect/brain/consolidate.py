@@ -1715,6 +1715,15 @@ class Dreamstate:
             mem.hot.clear_conversation()
         self._schedule()
 
+    def touch(self):
+        """Signal ongoing activity without interrupting dreamstate.
+
+        Resets the idle timer so dreamstate won't fire while the brain is
+        actively working on chains or background tasks.  Unlike wake(), this
+        does NOT set _interrupted or join the worker thread.
+        """
+        self._last_activity = time.time()
+        self._schedule()
 
     def _schedule(self):
         """Schedule next dreamstate entry after IDLE_THRESHOLD seconds of silence."""

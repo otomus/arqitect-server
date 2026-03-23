@@ -18,7 +18,7 @@ class TestClassifyIntent:
     """Contract tests for classify_intent.
 
     Contract:
-    - Returns {"type": IntentType.WORKFLOW, "category": ...} for workflow intents.
+    - Returns {"type": IntentType.PLAN, "category": ...} for plan intents.
     - Returns {"type": IntentType.DIRECT} for direct intents.
     - Falls back to DIRECT when LLM output is unparseable or has invalid type.
     - Always returns a dict with a "type" key.
@@ -38,15 +38,15 @@ class TestClassifyIntent:
             from arqitect.brain.intent import classify_intent
             return classify_intent(task)
 
-    def test_valid_workflow_json(self):
-        """LLM returns valid workflow intent with category."""
+    def test_valid_plan_json(self):
+        """LLM returns valid plan intent with category."""
         fake = FakeLLM([
-            ("Classify", '{"type": "workflow", "category": "development"}'),
+            ("Classify", '{"type": "plan", "category": "development"}'),
         ])
 
         result = self._call(fake)
 
-        assert result["type"] == IntentType.WORKFLOW
+        assert result["type"] == IntentType.PLAN
         assert result["category"] == "development"
 
     def test_valid_direct_json(self):
@@ -89,15 +89,15 @@ class TestClassifyIntent:
 
         assert result == {"type": IntentType.DIRECT}
 
-    def test_workflow_with_category_preserved(self):
+    def test_plan_with_category_preserved(self):
         """Category field is preserved in the returned dict."""
         fake = FakeLLM([
-            ("Classify", '{"type": "workflow", "category": "debugging"}'),
+            ("Classify", '{"type": "plan", "category": "debugging"}'),
         ])
 
         result = self._call(fake)
 
-        assert result["type"] == IntentType.WORKFLOW
+        assert result["type"] == IntentType.PLAN
         assert result["category"] == "debugging"
 
     def test_extract_json_returns_empty_dict(self):
@@ -131,7 +131,7 @@ class TestClassifyIntent:
         self._call(fake, task="hello there")
 
         call = fake.calls[0]
-        assert "classify" in call["system"].lower() or "workflow" in call["system"].lower()
+        assert "classify" in call["system"].lower() or "plan" in call["system"].lower()
 
     def test_llm_called_with_brain_model(self):
         """Verify llm_generate is called with the configured BRAIN_MODEL."""
@@ -146,26 +146,26 @@ class TestClassifyIntent:
 
         assert fake.calls[0]["model"] == "test-model"
 
-    def test_workflow_without_category(self):
-        """LLM returns workflow without optional category field."""
+    def test_plan_without_category(self):
+        """LLM returns plan without optional category field."""
         fake = FakeLLM([
-            ("Classify", '{"type": "workflow"}'),
+            ("Classify", '{"type": "plan"}'),
         ])
 
         result = self._call(fake)
 
-        assert result["type"] == IntentType.WORKFLOW
+        assert result["type"] == IntentType.PLAN
         assert "category" not in result
 
     def test_json_embedded_in_prose(self):
         """LLM wraps JSON in surrounding text — extract_json still finds it."""
         fake = FakeLLM([
-            ("Classify", 'Sure, here is my answer:\n{"type": "workflow", "category": "setup"}\nDone.'),
+            ("Classify", 'Sure, here is my answer:\n{"type": "plan", "category": "setup"}\nDone.'),
         ])
 
         result = self._call(fake)
 
-        assert result["type"] == IntentType.WORKFLOW
+        assert result["type"] == IntentType.PLAN
         assert result["category"] == "setup"
 
 
@@ -189,7 +189,7 @@ class TestClassifyIntentPropertyBased:
 
         assert isinstance(result, dict)
         assert "type" in result
-        assert result["type"] in (IntentType.WORKFLOW, IntentType.DIRECT)
+        assert result["type"] in (IntentType.PLAN, IntentType.DIRECT)
 
     @given(task=st.text(min_size=1, max_size=500))
     @settings(max_examples=50, deadline=5000)
@@ -211,9 +211,9 @@ class TestClassifyIntentPropertyBased:
     ]))
     @settings(max_examples=20, deadline=5000)
     def test_all_known_categories_pass_through(self, category: str):
-        """All documented workflow categories are preserved in the result."""
+        """All documented plan categories are preserved in the result."""
         import json
-        response = json.dumps({"type": "workflow", "category": category})
+        response = json.dumps({"type": "plan", "category": category})
         fake = FakeLLM([
             ("Classify", response, True),
         ])
@@ -222,5 +222,5 @@ class TestClassifyIntentPropertyBased:
             from arqitect.brain.intent import classify_intent
             result = classify_intent("do something")
 
-        assert result["type"] == IntentType.WORKFLOW
+        assert result["type"] == IntentType.PLAN
         assert result["category"] == category

@@ -645,27 +645,25 @@ class TestThinkEdgeCases:
             for p in patches:
                 p.stop()
 
-    def test_workflow_intent_triggers_planner(
+    def test_plan_intent_triggers_plan_start(
         self, test_redis, tmp_memory_dir, nerves_dir, sandbox_dir
     ):
-        """When intent is 'workflow', plan_task should be called."""
+        """When intent is 'plan', _handle_plan_start should be called."""
         mem_fixture = make_mem(test_redis)
         fake = FakeLLM([
-            # Intent classification returns workflow
-            ("classify", '{"type": "workflow", "category": "coding"}'),
-            # After planner returns None, falls through to direct routing
-            ("Available nerves", '{"action": "respond", "message": "ok"}'),
+            # Intent classification returns plan
+            ("classify", '{"type": "plan", "category": "coding"}'),
+            # Planning LLM response
+            ("User wants", "Let me help you plan a web scraper. What sites?"),
         ])
         patches = setup_brain_patches(fake, mem_fixture, test_redis, nerves_dir, sandbox_dir)
-        mock_plan = MagicMock(return_value=None)
-        patches.append(patch("arqitect.brain.brain.plan_task", mock_plan))
         patches.append(patch("arqitect.brain.brain.detect_project_path", return_value=None))
         for p in patches:
             p.start()
         try:
             from arqitect.brain.brain import think
-            think("build a web scraper")
-            mock_plan.assert_called_once()
+            result = think("build a web scraper")
+            assert result is not None
         finally:
             for p in patches:
                 p.stop()

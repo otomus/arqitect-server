@@ -74,11 +74,13 @@ class Channel(StrEnum):
     SENSE_SIGHT_FRAME = "sense:sight:frame"
     SENSE_STT_RESULT = "sense:stt:result"
     TOOL_LIFECYCLE = "tool:lifecycle"
+    PLAN_UPDATE = "plan:update"
+    TASK_REGISTRY = "task:registry"
 
 
 class IntentType(StrEnum):
     """User intent classification."""
-    WORKFLOW = "workflow"
+    PLAN = "plan"
     DIRECT = "direct"
 
 
@@ -97,3 +99,4 @@ class RedisKey(StrEnum):
     CONVERSATION = "synapse:conversation"
     SENSE_CALIBRATION = "synapse:sense_calibration"
     NERVE_STATUS = "synapse:nerve_status"
+    PLAN = "synapse:plan"

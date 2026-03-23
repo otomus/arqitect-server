@@ -106,7 +106,7 @@
           <select v-model="selectedFile" class="mon-select" @change="loadTrace">
             <option value="">Select trace...</option>
             <option v-for="f in files" :key="f.name" :value="f.name">
-              {{ f.name }} ({{ f.size }})
+              {{ formatTraceDate(f.name) }} ({{ f.size }})
             </option>
           </select>
         </div>
@@ -464,6 +464,12 @@ const filteredFlatTree = computed(() => {
   const dir = sortAsc.value ? 1 : -1
   return [...filtered].sort((a, b) => (sortKey(a) - sortKey(b)) * dir)
 })
+
+function formatTraceDate(filename) {
+  const m = filename.match(/trace_(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/)
+  if (!m) return filename
+  return `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}:${m[6]}`
+}
 
 function formatNs(ns) {
   const d = new Date(ns / 1e6)

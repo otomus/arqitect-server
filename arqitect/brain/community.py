@@ -1,6 +1,6 @@
 """Community integration — sync nerves, tools, and adapters from arqitect-community.
 
-Fetches the manifest from https://github.com/otomus/sentient-community and caches
+Fetches the manifest from https://github.com/otomus/arqitect-community and caches
 nerve bundles, tool implementations, and adapter metadata locally.
 
 Called during brain bootstrap to seed the server with community content.
@@ -14,7 +14,7 @@ import urllib.error
 
 from arqitect.config.loader import get_config, get_project_root, get_mcp_tools_dir
 
-COMMUNITY_REPO = "otomus/sentient-community"
+COMMUNITY_REPO = "otomus/arqitect-community"
 COMMUNITY_RAW_URL = f"https://raw.githubusercontent.com/{COMMUNITY_REPO}/main"
 
 # Tags that lock a nerve to a specific environment

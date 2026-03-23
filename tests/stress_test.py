@@ -428,12 +428,46 @@ def run_case(case, r_pub, r_sub, timeout):
     }
 
 
-def _wait_for_qualification(r_pub, max_wait=15):
-    """Wait until all nerves have been qualified (at least 1 iteration with qualified=1).
+def _get_registered_nerves():
+    """Return the set of nerve names currently in the registry.
 
-    Polls the knowledge DB every 5 seconds. Gives up after max_wait seconds.
-    This ensures nerves finish their first qualification round before the next task.
+    Used to snapshot which nerves exist before a case runs, so we can
+    detect newly synthesized nerves afterward.
     """
+    import sqlite3
+    db_path = os.path.join(os.path.dirname(__file__), "..", "knowledge.db")
+    if not os.path.exists(db_path):
+        return set()
+
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT name FROM nerve_registry WHERE is_sense = 0")
+        names = {row[0] for row in c.fetchall()}
+        conn.close()
+        return names
+    except Exception:
+        return set()
+
+
+def _wait_for_qualification(r_pub, known_nerves=None, max_wait=5):
+    """Wait for newly synthesized nerves to finish their first qualification round.
+
+    Only waits for nerves that appeared after the case started (the delta
+    between the current registry and ``known_nerves``).  Community-seeded
+    nerves that were already in the queue before the case are skipped —
+    they don't need to block task processing.
+
+    Args:
+        r_pub: Redis client (unused but kept for call-site compatibility).
+        known_nerves: Set of nerve names that existed before the case ran.
+            When ``None``, the function returns immediately (no-op).
+        max_wait: Seconds before giving up. Defaults to 5 — short because
+            the brain invokes unqualified nerves anyway.
+    """
+    if known_nerves is None:
+        return
+
     import sqlite3
     db_path = os.path.join(os.path.dirname(__file__), "..", "knowledge.db")
     if not os.path.exists(db_path):
@@ -445,7 +479,7 @@ def _wait_for_qualification(r_pub, max_wait=15):
             conn = sqlite3.connect(db_path)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
-            # Find nerves that exist in registry but haven't qualified yet
+            # Only check nerves that were NOT in the registry before this case
             c.execute("""
                 SELECT nr.name
                 FROM nerve_registry nr
@@ -454,18 +488,21 @@ def _wait_for_qualification(r_pub, max_wait=15):
                 WHERE nr.is_sense = 0
                   AND (qr.qualified IS NULL OR qr.qualified = 0)
             """)
-            pending = [r["name"] for r in c.fetchall()]
+            all_pending = [r["name"] for r in c.fetchall()]
             conn.close()
 
+            # Filter to only newly synthesized nerves
+            pending = [n for n in all_pending if n not in known_nerves]
+
             if not pending:
-                return  # All nerves are qualified
+                return
 
             elapsed = int(time.time() - start)
-            print(f"  [WAIT] {len(pending)} nerve(s) still qualifying: {', '.join(pending[:3])}... ({elapsed}s)", flush=True)
-            time.sleep(5)
+            print(f"  [WAIT] {len(pending)} new nerve(s) qualifying: {', '.join(pending[:3])}... ({elapsed}s)", flush=True)
+            time.sleep(1)
         except Exception as e:
             print(f"  [WAIT] DB check error: {e}", flush=True)
-            time.sleep(5)
+            time.sleep(1)
 
     print(f"  [WAIT] Timed out after {max_wait}s — proceeding anyway", flush=True)
 
@@ -528,6 +565,7 @@ def main():
     stuck_count = 0
 
     for case in cases:
+        nerves_before = _get_registered_nerves()
         result = run_case(case, r_pub, r_sub, args.timeout)
         all_results.append(result)
         if result["overall"] == "ok":
@@ -535,8 +573,8 @@ def main():
         else:
             stuck_count += 1
 
-        # Wait for any new nerves to finish all 3 qualification iterations
-        _wait_for_qualification(r_pub)
+        # Wait only for nerves synthesized during this case, not the entire backlog
+        _wait_for_qualification(r_pub, known_nerves=nerves_before)
 
         # Clear conversation context between cases to prevent bleed
         r_pub.delete("synapse:conversation")
