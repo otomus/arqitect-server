@@ -1,6 +1,6 @@
 """Interactive setup wizard for arqitect.yaml configuration.
 
-Walks the user through 10 steps to configure their Arqitect project.
+Walks the user through 11 steps to configure their Arqitect project.
 All collected information is saved to arqitect.yaml.
 """
 
@@ -199,6 +199,25 @@ def _prompt_gguf_file(initial_dir: str = "") -> str:
         return path
     print("  No file selected.")
     return _prompt_text("Model file path")
+
+
+def _prompt_directory(label: str, default: str = "") -> str:
+    """Open a native directory picker, falling back to text input.
+
+    Args:
+        label: Description shown to the user.
+        default: Default path if the picker is cancelled or unavailable.
+
+    Returns:
+        Selected directory path.
+    """
+    print("  Opening folder picker...")
+    path = _open_dir_dialog(title=f"Select {label}", initial_dir=default)
+    if path:
+        print(f"  Selected: {path}")
+        return path
+    print("  No folder selected.")
+    return _prompt_text(label, default)
 
 
 # ── Data-driven provider config helpers ──────────────────────────────────
@@ -468,7 +487,7 @@ def _step_hearing(config: dict) -> None:
             "Yes — Cloud STT (Deepgram/other)",
             "No — Text only",
         ],
-        default=3,
+        default=1,
     )
     hearing = Sense.HEARING
     config.setdefault("senses", {}).setdefault(hearing, {})
@@ -516,7 +535,7 @@ def _step_personality(config: dict) -> None:
         "Technical expert",
         "Custom...",
     ]
-    choice = _prompt_choice("Personality preset:", presets, default=1)
+    choice = _prompt_choice("Personality preset:", presets, default=2)
 
     preset_map = {1: "professional", 2: "friendly", 3: "technical"}
     if choice in preset_map:
@@ -537,7 +556,7 @@ def _step_personality(config: dict) -> None:
     formality_choice = _prompt_choice(
         "Communication formality:",
         ["Formal", "Casual", "Adaptive"],
-        default=2,
+        default=3,
     )
     style["formality"] = ["formal", "casual", "adaptive"][formality_choice - 1]
 
@@ -593,7 +612,7 @@ def _step_touch(config: dict) -> None:
         touch.setdefault("filesystem", {})["access"] = fs_map[fs_choice]
 
         if fs_map[fs_choice] == "sandboxed":
-            touch["filesystem"]["root"] = _prompt_text("Sandbox directory", "./sandbox")
+            touch["filesystem"]["root"] = _prompt_directory("Sandbox directory", "./sandbox")
 
         exec_choice = _prompt_choice(
             "Allow command execution?",
@@ -707,7 +726,7 @@ def _step_admin(config: dict) -> None:
         print("  JWT secret auto-generated.")
 
     # SMTP (optional)
-    if _prompt_yes_no("Configure SMTP for email notifications?", default=False):
+    if _prompt_yes_no("Configure SMTP for email notifications?", default=True):
         smtp = config.setdefault("secrets", {}).setdefault("smtp", {})
         smtp["host"] = _prompt_text("SMTP host", "smtp.gmail.com")
         smtp["port"] = int(_prompt_text("SMTP port", "587"))
@@ -715,6 +734,38 @@ def _step_admin(config: dict) -> None:
         smtp["user"] = _prompt_text("SMTP user (email)", admin_email)
         smtp["password"] = _prompt_text("SMTP password (or app password)")
         smtp["from"] = _prompt_text("From address", smtp.get("user", ""))
+
+
+def _step_github(config: dict) -> None:
+    """Step 11: GitHub App — community contributions and user repo access."""
+    print("\n━━━ Step 11: GitHub Integration ━━━")
+    print("  A GitHub App gives your server its own identity for creating PRs.")
+    print("  It can contribute nerves to the community repo and work on your projects.\n")
+
+    if not _prompt_yes_no("Set up GitHub App?", default=True):
+        config.setdefault("github", {})["enabled"] = False
+        return
+
+    config.setdefault("github", {})["enabled"] = True
+
+    # Check if already configured
+    existing_app_id = config.get("secrets", {}).get("github", {}).get("app_id", "")
+    if existing_app_id:
+        print(f"  GitHub App already configured (ID: {existing_app_id})")
+        if not _prompt_yes_no("Reconfigure?", default=False):
+            return
+
+    # Build app name from server personality name
+    server_name = config.get("name", "Arqitect")
+    app_name = f"arqitect-{server_name.lower().replace(' ', '-')}"
+    app_name = _prompt_text("GitHub App name", app_name)
+
+    try:
+        from arqitect.github_app import setup_github_app
+        setup_github_app(app_name)
+    except Exception as e:
+        print(f"  GitHub App setup failed: {e}")
+        print("  You can configure it later by running: arqitect setup-github")
 
 
 # ── Config writer ────────────────────────────────────────────────────────
@@ -725,7 +776,7 @@ def _write_config(config: dict, path: Path) -> None:
     key_order = [
         "name", "environment", "inference", "personality", "senses",
         "connectors", "embeddings", "storage", "ports", "ssl",
-        "admin", "secrets",
+        "admin", "github", "secrets",
     ]
     ordered: dict[str, Any] = {}
     for key in key_order:
@@ -759,6 +810,7 @@ STEPS = [
     _step_embeddings,
     _step_storage,
     _step_admin,
+    _step_github,
 ]
 
 

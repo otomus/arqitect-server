@@ -14,6 +14,35 @@ from arqitect.types import NerveRole
 _DB_PATH = os.path.join(get_memory_dir(), "knowledge.db")
 
 
+def _unwrap_system_prompt(system_prompt: str) -> str:
+    """Unwrap a JSON-wrapped system_prompt to plain text.
+
+    LLM responses sometimes produce JSON objects instead of a plain prompt
+    string. This extracts the text content so we always store plain text.
+
+    Handled patterns:
+    - ``{"system_prompt": "actual prompt"}``
+    - ``{"name": "...", "description": "actual prompt"}``
+    - ``{"goal": "actual prompt", ...}``
+    """
+    if not isinstance(system_prompt, str) or not system_prompt.strip().startswith("{"):
+        return system_prompt
+    # Only attempt unwrap when the entire string is a JSON object (no trailing rules)
+    try:
+        obj = json.loads(system_prompt.strip())
+    except (json.JSONDecodeError, TypeError):
+        return system_prompt
+    if not isinstance(obj, dict):
+        return system_prompt
+    if "system_prompt" in obj and isinstance(obj["system_prompt"], str):
+        return obj["system_prompt"]
+    if "goal" in obj and isinstance(obj["goal"], str):
+        return obj["goal"]
+    if "description" in obj and isinstance(obj["description"], str):
+        return obj["description"]
+    return system_prompt
+
+
 def _ensure_db(conn: sqlite3.Connection):
     conn.executescript("""
         CREATE TABLE IF NOT EXISTS facts (
@@ -150,6 +179,11 @@ def _ensure_db(conn: sqlite3.Connection):
         conn.execute("SELECT origin FROM nerve_registry LIMIT 1")
     except sqlite3.OperationalError:
         conn.execute("ALTER TABLE nerve_registry ADD COLUMN origin TEXT DEFAULT 'local'")
+    # Migrate: add trigger_task column for PR context
+    try:
+        conn.execute("SELECT trigger_task FROM nerve_registry LIMIT 1")
+    except sqlite3.OperationalError:
+        conn.execute("ALTER TABLE nerve_registry ADD COLUMN trigger_task TEXT DEFAULT ''")
     conn.commit()
 
 
@@ -248,7 +282,7 @@ class ColdMemory:
 
     def register_nerve_rich(self, name: str, description: str, system_prompt: str = "",
                             examples_json: str = "[]", role: str = NerveRole.TOOL,
-                            origin: str = "local", **_kwargs):
+                            origin: str = "local", trigger_task: str = "", **_kwargs):
         """Register or update a nerve with rich metadata.
 
         Routes to the appropriate persistence strategy based on origin.
@@ -260,11 +294,13 @@ class ColdMemory:
             examples_json: JSON array of few-shot examples (ignored for community nerves).
             role: Nerve role classification (tool/creative/code).
             origin: Provenance — 'local' or 'community'.
+            trigger_task: The user task that triggered nerve synthesis.
         """
         if origin == "community":
             self._register_community_nerve(name, description, role)
         else:
-            self._register_local_nerve(name, description, system_prompt, examples_json, role)
+            self._register_local_nerve(name, description, system_prompt, examples_json,
+                                       role, trigger_task)
 
     def _register_community_nerve(self, name: str, description: str, role: str):
         """Persist a community nerve — identity and role only, no prompts.
@@ -283,16 +319,20 @@ class ColdMemory:
             self.conn.commit()
 
     def _register_local_nerve(self, name: str, description: str,
-                              system_prompt: str, examples_json: str, role: str):
+                              system_prompt: str, examples_json: str, role: str,
+                              trigger_task: str = ""):
         """Persist a local nerve with full metadata including prompts."""
+        # Unwrap double-wrapped JSON: {"system_prompt": "..."} → plain string
+        system_prompt = _unwrap_system_prompt(system_prompt)
         with self._lock:
             self.conn.execute(
-                "INSERT INTO nerve_registry (name, description, system_prompt, examples, role, origin) "
-                "VALUES (?, ?, ?, ?, ?, 'local') "
+                "INSERT INTO nerve_registry "
+                "(name, description, system_prompt, examples, role, origin, trigger_task) "
+                "VALUES (?, ?, ?, ?, ?, 'local', ?) "
                 "ON CONFLICT(name) DO UPDATE SET description=excluded.description, "
                 "system_prompt=excluded.system_prompt, examples=excluded.examples, "
-                "role=excluded.role, origin='local'",
-                (name, description, system_prompt, examples_json, role),
+                "role=excluded.role, origin='local', trigger_task=excluded.trigger_task",
+                (name, description, system_prompt, examples_json, role, trigger_task),
             )
             self.conn.commit()
 
@@ -517,7 +557,8 @@ class ColdMemory:
         d = dict(row)
         d["qualified"] = bool(d["qualified"])
         try:
-            d["details"] = json.loads(d["details"])
+            parsed = json.loads(d["details"])
+            d["details"] = parsed if isinstance(parsed, dict) else {}
         except (json.JSONDecodeError, TypeError):
             d["details"] = {}
         return d

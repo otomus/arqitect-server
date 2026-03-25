@@ -14,6 +14,9 @@ from arqitect.memory.cold import ColdMemory
 # Counter for generating unique names in hypothesis tests that share a fixture
 _counter = itertools.count()
 
+# Apply timeout to every test in this module instead of per-class decorators
+pytestmark = pytest.mark.timeout(10)
+
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -43,7 +46,6 @@ safe_name = st.text(
 # ── Facts ────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestFacts:
     def test_set_and_get_fact(self, cold):
         cold.set_fact("env", "timezone", "UTC")
@@ -101,7 +103,6 @@ class TestFacts:
 # ── Nerve Registry ───────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestNerveRegistry:
     def test_register_and_get_nerve(self, cold):
         cold.register_nerve("weather", "fetch weather data")
@@ -243,7 +244,6 @@ class TestNerveRegistry:
 # ── Senses ───────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestSenses:
     def test_register_sense_and_check(self, cold):
         cold.register_sense("sight", "visual perception")
@@ -273,7 +273,6 @@ class TestSenses:
 # ── Test Bank ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestTestBank:
     def test_set_and_get_test_bank(self, cold):
         tests = [{"input": "2+2", "expected": "4"}]
@@ -291,7 +290,6 @@ class TestTestBank:
 # ── Tool Stats ───────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestToolStats:
     def test_record_tool_call(self, cold):
         cold.record_tool_call("scrape", success=True)
@@ -330,7 +328,6 @@ class TestToolStats:
 # ── Nerve Tools ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestNerveTools:
     def test_add_and_get_nerve_tools(self, cold):
         cold.add_nerve_tool("weather", "http_get")
@@ -365,7 +362,6 @@ class TestNerveTools:
 # ── Qualifications ───────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestQualifications:
     def test_record_and_get_qualification(self, cold):
         cold.record_qualification("nerve", "calc", True, 0.95, 2, 10, 9, '{"notes":"good"}')
@@ -429,7 +425,6 @@ class TestQualifications:
 # ── Personality ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestPersonality:
     def test_append_and_get_signals(self, cold):
         cold.append_personality_signal({"tone": "friendly"})
@@ -503,7 +498,6 @@ class TestPersonality:
 # ── Users ────────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestUsers:
     def test_create_user_with_email_and_resolve(self, cold):
         user_id = cold.create_user_with_email("alice@example.com", "slack", "S123")
@@ -593,7 +587,6 @@ class TestUsers:
 # ── Verification ─────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestVerification:
     def test_store_and_verify_code_success(self, cold):
         cold.store_verification_code("slack", "S1", "a@b.com", "123456")
@@ -645,7 +638,6 @@ class TestVerification:
 # ── Bulk Data ────────────────────────────────────────────────────────────────
 
 
-@pytest.mark.timeout(10)
 class TestBulkData:
     def test_get_all_nerve_data(self, cold):
         cold.register_nerve_rich("calc", "calculator", role="tool")
@@ -707,7 +699,7 @@ class TestBulkData:
 # ── Hypothesis: Nerve Invocation Counters ────────────────────────────────────
 
 
-@pytest.mark.timeout(30)
+@pytest.mark.timeout(30)  # hypothesis needs more time than the module-level 10s
 class TestNerveInvocationProperty:
     @given(
         successes=st.integers(min_value=0, max_value=30),
@@ -728,3 +720,140 @@ class TestNerveInvocationProperty:
         assert info["total_invocations"] == successes + failures
         assert info["successes"] == successes
         assert info["failures"] == failures
+
+
+# ── Edge Cases ──────────────────────────────────────────────────────────────
+
+# Strings designed to stress SQL text handling, unicode support, and boundary limits.
+_LONG_STRING = "x" * 5500
+_SQL_INJECTION = "'; DROP TABLE facts; --"
+_BACKSLASH_HEAVY = r"back\\slash\\party\\"
+_EMOJI_NAME = "weather_\U0001f327\ufe0f_nerve"
+_CJK_NAME = "\u5929\u6c14\u9884\u62a5"
+_ACCENTED = "\u00e9\u00e0\u00fc\u00f1\u00f6\u00e7\u00df"
+_WHITESPACE_ONLY = "   "
+_NEWLINES_TABS = "line1\nline2\ttab"
+
+_EDGE_CASE_NAMES = [
+    pytest.param("", id="empty_string"),
+    pytest.param(_WHITESPACE_ONLY, id="whitespace_only"),
+    pytest.param(_EMOJI_NAME, id="emoji"),
+    pytest.param(_CJK_NAME, id="cjk_chars"),
+    pytest.param(_ACCENTED, id="accented_chars"),
+    pytest.param(_SQL_INJECTION, id="sql_injection_attempt"),
+    pytest.param(_BACKSLASH_HEAVY, id="backslashes"),
+    pytest.param(_NEWLINES_TABS, id="newlines_and_tabs"),
+]
+
+_EDGE_CASE_VALUES = _EDGE_CASE_NAMES + [
+    pytest.param(_LONG_STRING, id="very_long_string"),
+]
+
+
+class TestEdgeCaseFacts:
+    """Edge cases for the facts subsystem — names and values that could break SQL or encoding."""
+
+    @pytest.mark.parametrize("key", _EDGE_CASE_NAMES)
+    def test_fact_roundtrip_with_edge_case_keys(self, cold, key):
+        """Facts must survive a set/get roundtrip for unusual key strings."""
+        cold.set_fact("edge", key, "value")
+        assert cold.get_fact("edge", key) == "value"
+
+    @pytest.mark.parametrize("value", _EDGE_CASE_VALUES)
+    def test_fact_roundtrip_with_edge_case_values(self, cold, value):
+        """Facts must survive a set/get roundtrip for unusual value strings."""
+        cold.set_fact("edge", "k", value)
+        assert cold.get_fact("edge", "k") == value
+
+    @pytest.mark.parametrize("category", _EDGE_CASE_NAMES)
+    def test_fact_roundtrip_with_edge_case_categories(self, cold, category):
+        """Facts must survive a set/get roundtrip for unusual category strings."""
+        cold.set_fact(category, "k", "v")
+        assert cold.get_fact(category, "k") == "v"
+
+
+class TestEdgeCaseNerves:
+    """Edge cases for nerve registration — names, descriptions, and upsert behavior."""
+
+    @pytest.mark.parametrize("name", _EDGE_CASE_NAMES)
+    def test_register_nerve_with_edge_case_names(self, cold, name):
+        """Nerve names including empty, unicode, and SQL-special chars must persist."""
+        cold.register_nerve(name, "desc")
+        info = cold.get_nerve_info(name)
+        assert info is not None
+        assert info["name"] == name
+
+    @pytest.mark.parametrize("desc", _EDGE_CASE_VALUES)
+    def test_register_nerve_with_edge_case_descriptions(self, cold, desc):
+        """Nerve descriptions must handle long strings, emoji, and special chars."""
+        cold.register_nerve("edge_nerve", desc)
+        info = cold.get_nerve_info("edge_nerve")
+        assert info["description"] == desc
+
+    def test_register_nerve_upsert_does_not_duplicate(self, cold):
+        """Re-registering the same nerve name must update, not insert a second row."""
+        cold.register_nerve("dup", "first")
+        cold.register_nerve("dup", "second")
+        listing = cold.list_nerves()
+        assert listing["dup"] == "second"
+        # Verify exactly one row exists
+        row = cold.conn.execute(
+            "SELECT count(*) as cnt FROM nerve_registry WHERE name='dup'"
+        ).fetchone()
+        assert row["cnt"] == 1
+
+    @pytest.mark.parametrize("prompt", [
+        pytest.param("", id="empty_prompt"),
+        pytest.param(_LONG_STRING, id="very_long_prompt"),
+        pytest.param(_SQL_INJECTION, id="sql_in_prompt"),
+        pytest.param(_EMOJI_NAME, id="emoji_in_prompt"),
+    ])
+    def test_register_nerve_rich_with_edge_case_prompts(self, cold, prompt):
+        """System prompts with unusual content must persist through register_nerve_rich."""
+        cold.register_nerve_rich("prompt_edge", "desc", system_prompt=prompt, role="tool")
+        meta = cold.get_nerve_metadata("prompt_edge")
+        assert meta["system_prompt"] == prompt
+
+
+class TestEdgeCaseUsers:
+    """Edge cases for user creation and connector linking."""
+
+    @pytest.mark.parametrize("email", [
+        pytest.param("  UPPER@CASE.COM  ", id="needs_normalization"),
+        pytest.param("user+tag@example.com", id="plus_addressing"),
+        pytest.param("\u00fc\u00f1\u00ee\u00e7\u00f6d\u00e9@example.com", id="unicode_local_part"),
+    ])
+    def test_create_user_with_unusual_emails(self, cold, email):
+        """User creation must handle email normalization edge cases."""
+        uid = cold.create_user_with_email(email, "slack", f"S_{email.strip()}")
+        assert uid != ""
+        user = cold.get_user(uid)
+        assert user is not None
+        assert user["email"] == email.lower().strip()
+
+    def test_link_same_connector_twice_updates(self, cold):
+        """Linking the same connector+id to a new user must update, not error."""
+        uid1 = cold.create_user_with_email("a@b.com", "slack", "S1")
+        uid2 = cold.create_user_with_email("c@d.com", "slack", "S2")
+        # Re-link S1 to uid2
+        cold.link_user_connector(uid2, "slack", "S1")
+        assert cold.resolve_user("slack", "S1") == uid2
+
+
+class TestEdgeCaseQualifications:
+    """Edge cases for qualification recording."""
+
+    @pytest.mark.parametrize("details_json", [
+        pytest.param("", id="empty_string"),
+        pytest.param("null", id="json_null"),
+        pytest.param("{}", id="empty_object"),
+        pytest.param('{"k": "' + _SQL_INJECTION + '"}', id="sql_in_details"),
+        pytest.param("not valid json at all {{", id="malformed_json"),
+    ])
+    def test_qualification_details_parsing(self, cold, details_json):
+        """Qualification details must not crash on any JSON-like string."""
+        cold.record_qualification("nerve", "q_edge", True, 1.0, 1, 5, 5, details_json)
+        q = cold.get_qualification("nerve", "q_edge")
+        assert q is not None
+        # details should be a dict regardless of input validity
+        assert isinstance(q["details"], dict)

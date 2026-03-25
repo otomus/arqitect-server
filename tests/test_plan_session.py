@@ -1,7 +1,7 @@
 """Tests for arqitect.brain.plan_session — PlanSession lifecycle.
 
 Covers:
-- Create → add_requirement → propose → approve → to_recipe lifecycle
+- Create → add_requirement → propose → approve → to_chain_decision lifecycle
 - Status transition validation (reject invalid transitions)
 - Serialization round-trip (to_dict / from_dict)
 - Redis persistence (save / get_active / delete)
@@ -20,7 +20,7 @@ from tests.conftest import FakeLLM
 
 @pytest.mark.timeout(10)
 class TestPlanSessionLifecycle:
-    """Full lifecycle: create -> gather -> propose -> approve -> to_recipe."""
+    """Full lifecycle: create -> gather -> propose -> approve -> to_chain_decision."""
 
     def test_create_initializes_gathering(self):
         """New plan starts in 'gathering' status with empty collections."""
@@ -94,36 +94,36 @@ class TestPlanSessionLifecycle:
         with pytest.raises(ValueError, match="Cannot approve"):
             plan.approve()
 
-    def test_to_recipe_produces_valid_recipe(self):
-        """to_recipe() converts approved plan to a recipe dict."""
+    def test_to_chain_decision_produces_valid_decision(self):
+        """to_chain_decision() converts approved plan to a chain_nerves dict."""
         plan = PlanSession.create("user-1", "build an API", "development")
         plan.add_requirement("Use FastAPI")
         steps = [{"step": 1, "description": "Set up project"}]
         plan.propose(steps)
         plan.approve()
 
-        recipe = plan.to_recipe()
+        from arqitect.types import Action
+        decision = plan.to_chain_decision()
 
-        assert recipe["goal"] == "build an API"
-        assert recipe["steps"] == steps
-        assert recipe["category"] == "development"
-        assert "Use FastAPI" in recipe["context"]["requirements"]
+        assert decision["goal"] == "build an API"
+        assert decision["steps"] == steps
+        assert decision["action"] == Action.CHAIN_NERVES
 
-    def test_to_recipe_rejects_non_approved(self):
-        """Cannot convert to recipe unless approved."""
+    def test_to_chain_decision_rejects_non_approved(self):
+        """Cannot convert to chain unless approved."""
         plan = PlanSession.create("user-1", "build an API", "development")
 
         with pytest.raises(ValueError, match="Cannot convert"):
-            plan.to_recipe()
+            plan.to_chain_decision()
 
-    def test_to_recipe_rejects_no_steps(self):
-        """Cannot convert to recipe if steps are None (should not happen)."""
+    def test_to_chain_decision_rejects_no_steps(self):
+        """Cannot convert to chain if steps are None."""
         plan = PlanSession.create("user-1", "build an API", "development")
         # Force status without going through propose
         plan.status = "approved"
 
         with pytest.raises(ValueError, match="no steps"):
-            plan.to_recipe()
+            plan.to_chain_decision()
 
     def test_complete_marks_done(self):
         """complete(success=True) marks status as 'done'."""

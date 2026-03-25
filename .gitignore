@@ -10,6 +10,7 @@ models/
 auth_store/
 .env
 *.conf
+.secrets/
 
 # Config contains secrets — use arqitect.yaml.example as template
 arqitect.yaml

@@ -613,11 +613,12 @@ class TestStepTouch:
         fresh_config["environment"] = "server"
         answers = _InputSequence([
             "2",               # sandboxed
-            "./data",          # sandbox dir
+            "./data",          # sandbox dir (fallback from cancelled picker)
             "2",               # allowlisted commands
             "python,git",
         ])
-        with patch("builtins.input", answers):
+        with patch("builtins.input", answers), \
+             patch("arqitect.cli.wizard._open_dir_dialog", return_value=""):
             _step_touch(fresh_config)
 
         assert fresh_config["senses"]["touch"] == IsPartialDict(
@@ -923,9 +924,10 @@ class TestRunWizard:
         # Brain model step completed before interrupt
         assert config["inference"]["provider"] == "gguf"
 
+    @patch("arqitect.cli.wizard._open_dir_dialog", return_value="")
     @patch("arqitect.cli.wizard._open_file_dialog", return_value="/models/brain.gguf")
     @patch("arqitect.cli.wizard.get_project_root")
-    def test_full_run_anthropic(self, mock_root: MagicMock, _mock_dialog: MagicMock, tmp_path: Path) -> None:
+    def test_full_run_anthropic(self, mock_root: MagicMock, _mock_dialog: MagicMock, _mock_dir: MagicMock, tmp_path: Path) -> None:
         mock_root.return_value = tmp_path
         answers = _InputSequence([
             # environment
@@ -950,7 +952,11 @@ class TestRunWizard:
             # storage
             "1", "1", "", "", "", "",
             # admin
-            "Admin", "a@b.com", "n",
+            "Admin", "a@b.com", "y",
+            # smtp
+            "", "", "", "", "",
+            # github
+            "n",
         ])
         with patch("builtins.input", answers):
             run_wizard()
@@ -964,9 +970,10 @@ class TestRunWizard:
             senses=IsPartialDict(sight=IsPartialDict(provider="anthropic")),
         )
 
+    @patch("arqitect.cli.wizard._open_dir_dialog", return_value="")
     @patch("arqitect.cli.wizard._open_file_dialog", return_value="/models/brain.gguf")
     @patch("arqitect.cli.wizard.get_project_root")
-    def test_full_run(self, mock_root: MagicMock, _mock_dialog: MagicMock, tmp_path: Path) -> None:
+    def test_full_run(self, mock_root: MagicMock, _mock_dialog: MagicMock, _mock_dir: MagicMock, tmp_path: Path) -> None:
         mock_root.return_value = tmp_path
         answers = _InputSequence([
             # environment
@@ -990,7 +997,11 @@ class TestRunWizard:
             # storage
             "1", "1", "", "", "", "",
             # admin
-            "Tester", "t@t.com", "n",
+            "Tester", "t@t.com", "y",
+            # smtp
+            "", "", "", "", "",
+            # github
+            "n",
         ])
         with patch("builtins.input", answers):
             run_wizard()

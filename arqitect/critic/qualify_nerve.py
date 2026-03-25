@@ -17,11 +17,14 @@ import redis
 
 logger = logging.getLogger(__name__)
 
-from arqitect.config.loader import get_nerves_dir, get_sandbox_dir, get_mcp_tools_dir, get_redis_host_port
+from arqitect.config.loader import get_nerves_dir, get_senses_dir, get_sandbox_dir, get_mcp_tools_dir, get_redis_host_port
+from arqitect.types import Sense
 
 BRAIN_MODEL = "brain"
 NERVES_DIR = get_nerves_dir()
+SENSES_DIR = get_senses_dir()
 SANDBOX_DIR = get_sandbox_dir()
+CORE_SENSES = frozenset(Sense)
 
 _host, _port = get_redis_host_port()
 _r = redis.Redis(host=_host, port=_port, decode_responses=True)
@@ -265,7 +268,10 @@ def run_nerve_with_input(nerve_name: str, user_input: str, mem_manager,
     and captures stdout. The engine stays loaded — no subprocess model reload.
     Falls back to subprocess if in-process execution fails.
     """
-    nerve_path = os.path.join(NERVES_DIR, nerve_name, "nerve.py")
+    if nerve_name in CORE_SENSES:
+        nerve_path = os.path.join(SENSES_DIR, nerve_name, "nerve.py")
+    else:
+        nerve_path = os.path.join(NERVES_DIR, nerve_name, "nerve.py")
     if not os.path.exists(nerve_path):
         return {"raw_stdout": "", "raw_stderr": f"Nerve '{nerve_name}' not found",
                 "parsed": None, "exit_code": -1, "timed_out": False}
@@ -453,11 +459,12 @@ def evaluate_nerve_output(test_case: dict, nerve_output: dict) -> dict:
     return {"passed": False, "score": 0.0, "reasoning": "Failed to parse evaluation", "issue": "evaluation_parse_error"}
 
 
-def _is_junk_rule(rule: str) -> bool:
-    """Detect rules that are vague filler or leak internal metrics.
+def _is_junk_rule(rule: str, known_tools: list[str] | None = None) -> bool:
+    """Detect rules that are vague filler, leak internal metrics, or reference tool names.
 
     These patterns appear when the reconciler's evaluation feedback leaks into
     improvement suggestions, or when the LLM generates generic non-actionable rules.
+    Tool names must never appear in system prompts — they are injected at runtime.
     """
     r = rule.lower()
     # Internal metric references — nerve prompts should never mention these
@@ -476,6 +483,11 @@ def _is_junk_rule(rule: str) -> bool:
     for pat in vague_patterns:
         if re.search(pat, r):
             return True
+    # Tool name references — tools are injected at runtime, not in system prompts
+    if known_tools:
+        for tool_name in known_tools:
+            if len(tool_name) > 3 and tool_name.lower() in r:
+                return True
     return False
 
 
@@ -827,6 +839,9 @@ def suggest_improvements(name: str, desc: str, system_prompt: str, examples: lis
         "- Keep ALL improvements focused on this nerve's SPECIFIC PURPOSE and DOMAIN\n"
         "- Do NOT add generic instructions like 'provide helpful responses' or 'assist the user'\n"
         "- The system_prompt must remain specific to ONLY this nerve's domain — if a rule could apply to any nerve, don't add it\n"
+        "- NEVER reference specific tool names in rules — tools are injected separately at runtime. "
+        "BAD: 'Always use the SearchDocs tool'. GOOD: 'Search documentation before answering CLI questions'\n"
+        "- NEVER reference a specific project, bot, or product name — nerves must be generic and work for any project\n"
         "- Add examples that show the exact input→output for failing cases\n"
         "- If tool errors show a clear code bug (wrong parsing, missing library import, bad format handling), include a tool_fixes entry with the COMPLETE corrected Python file\n"
         "- Only fix tools that appear in Known tools\n"
@@ -836,19 +851,23 @@ def suggest_improvements(name: str, desc: str, system_prompt: str, examples: lis
     result = _extract_json(raw)
     if isinstance(result, dict):
         # Build additive system prompt: append the rule to existing prompt
+        # Unwrap any JSON wrapper before appending rules to prevent
+        # storing {"name":...,"description":"..."}\nRule: ... combos
+        from arqitect.brain.consolidate import _system_prompt_to_plain_text
         rule = result.get("rule", "")
-        new_system_prompt = system_prompt
+        new_system_prompt = _system_prompt_to_plain_text(system_prompt)
         if rule and rule.strip():
             # Guard: reject junk rules and duplicates
-            if _is_junk_rule(rule):
+            if _is_junk_rule(rule, known_tools):
                 print(f"[QUALIFY] Rejected junk rule for '{name}': {rule[:80]}")
-            elif _is_duplicate_rule(rule, system_prompt):
+            elif _is_duplicate_rule(rule, new_system_prompt):
                 print(f"[QUALIFY] Rejected duplicate rule for '{name}': {rule[:80]}")
             else:
-                if system_prompt:
-                    new_system_prompt = f"{system_prompt}\nRule: {rule.strip()}"
-                else:
-                    new_system_prompt = f"Rule: {rule.strip()}"
+                if not new_system_prompt:
+                    # Never start a system prompt with "Rule:" — generate a base first
+                    domain = name.replace("_nerve", "").replace("_", " ")
+                    new_system_prompt = f"You are a {domain} specialist. {desc}"
+                new_system_prompt = f"{new_system_prompt}\nRule: {rule.strip()}"
 
                 # Consolidation: when 5+ rules accumulate, rewrite into a coherent prompt
                 rule_count = new_system_prompt.count("Rule:")

@@ -13,19 +13,35 @@ from arqitect.types import IntentType
 
 _INTENT_SYSTEM = (
     "You classify user messages into exactly two types:\n"
-    "1. \"plan\" — the user wants a multi-step PROCESS: development, debugging, "
-    "project setup, planning, migration, deployment, refactoring, investigation. "
-    "These imply structured work that needs requirements gathering before execution.\n"
+    "1. \"plan\" — the user wants a multi-step PROCESS that combines multiple "
+    "distinct operations. Key signals: multiple verbs joined by 'and'/'then', "
+    "project-level work (development, debugging, setup, migration, deployment, "
+    "refactoring, investigation), or tasks that need requirements gathering.\n"
     "2. \"direct\" — everything else: greetings, questions, single requests, "
     "creative tasks, lookups, conversations, simple commands.\n\n"
     "If the type is \"plan\", also include a \"category\" field if obvious "
     "(e.g. \"development\", \"debugging\", \"setup\", \"planning\", \"migration\", "
     "\"deployment\", \"refactoring\").\n\n"
-    "Reply with ONLY a JSON object. Examples:\n"
-    '{"type": "direct"}\n'
-    '{"type": "plan", "category": "development"}\n'
-    '{"type": "plan", "category": "debugging"}\n'
-    '{"type": "direct"}\n'
+    "Reply with ONLY a JSON object.\n\n"
+    "Examples:\n"
+    "User: hello → {\"type\": \"direct\"}\n"
+    "User: tell me a joke → {\"type\": \"direct\"}\n"
+    "User: what's the weather? → {\"type\": \"direct\"}\n"
+    "User: write a poem about the sea → {\"type\": \"direct\"}\n"
+    "User: who are you? → {\"type\": \"direct\"}\n"
+    "User: translate hello to Spanish → {\"type\": \"direct\"}\n"
+    "User: clone this repo and create a README for it → "
+    "{\"type\": \"plan\", \"category\": \"development\"}\n"
+    "User: build a REST API with auth and write tests → "
+    "{\"type\": \"plan\", \"category\": \"development\"}\n"
+    "User: scan my project for security issues and fix them → "
+    "{\"type\": \"plan\", \"category\": \"debugging\"}\n"
+    "User: set up a new Python project with CI/CD → "
+    "{\"type\": \"plan\", \"category\": \"setup\"}\n"
+    "User: migrate the database and update the API → "
+    "{\"type\": \"plan\", \"category\": \"migration\"}\n"
+    "User: refactor the auth module and add unit tests → "
+    "{\"type\": \"plan\", \"category\": \"refactoring\"}\n"
 )
 
 

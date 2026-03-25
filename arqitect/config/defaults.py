@@ -119,4 +119,8 @@ DEFAULTS = {
         "name": "",
         "email": "",
     },
+    "github": {
+        "enabled": False,
+        "community_repo": "otomus/arqitect-community",
+    },
 }

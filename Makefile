@@ -3,10 +3,13 @@ PYTHON := $(VENV)/bin/python3
 PID_DIR := .pids
 LOG := brain.log
 
-.PHONY: init start stop restart status logs traces seed-deps setup
+.PHONY: init start stop restart status logs traces seed-deps setup setup-github
 
 init:
 	@$(PYTHON) -m arqitect.cli.main init
+
+setup-github:
+	@$(PYTHON) -m arqitect.cli.main setup-github
 
 seed-deps:
 	@echo "Installing community dependencies..."

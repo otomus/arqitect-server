@@ -143,6 +143,39 @@ def get_secret(path: str, default: Any = "") -> Any:
     return get_config(f"secrets.{path}", default)
 
 
+def set_secret(path: str, value: Any) -> None:
+    """Write a secret value to arqitect.yaml under the 'secrets' section.
+
+    Reads the current YAML, sets the nested key, writes back atomically.
+    Clears the load_config cache so subsequent reads see the new value.
+
+    Args:
+        path: Dot-separated key under secrets (e.g. "kaggle.api_key").
+        value: The secret value to store.
+    """
+    root = get_project_root()
+    yaml_path = root / "arqitect.yaml"
+
+    with open(yaml_path) as f:
+        config = yaml.safe_load(f) or {}
+
+    secrets = config.setdefault("secrets", {})
+    keys = path.split(".")
+    current = secrets
+    for key in keys[:-1]:
+        current = current.setdefault(key, {})
+    current[keys[-1]] = value
+
+    # Atomic write: write to temp file then rename
+    tmp_path = yaml_path.with_suffix(".yaml.tmp")
+    with open(tmp_path, "w") as f:
+        yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+    tmp_path.rename(yaml_path)
+
+    # Invalidate cached config so get_secret() sees the new value
+    load_config.cache_clear()
+
+
 def get_connector_config(connector: str, key: str, default: Any = None) -> Any:
     """Get a connector config value.
 

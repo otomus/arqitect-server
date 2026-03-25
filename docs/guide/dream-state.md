@@ -1,6 +1,6 @@
 # Dream State
 
-When the brain is idle for 120 seconds, it enters dream state. Seven autonomous maintenance processes run, each interruptible. The moment a task arrives, everything stops.
+When the brain is idle for 120 seconds, it enters dream state. Eight autonomous maintenance processes run, each interruptible. The moment a task arrives, everything stops.
 
 ## The Idle Threshold
 
@@ -9,12 +9,12 @@ The `Dreamstate` class tracks `_last_activity`. A `threading.Timer` fires after 
 When `wake()` is called (task arrives), the `_interrupted` event is set. The dream worker checks this event between every unit of work, saves progress, and yields. The brain blocks until the worker has fully stopped and released all LLM locks.
 
 ```
-idle 120s → _enter_dreamstate() → _dream() → [phases 1-7]
+idle 120s → _enter_dreamstate() → _dream() → [phases 1-8]
                                                 ↑
 task arrives → wake() → _interrupted.set() → join(timeout=60)
 ```
 
-## The Seven Processes
+## The Eight Processes
 
 ### 1. Consolidation
 
@@ -155,9 +155,28 @@ Pushes improved nerves and adapters back to the community repo.
 
 **Gate:** Nerves are not contributed until they have a trained LoRA adapter (`adapter.gguf` must exist).
 
-**PR deduplication:** Before creating a new PR, the system searches for existing open PRs from `@me` matching the nerve/adapter name. If found, the existing branch is updated and force-pushed instead of creating a duplicate PR.
+**PR deduplication:** Before creating a new PR, the system searches for existing open PRs matching the nerve name. If found, the existing branch is updated in-place instead of creating a duplicate.
 
-### 7. Personality Reflection
+**Unified PRs:** Each nerve produces one PR containing the full bundle, adapter, and tool stack. No more scattered PRs per artifact type.
+
+**Authentication:** Contributions use the server's [GitHub App](/guide/getting-started#step-11-github-integration) identity. Each server mints short-lived installation tokens — no personal access tokens needed.
+
+### 7. PR Review
+
+Maintains open PRs and cleans up stale branches.
+
+**Fix review feedback:** PRs with `CHANGES_REQUESTED` status are automatically addressed:
+
+1. Read all review comments on the PR
+2. Checkout the PR branch in a temporary worktree
+3. Use the LLM to generate fixes based on the feedback
+4. Commit and push the changes
+
+**Cleanup stale PRs:** PRs that have been open and inactive for 30+ days are closed with a comment explaining the timeout.
+
+**Delete merged branches:** Local and remote branches for merged or closed PRs are cleaned up to prevent accumulation.
+
+### 8. Personality Reflection
 
 Evolves the communication voice based on interaction patterns.
 

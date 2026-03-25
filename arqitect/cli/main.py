@@ -453,6 +453,24 @@ def _nerve_install(name: str):
         print(f"Error: {e}")
 
 
+def cmd_setup_github(args):
+    """Set up GitHub App for this server (standalone, outside full wizard)."""
+    from arqitect.config.loader import get_config
+    from arqitect.github_app import is_configured, setup_github_app
+
+    if is_configured():
+        print("GitHub App is already configured.")
+        answer = input("  Reconfigure? [y/N] ").strip().lower()
+        if answer not in ("y", "yes"):
+            return
+
+    server_name = get_config("name", "Arqitect")
+    default_slug = f"arqitect-{server_name.lower().replace(' ', '-')}"
+    slug = input(f"  GitHub App name [{default_slug}]: ").strip() or default_slug
+
+    setup_github_app(slug)
+
+
 def cmd_contribute(args):
     """Package a nerve and submit a PR to otomus/arqitect-community."""
     name = args.name
@@ -553,6 +571,9 @@ def main():
     nerve_install = nerve_sub.add_parser("install", help="Install a nerve")
     nerve_install.add_argument("name", help="Nerve name")
 
+    # GitHub App setup
+    sub.add_parser("setup-github", help="Set up GitHub App for this server")
+
     # Contribute
     contribute_parser = sub.add_parser("contribute", help="Package a nerve for community")
     contribute_parser.add_argument("name", help="Nerve name to contribute")
@@ -568,6 +589,7 @@ def main():
         "traces": cmd_traces,
         "adapters": cmd_adapters,
         "nerve": cmd_nerve,
+        "setup-github": cmd_setup_github,
         "contribute": cmd_contribute,
     }
 

@@ -13,6 +13,8 @@
     'DESCRIPTION = """{{DESCRIPTION}}"""',
     'AVAILABLE_SENSES = {',
     'def get_tool_list():',
+    'def get_missing_credentials(tool_name, tool_info):',
+    'from arqitect.brain.credentials import has_credentials',
     'def get_tool_names():',
     'def get_effective_role(meta):',
     'def build_planner_prompt(meta):',

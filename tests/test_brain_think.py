@@ -113,17 +113,16 @@ class TestSafetyCheck:
     def test_unsafe_input_blocked(
         self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir, captured_events,
     ):
-        fake = FakeLLM()
+        fake = FakeLLM([
+            ("safety filter", '{"safe": false, "category": "harmful"}', True),
+            ("refusal message", "I can't help with that.", True),
+        ])
         patches = setup_brain_patches(fake, mem, test_redis, nerves_dir, sandbox_dir)
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            with patch(
-                "arqitect.brain.brain._safety_check_input",
-                return_value=(False, "I can't help with that."),
-            ):
-                from arqitect.brain.brain import think
-                result = think("dangerous request", depth=0)
+            from arqitect.brain.brain import think
+            result = think("dangerous request", depth=0)
         assert result == "I can't help with that."
 
     @pytest.mark.timeout(10)
@@ -132,18 +131,16 @@ class TestSafetyCheck:
     ):
         """Safety filter only runs at depth 0; deeper recursions skip it."""
         fake = FakeLLM([
+            ("safety filter", '{"safe": false, "category": "harmful"}', True),
+            ("refusal message", "blocked", True),
             ("Available nerves", "Sure, here is the answer."),
         ])
         patches = setup_brain_patches(fake, mem, test_redis, nerves_dir, sandbox_dir)
         with contextlib.ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            with patch(
-                "arqitect.brain.brain._safety_check_input",
-                return_value=(False, "blocked"),
-            ):
-                from arqitect.brain.brain import think
-                result = think("hello", depth=1)
+            from arqitect.brain.brain import think
+            result = think("hello", depth=1)
         assert result != "blocked"
 
 
@@ -528,125 +525,10 @@ class TestReverseGeocode:
 
 
 # ===========================================================================
-# 12. _personality_media_enhancement
+# 12. _personality_media_enhancement — REMOVED
+# Logic moved to arqitect.senses.communication.nerve._decide_format()
+# and rewrite_response(). See tests/test_communication_rewrite.py.
 # ===========================================================================
-
-class TestPersonalityMediaEnhancement:
-    """Media enrichment via personality weights — tested with controlled randomness."""
-
-    @pytest.mark.timeout(10)
-    def test_returns_early_for_falsy_msg(
-        self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir,
-    ):
-        patches = setup_brain_patches(FakeLLM(), mem, test_redis, nerves_dir, sandbox_dir)
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            from arqitect.brain.brain import _personality_media_enhancement
-            result = _personality_media_enhancement("task", "", {"response": "ok"})
-            assert result == {"response": "ok"}
-
-    @pytest.mark.timeout(10)
-    def test_returns_early_for_non_dict_result(
-        self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir,
-    ):
-        patches = setup_brain_patches(FakeLLM(), mem, test_redis, nerves_dir, sandbox_dir)
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            from arqitect.brain.brain import _personality_media_enhancement
-            result = _personality_media_enhancement("task", "hello", "not a dict")
-            assert result == "not a dict"
-
-    @pytest.mark.timeout(10)
-    def test_skips_if_already_has_media(
-        self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir,
-    ):
-        patches = setup_brain_patches(FakeLLM(), mem, test_redis, nerves_dir, sandbox_dir)
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            from arqitect.brain.brain import _personality_media_enhancement
-            nerve_result = {"response": "ok", "gif_url": "http://example.com/cat.gif"}
-            result = _personality_media_enhancement("task", "hello", nerve_result)
-            assert result["gif_url"] == "http://example.com/cat.gif"
-
-    @pytest.mark.timeout(10)
-    def test_skips_structured_data(
-        self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir,
-    ):
-        """Messages starting with JSON/code markers are never enhanced."""
-        patches = setup_brain_patches(FakeLLM(), mem, test_redis, nerves_dir, sandbox_dir)
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            from arqitect.brain.brain import _personality_media_enhancement
-            nerve_result = {"response": "ok"}
-            result = _personality_media_enhancement("task", '{"key": "value"}', nerve_result)
-            assert "gif_url" not in result
-            assert "_personality_rewrite" not in result
-
-    @pytest.mark.timeout(10)
-    def test_gif_added_when_roll_below_gif_chance(
-        self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir,
-    ):
-        """When random roll is very low and wit+swagger are high, GIF is added."""
-        fake = FakeLLM()
-        register_qualified_nerve(mem, "gif_search_nerve", "Search for GIFs")
-        make_nerve_file(nerves_dir, "gif_search_nerve")
-        patches = setup_brain_patches(fake, mem, test_redis, nerves_dir, sandbox_dir)
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            from arqitect.brain.brain import _personality_media_enhancement
-            mem.cold.set_fact("personality", "trait_weights",
-                             json.dumps({"wit": 0.95, "swagger": 0.95}))
-            with patch("random.random", return_value=0.001):
-                with patch_invoke_nerve(return_value='{"gif_url": "http://giphy.com/test.gif"}'):
-                    nerve_result = {"response": "nice joke"}
-                    result = _personality_media_enhancement("tell me a joke", "nice joke", nerve_result)
-            assert result.get("gif_url") == "http://giphy.com/test.gif"
-
-    @pytest.mark.timeout(10)
-    def test_emoji_added_when_roll_in_emoji_range(
-        self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir,
-    ):
-        """When roll falls in the emoji probability band, emoji rewrite happens."""
-        fake = FakeLLM()
-        patches = setup_brain_patches(fake, mem, test_redis, nerves_dir, sandbox_dir)
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            from arqitect.brain.brain import _personality_media_enhancement
-            mem.cold.set_fact("personality", "trait_weights",
-                             json.dumps({"wit": 0.8, "swagger": 0.3}))
-            with patch("random.random", return_value=0.05):
-                with patch_invoke_nerve(return_value='{"response": "hello! :)"}'):
-                    nerve_result = {"response": "hello"}
-                    result = _personality_media_enhancement("greet me", "hello", nerve_result)
-            assert result == IsInstance(dict)
-
-    @pytest.mark.timeout(10)
-    def test_json_decode_error_caught(
-        self, test_redis, tmp_memory_dir, mem, nerves_dir, sandbox_dir,
-    ):
-        """JSONDecodeError from invoke_nerve is caught, not propagated."""
-        fake = FakeLLM()
-        register_qualified_nerve(mem, "gif_search_nerve", "Search for GIFs")
-        make_nerve_file(nerves_dir, "gif_search_nerve")
-        patches = setup_brain_patches(fake, mem, test_redis, nerves_dir, sandbox_dir)
-        with contextlib.ExitStack() as stack:
-            for p in patches:
-                stack.enter_context(p)
-            from arqitect.brain.brain import _personality_media_enhancement
-            mem.cold.set_fact("personality", "trait_weights",
-                             json.dumps({"wit": 0.95, "swagger": 0.95}))
-            with patch("random.random", return_value=0.001):
-                with patch_invoke_nerve(return_value="not valid json {{{"):
-                    nerve_result = {"response": "test"}
-                    result = _personality_media_enhancement("query", "test", nerve_result)
-            assert result == IsInstance(dict)
-            assert "gif_url" not in result
 
 
 # ===========================================================================

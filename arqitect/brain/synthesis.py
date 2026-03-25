@@ -418,7 +418,13 @@ def _synthesize_from_scratch(name: str, description: str,
 
     nerve_dir, nerve_path = _create_nerve_files(name, role, description)
     system_prompt, examples_json = _generate_rich_metadata(name, description)
-    mem.cold.register_nerve_rich(name, description, system_prompt, examples_json, role=role)
+    # Never register a nerve with an empty system_prompt — qualification
+    # would append "Rule:" lines with no base prompt, creating degraded prompts.
+    if not system_prompt or not system_prompt.strip():
+        domain = name.replace("_nerve", "").replace("_", " ")
+        system_prompt = f"You are a {domain} specialist. {description}"
+    mem.cold.register_nerve_rich(name, description, system_prompt, examples_json,
+                                role=role, trigger_task=trigger_task)
     _write_meta_json(nerve_dir, name, role)
     _preseed_nerve_tools(name, description, trigger_task, mcp_tools, all_mcp_tools, role)
 

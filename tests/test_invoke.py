@@ -120,3 +120,65 @@ class TestInvokeNerveNameValidation:
             parsed = json.loads(result)
             # Should be "not found", not "invalid name"
             assert "error" in parsed
+
+
+@pytest.mark.timeout(10)
+class TestInvokeEdgeCases:
+    """Edge cases: empty/None inputs, wrong types, null bytes, special chars."""
+
+    def test_empty_nerve_name_returns_error(self, nerves_dir, sandbox_dir, mem):
+        """Empty string nerve name must return an error, not crash."""
+        with patch("arqitect.brain.invoke.mem", mem):
+            from arqitect.brain.invoke import invoke_nerve
+            result = invoke_nerve("", "hello")
+            parsed = json.loads(result)
+            assert "error" in parsed
+
+    def test_whitespace_only_nerve_name_returns_error(self, nerves_dir, sandbox_dir, mem):
+        """Whitespace-only nerve name must be rejected."""
+        with patch("arqitect.brain.invoke.mem", mem):
+            from arqitect.brain.invoke import invoke_nerve
+            result = invoke_nerve("   ", "hello")
+            parsed = json.loads(result)
+            assert "error" in parsed
+
+    def test_null_bytes_in_args_stripped(self, nerves_dir, sandbox_dir, mem):
+        """Null bytes in args must be stripped, not crash subprocess."""
+        make_nerve_file(nerves_dir, "null_nerve")
+
+        mock_result = MagicMock()
+        mock_result.stdout = '{"response": "ok"}'
+        mock_result.stderr = ""
+
+        with patch("arqitect.brain.invoke.mem", mem):
+            with patch("arqitect.brain.invoke.subprocess.run", return_value=mock_result) as mock_run:
+                from arqitect.brain.invoke import invoke_nerve
+                result = invoke_nerve("null_nerve", "hello\x00world")
+                # Verify null byte was stripped from the args passed to subprocess
+                call_cmd = mock_run.call_args[0][0]
+                assert "\x00" not in call_cmd[-1]
+
+    def test_nerve_name_with_special_chars_rejected(self, nerves_dir, sandbox_dir, mem):
+        """Nerve names with shell-dangerous characters must be rejected."""
+        with patch("arqitect.brain.invoke.mem", mem):
+            from arqitect.brain.invoke import invoke_nerve
+            for bad_name in ["nerve;rm -rf /", "nerve$(whoami)", "nerve`id`", "../etc/passwd"]:
+                result = invoke_nerve(bad_name, "{}")
+                parsed = json.loads(result)
+                assert "error" in parsed, f"Expected error for name: {bad_name!r}"
+
+    def test_subprocess_crash_returns_stderr(self, nerves_dir, sandbox_dir, mem):
+        """When subprocess exits non-zero, stderr is still returned."""
+        make_nerve_file(nerves_dir, "crash_nerve")
+
+        mock_result = MagicMock()
+        mock_result.stdout = ""
+        mock_result.stderr = "Traceback: something broke"
+        mock_result.returncode = 1
+
+        with patch("arqitect.brain.invoke.mem", mem):
+            with patch("arqitect.brain.invoke.subprocess.run", return_value=mock_result):
+                from arqitect.brain.invoke import invoke_nerve
+                result = invoke_nerve("crash_nerve", "test")
+                # When stdout is empty, stderr should be returned
+                assert "something broke" in result

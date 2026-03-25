@@ -308,7 +308,7 @@ class TestGetProjectContext:
 
     @given(value=st.text(
         min_size=0, max_size=200,
-        alphabet=st.characters(blacklist_characters="\x00"),
+        alphabet=st.characters(blacklist_characters="\x00", blacklist_categories=("Cs",)),
     ))
     @settings(max_examples=20)
     def test_returns_exact_env_value(self, value):

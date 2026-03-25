@@ -284,11 +284,23 @@ Contributions always go to `{role}/{size_class}/{model_name}/` — never to the 
 
 ### PR Flow
 
-All contributions use GitHub PRs via `gh`:
+Each nerve produces **one unified PR** containing the bundle, adapter, and tool stack. Contributions are authenticated via the server's [GitHub App](/guide/getting-started#step-11-github-integration).
 
-1. Search for existing open PR from `@me` matching the nerve/adapter
-2. If found: checkout the branch, update files, rebase, force-push
-3. If not: create new branch, commit, push, create PR with `--fill --auto`
+**How it works:**
+
+1. **Worktree isolation** — each PR operation uses a temporary git worktree so the main clone stays on `main` and concurrent contributions don't interfere
+2. **Deduplication** — before creating a new PR, the system searches for an existing open PR matching the nerve name. If found, the existing branch is updated in-place
+3. **Conflict resolution** — after writing files, the branch is synced with `main` using a rebase → merge → merge-with-ours fallback chain
+4. **Rich descriptions** — PR bodies include qualification score, usage stats, tools table, examples, and the system prompt goal
+5. **Authentication** — the GitHub App mints short-lived installation tokens scoped to the target repository. No personal access tokens or SSH keys needed
+
+**PR review during dream state:**
+
+The server also maintains its PRs during the dream state `pr_review` phase:
+
+- **Fix feedback** — PRs with review comments are automatically addressed: the server reads the feedback, generates a fix using the LLM, and pushes to the branch
+- **Cleanup stale PRs** — PRs inactive for 30+ days are closed automatically
+- **Delete merged branches** — local and remote branches for merged/closed PRs are cleaned up
 
 ## Family Dynamics
 

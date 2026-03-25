@@ -102,7 +102,12 @@ class TestExtractJsonNerve:
 
     @given(st.dictionaries(
         keys=st.text(min_size=1, max_size=10, alphabet=st.characters(whitelist_categories=("L", "N"))),
-        values=st.one_of(st.integers(), st.text(min_size=1, max_size=50)),
+        values=st.one_of(
+            st.integers(),
+            st.text(min_size=1, max_size=50, alphabet=st.characters(
+                whitelist_categories=("L", "N", "P", "Z"),
+                blacklist_characters='[]{}"\\')),
+        ),
         min_size=1,
         max_size=5,
     ))

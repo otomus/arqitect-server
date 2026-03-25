@@ -319,6 +319,7 @@ CASES = [
 
 
 STRESS_TEST_USER_ID = "stress-test-user-001"
+_PUBSUB_MAX_RETRIES = 5
 STRESS_TEST_EMAIL = "stress-test@arqitect.local"
 
 
@@ -362,24 +363,47 @@ def run_case(case, r_pub, r_sub, timeout):
         response_event = threading.Event()
         response_data = {"text": None, "elapsed": 0}
 
-        pubsub = r_sub.pubsub()
-        pubsub.subscribe("brain:response")
+        pubsub_holder = [r_sub.pubsub()]
+        pubsub_holder[0].subscribe("brain:response")
 
         def listen_for_response():
+            """Listen for a brain:response message, reconnecting on connection drops.
+
+            Retries up to ``_PUBSUB_MAX_RETRIES`` times when the Redis connection
+            drops (ConnectionError / ValueError from closed socket).  Each retry
+            closes the dead pubsub and creates a fresh subscription.
+            """
+            retries = 0
             start = time.time()
-            for raw_msg in pubsub.listen():
-                if raw_msg["type"] != "message":
-                    continue
+            while not response_event.is_set() and retries < _PUBSUB_MAX_RETRIES:
                 try:
-                    data = json.loads(raw_msg["data"])
-                    text = data.get("message", "")
-                    if text:
-                        response_data["text"] = text
-                        response_data["elapsed"] = round(time.time() - start, 1)
-                        response_event.set()
+                    for raw_msg in pubsub_holder[0].listen():
+                        if response_event.is_set():
+                            return
+                        if raw_msg["type"] != "message":
+                            continue
+                        data = json.loads(raw_msg["data"])
+                        text = data.get("message", "")
+                        if text:
+                            response_data["text"] = text
+                            response_data["elapsed"] = round(time.time() - start, 1)
+                            response_event.set()
+                            return
+                except (ConnectionError, ValueError, OSError):
+                    retries += 1
+                    if response_event.is_set():
                         return
-                except Exception:
-                    pass
+                    # Close the dead connection before reconnecting
+                    try:
+                        pubsub_holder[0].close()
+                    except Exception as exc:
+                        print(f"  [WARN] pubsub close failed (retry {retries}): {exc}")
+                    try:
+                        pubsub_holder[0] = r_sub.pubsub()
+                        pubsub_holder[0].subscribe("brain:response")
+                    except Exception as exc:
+                        print(f"  [WARN] pubsub reconnect failed (retry {retries}): {exc}")
+                        time.sleep(0.5)
 
         listener = threading.Thread(target=listen_for_response, daemon=True)
         listener.start()
@@ -394,8 +418,11 @@ def run_case(case, r_pub, r_sub, timeout):
 
         # Wait for response or timeout
         got_response = response_event.wait(timeout=timeout)
-        pubsub.unsubscribe()
-        pubsub.close()
+        try:
+            pubsub_holder[0].unsubscribe()
+            pubsub_holder[0].close()
+        except Exception:
+            pass
 
         elapsed = round(time.time() - start_time, 1)
 

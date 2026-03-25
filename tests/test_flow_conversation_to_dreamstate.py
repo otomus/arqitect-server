@@ -222,8 +222,8 @@ class TestDreamstateWorkQueue:
         assert names.index("fresh_nerve") < names.index("old_nerve"), \
             f"Expected fresh_nerve before old_nerve, got: {names}"
 
-    def test_core_senses_excluded(self, mem, nerves_dir):
-        """Core senses should never be in the reconciliation queue."""
+    def test_core_senses_included_in_tuning(self, mem, nerves_dir):
+        """Core senses must be in the tuning queue — they need model-specific tuning."""
         mem.cold.register_sense("hearing", "Audio processing")
         mem.cold.record_nerve_invocation("hearing", success=True)
         make_nerve_file(nerves_dir, "hearing")
@@ -236,7 +236,7 @@ class TestDreamstateWorkQueue:
             queue = _build_work_queue()
 
         names = [item["name"] for item in queue]
-        assert "hearing" not in names
+        assert "hearing" in names
 
     def test_100_dormant_nerves_excluded(self, mem, nerves_dir):
         """Only the nerve that was actually used should be in the queue.
@@ -504,19 +504,20 @@ class TestThinkEdgeCases:
     def test_safety_blocks_harmful_input(self, test_redis, tmp_memory_dir, nerves_dir, sandbox_dir):
         """Harmful input at depth=0 is blocked before any processing."""
         mem_fixture = make_mem(test_redis)
-        fake = FakeLLM()
+        fake = FakeLLM([
+            ("safety filter", '{"safe": false, "category": "harmful"}', True),
+            ("refusal message", "I can't help with that.", True),
+        ])
         patches = setup_brain_patches(fake, mem_fixture, test_redis, nerves_dir, sandbox_dir)
-        patches.append(
-            patch("arqitect.brain.brain._safety_check_input",
-                  return_value=(False, "I can't help with that."))
-        )
         for p in patches:
             p.start()
         try:
             from arqitect.brain.brain import think
             result = think("harmful request")
             assert result == "I can't help with that."
-            assert fake.call_count == 0, "LLM should not be called for blocked input"
+            # Only safety classification + refusal calls — no routing LLM calls
+            routing_calls = [c for c in fake.calls if c["model"] != "role:nerve"]
+            assert len(routing_calls) == 0, "LLM routing should not be called for blocked input"
         finally:
             for p in patches:
                 p.stop()
@@ -528,20 +529,24 @@ class TestThinkEdgeCases:
         make_nerve_file(nerves_dir, "reflect_nerve")
 
         fake = FakeLLM([
+            ("safety filter", '{"safe": false, "category": "harmful"}', True),
+            ("refusal message", "Blocked", True),
             ("Available nerves", json.dumps(as_dict(
                 InvokeDecisionFactory.build(name="reflect_nerve", args="hi")
             ))),
         ])
-        safety_mock = MagicMock(return_value=(False, "Blocked"))
         patches = setup_brain_patches(fake, mem_fixture, test_redis, nerves_dir, sandbox_dir)
-        patches.append(patch("arqitect.brain.brain._safety_check_input", safety_mock))
         for p in patches:
             p.start()
         try:
             with patch_invoke_nerve(return_value='{"response": "ok"}'):
                 from arqitect.brain.brain import think
-                think("some task", depth=1)
-            safety_mock.assert_not_called()
+                result = think("some task", depth=1)
+            # At depth>0 safety is skipped — should NOT be blocked
+            assert result != "Blocked"
+            # No safety classification calls should have been made
+            safety_calls = fake.prompts_containing("safety filter")
+            assert len(safety_calls) == 0, "Safety should not run at depth > 0"
         finally:
             for p in patches:
                 p.stop()
@@ -629,8 +634,6 @@ class TestThinkEdgeCases:
         long_task = "Please analyze the following data: " + "measurement=42.5 " * 500
         fake = FakeLLM([("truncated", "ok")])
         patches = setup_brain_patches(fake, mem_fixture, test_redis, nerves_dir, sandbox_dir)
-        # Bypass safety for this test
-        patches.append(patch("arqitect.brain.brain._safety_check_input", return_value=(True, "")))
         for p in patches:
             p.start()
         try:
@@ -807,7 +810,8 @@ class TestDispatchEdgeCases:
              patch("arqitect.brain.dispatch.invoke_nerve",
                    return_value='{"response": "Sunny"}') as mock_invoke, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
-             patch("arqitect.brain.dispatch.llm_generate", side_effect=fake_llm), \
+             patch("arqitect.senses.communication.nerve.rewrite_response",
+                   side_effect=lambda message="", **kw: {"response": message, "format": "text", "tone": "neutral"}), \
              patch("arqitect.brain.dispatch.publish_event"), \
              patch("arqitect.brain.dispatch.publish_response"), \
              patch("arqitect.brain.dispatch.publish_memory_state"):
@@ -949,7 +953,8 @@ class TestDispatchEdgeCases:
              patch("arqitect.brain.dispatch.invoke_nerve",
                    return_value='{"response": "Sunny"}') as mock_invoke, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
-             patch("arqitect.brain.dispatch.llm_generate", side_effect=fake_llm), \
+             patch("arqitect.senses.communication.nerve.rewrite_response",
+                   side_effect=lambda message="", **kw: {"response": message, "format": "text", "tone": "neutral"}), \
              patch("arqitect.brain.dispatch.publish_event"), \
              patch("arqitect.brain.dispatch.publish_response"), \
              patch("arqitect.brain.dispatch.publish_memory_state"):

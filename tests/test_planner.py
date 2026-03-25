@@ -1,487 +1,483 @@
-"""Tests for arqitect.brain.planner — recipe matching, generation, evaluation, and storage."""
+"""Tests for arqitect.brain.planner — on-the-fly nerve chain composition."""
 
-import hashlib
 import json
-import os
-import tempfile
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from hypothesis import given, settings
-from hypothesis import strategies as st
 
 from arqitect.brain.planner import (
-    _recipe_to_chain,
-    evaluate_and_store_recipe,
-    generate_recipe,
-    match_recipe,
-    plan_task,
+    _candidates_to_steps,
+    _filter_candidates,
+    _find_gaps,
+    _sort_into_sequence,
+    _sort_pairwise,
+    _sort_single_pass,
+    _validate_steps,
+    compose_chain,
 )
 from arqitect.types import Action
 from tests.conftest import FakeLLM
 
 
-# ── Fixtures ──────────────────────────────────────────────────────────────────
+# ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-@pytest.fixture()
-def recipes_dir(tmp_path):
-    """Redirect _RECIPES_DIR to a temporary directory for test isolation."""
-    with patch("arqitect.brain.planner._RECIPES_DIR", str(tmp_path)):
-        yield tmp_path
-
-
-def _write_recipe(recipes_dir, recipe: dict) -> None:
-    """Write a recipe JSON file into the temporary recipes directory."""
-    recipe_id = recipe.get("id", "test")
-    path = recipes_dir / f"{recipe_id}.json"
-    path.write_text(json.dumps(recipe))
-
-
-def _make_recipe(
-    recipe_id: str = "abc123",
-    name: str = "test_recipe",
-    category: str = "coding",
-    success_rate: float = 0.8,
-    runs: int = 5,
-    steps: list | None = None,
-) -> dict:
-    """Build a minimal recipe dict for testing."""
+def _catalog() -> dict[str, str]:
+    """Build a small nerve catalog for testing."""
     return {
-        "id": recipe_id,
-        "name": name,
-        "category": category,
-        "success_rate": success_rate,
-        "runs": runs,
-        "steps": steps if steps is not None else [{"nerve": "touch", "args_template": "echo {task}", "description": "run cmd"}],
+        "touch": "file and shell operations",
+        "sight": "image analysis and screenshots",
+        "hearing": "audio input and output",
+        "communication": "formatting and tone adjustment",
+        "awareness": "identity and capabilities",
+        "code_analyzer": "static analysis of source code",
+        "test_runner": "runs test suites and reports results",
     }
 
 
-# ── match_recipe ──────────────────────────────────────────────────────────────
+def _ranked(names: list[str]) -> list[tuple[str, float]]:
+    """Build ranked candidates list from nerve names (descending scores)."""
+    return [(name, 10.0 - i) for i, name in enumerate(names)]
+
+
+# ── TestFilterCandidates ─────────────────────────────────────────────────────
 
 
 @pytest.mark.timeout(10)
-class TestMatchRecipe:
-    """Tests for match_recipe — find the best stored recipe by category."""
+class TestFilterCandidates:
+    """Tests for _filter_candidates — hybrid keyword+embedding matching."""
 
-    def test_returns_none_when_no_recipes(self, recipes_dir):
-        assert match_recipe("build the app", "coding") is None
+    def test_returns_ranked_pairs(self):
+        """match_nerves result is passed through and capped."""
+        mock_ranked = _ranked(["touch", "code_analyzer", "sight"])
+        with patch("arqitect.brain.planner.match_nerves", return_value=mock_ranked):
+            result = _filter_candidates("analyze code", _catalog())
 
-    def test_matches_by_category(self, recipes_dir):
-        target = _make_recipe(recipe_id="r1", category="coding", success_rate=0.9)
-        other = _make_recipe(recipe_id="r2", category="testing", success_rate=0.5)
-        _write_recipe(recipes_dir, target)
-        _write_recipe(recipes_dir, other)
+        assert len(result) == 3
+        assert result[0][0] == "touch"
 
-        result = match_recipe("build it", "coding")
-        assert result is not None
-        assert result["id"] == "r1"
+    def test_caps_at_max_candidates(self):
+        """Result is capped to MAX_CANDIDATES."""
+        many = _ranked([f"nerve_{i}" for i in range(20)])
+        with patch("arqitect.brain.planner.match_nerves", return_value=many):
+            result = _filter_candidates("task", _catalog())
 
-    def test_falls_back_to_all_when_no_category_match(self, recipes_dir):
-        recipe = _make_recipe(recipe_id="r1", category="deploy", success_rate=0.7)
-        _write_recipe(recipes_dir, recipe)
+        assert len(result) <= 15
 
-        result = match_recipe("build it", "nonexistent_category")
-        assert result is not None
-        assert result["id"] == "r1"
+    def test_empty_catalog_returns_empty(self):
+        with patch("arqitect.brain.planner.match_nerves", return_value=[]):
+            result = _filter_candidates("task", {})
 
-    def test_picks_best_by_success_rate(self, recipes_dir):
-        low = _make_recipe(recipe_id="r1", category="coding", success_rate=0.3, runs=1)
-        high = _make_recipe(recipe_id="r2", category="coding", success_rate=0.9, runs=1)
-        _write_recipe(recipes_dir, low)
-        _write_recipe(recipes_dir, high)
+        assert result == []
 
-        result = match_recipe("build it", "coding")
-        assert result["id"] == "r2"
+    def test_no_matches_returns_empty(self):
+        with patch("arqitect.brain.planner.match_nerves", return_value=[]):
+            result = _filter_candidates("completely unrelated", _catalog())
 
-    def test_bonus_for_runs(self, recipes_dir):
-        """A recipe with many runs gets a small score bonus."""
-        few_runs = _make_recipe(recipe_id="r1", category="coding", success_rate=0.85, runs=0)
-        many_runs = _make_recipe(recipe_id="r2", category="coding", success_rate=0.80, runs=10)
-        _write_recipe(recipes_dir, few_runs)
-        _write_recipe(recipes_dir, many_runs)
-
-        # r1 score = 0.85 (no bonus, runs=0)
-        # r2 score = 0.80 + min(10/10, 0.1) = 0.90
-        result = match_recipe("build it", "coding")
-        assert result["id"] == "r2"
-
-    def test_empty_category_falls_back_to_all(self, recipes_dir):
-        recipe = _make_recipe(recipe_id="r1", category="coding")
-        _write_recipe(recipes_dir, recipe)
-
-        result = match_recipe("task", "")
-        assert result is not None
-        assert result["id"] == "r1"
-
-    @given(
-        success_rate_a=st.floats(min_value=0.0, max_value=1.0),
-        success_rate_b=st.floats(min_value=0.0, max_value=1.0),
-        runs_a=st.integers(min_value=0, max_value=100),
-        runs_b=st.integers(min_value=0, max_value=100),
-    )
-    @settings(max_examples=50)
-    def test_scoring_deterministic_with_random_rates(
-        self, success_rate_a, success_rate_b, runs_a, runs_b,
-    ):
-        """Property: match_recipe always picks the recipe with the highest computed score.
-
-        Score = success_rate + min(runs/10, 0.1) when runs > 0, else success_rate.
-        """
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            with patch("arqitect.brain.planner._RECIPES_DIR", td):
-                recipe_a = _make_recipe(
-                    recipe_id="a", category="cat", success_rate=success_rate_a, runs=runs_a,
-                )
-                recipe_b = _make_recipe(
-                    recipe_id="b", category="cat", success_rate=success_rate_b, runs=runs_b,
-                )
-                _write_recipe(tmp, recipe_a)
-                _write_recipe(tmp, recipe_b)
-
-                result = match_recipe("task", "cat")
-                assert result is not None
-
-                # Compute expected scores using the same formula as the source
-                score_a = success_rate_a + (min(runs_a / 10, 0.1) if runs_a > 0 else 0)
-                score_b = success_rate_b + (min(runs_b / 10, 0.1) if runs_b > 0 else 0)
-
-                if score_a > score_b:
-                    assert result["id"] == "a"
-                elif score_b > score_a:
-                    assert result["id"] == "b"
-                else:
-                    # Tied scores — either is acceptable (iteration order dependent)
-                    assert result["id"] in ("a", "b")
+        assert result == []
 
 
-# ── generate_recipe ───────────────────────────────────────────────────────────
+# ── TestSortIntoSequence ─────────────────────────────────────────────────────
 
 
 @pytest.mark.timeout(10)
-class TestGenerateRecipe:
-    """Tests for generate_recipe — LLM-generated recipe creation."""
+class TestSortIntoSequence:
+    """Tests for _sort_into_sequence — LLM-based ordering."""
 
-    def test_valid_llm_response(self):
-        fake = FakeLLM([
-            ("Design a step-by-step", json.dumps({
-                "name": "build_app",
-                "description": "Build the application",
-                "steps": [{"nerve": "touch", "args_template": "make build", "description": "compile"}],
-            })),
+    def test_single_pass_for_medium(self):
+        """Medium models use single-pass strategy."""
+        llm_response = json.dumps([
+            {"nerve": "code_analyzer", "args": "analyze the code"},
+            {"nerve": "touch", "args": "write results"},
         ])
+        fake = FakeLLM([("Available nerves", llm_response)])
+
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value=[
+                 {"nerve": "code_analyzer", "args": "analyze the code"},
+                 {"nerve": "touch", "args": "write results"},
+             ]):
+            result = _sort_into_sequence(
+                "analyze and fix code",
+                _ranked(["code_analyzer", "touch", "sight"]),
+                _catalog(),
+                project_facts=None,
+                size_class="medium",
+            )
+
+        assert len(result) == 2
+        assert result[0]["nerve"] == "code_analyzer"
+        assert result[1]["nerve"] == "touch"
+
+    def test_pairwise_for_small(self):
+        """Small models use pairwise strategy with cap."""
+        llm_response = json.dumps([
+            {"nerve": "touch", "args": "run command"},
+        ])
+        fake = FakeLLM([("Nerves:", llm_response)])
+
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value=[
+                 {"nerve": "touch", "args": "run command"},
+             ]):
+            result = _sort_into_sequence(
+                "run a shell command",
+                _ranked(["touch", "sight"]),
+                _catalog(),
+                project_facts=None,
+                size_class="small",
+            )
+
+        assert len(result) == 1
+        assert result[0]["nerve"] == "touch"
+
+    def test_tinylm_uses_pairwise(self):
+        """tinylm also routes to pairwise."""
+        candidates = _ranked(["touch"])
+        catalog = _catalog()
+
+        with patch("arqitect.brain.planner._sort_pairwise", return_value=[{"nerve": "touch", "args": "x"}]) as mock_pw:
+            _sort_into_sequence("task", candidates, catalog, None, "tinylm")
+
+        mock_pw.assert_called_once()
+
+    def test_none_size_class_uses_single_pass(self):
+        """Default (None) uses single-pass."""
+        candidates = _ranked(["touch"])
+        catalog = _catalog()
+
+        with patch("arqitect.brain.planner._sort_single_pass", return_value=[{"nerve": "touch", "args": "x"}]) as mock_sp:
+            _sort_into_sequence("task", candidates, catalog, None, None)
+
+        mock_sp.assert_called_once()
+
+    def test_project_facts_included_in_prompt(self):
+        """Project facts are passed through to the LLM prompt."""
+        fake = FakeLLM([("Available nerves", '[{"nerve": "touch", "args": "build"}]')])
+
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value=[
+                 {"nerve": "touch", "args": "build"},
+             ]):
+            _sort_single_pass(
+                "build project",
+                _ranked(["touch"]),
+                _catalog(),
+                project_facts={"language": "python", "framework": "flask"},
+            )
+
+        assert len(fake.prompts_containing("language=python")) == 1
+
+
+# ── TestSortSinglePass ───────────────────────────────────────────────────────
+
+
+@pytest.mark.timeout(10)
+class TestSortSinglePass:
+    """Tests for _sort_single_pass edge cases."""
+
+    def test_llm_returns_dict_with_steps_key(self):
+        """Handle LLM returning {steps: [...]} instead of [...]."""
+        fake = FakeLLM([("Available nerves", '{"steps": [{"nerve": "touch", "args": "go"}]}')])
 
         with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
              patch("arqitect.brain.planner.extract_json", return_value={
-                 "name": "build_app",
-                 "description": "Build the application",
-                 "steps": [{"nerve": "touch", "args_template": "make build", "description": "compile"}],
+                 "steps": [{"nerve": "touch", "args": "go"}],
              }):
-            result = generate_recipe("build app", "coding", {"language": "python"})
+            result = _sort_single_pass("task", _ranked(["touch"]), _catalog(), None)
 
-        assert result is not None
-        assert result["name"] == "build_app"
-        assert len(result["steps"]) == 1
-        assert result["runs"] == 0
-        assert result["success_rate"] == 0
-        assert result["category"] == "coding"
-        expected_id = hashlib.md5("coding:build app".encode()).hexdigest()[:8]
-        assert result["id"] == expected_id
-        assert fake.call_count == 1
+        assert len(result) == 1
+        assert result[0]["nerve"] == "touch"
 
-    def test_returns_none_when_llm_returns_no_steps(self):
-        fake = FakeLLM([("Design a step-by-step", "{}")])
-
-        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
-             patch("arqitect.brain.planner.extract_json", return_value={"name": "empty"}):
-            result = generate_recipe("task", "coding", None)
-
-        assert result is None
-
-    def test_returns_none_when_extract_json_fails(self):
-        fake = FakeLLM([("Design a step-by-step", "not json at all")])
+    def test_llm_returns_garbage(self):
+        """LLM returning non-JSON results in empty chain."""
+        fake = FakeLLM([("Available nerves", "I don't understand")])
 
         with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
              patch("arqitect.brain.planner.extract_json", return_value=None):
-            result = generate_recipe("task", "coding", None)
+            result = _sort_single_pass("task", _ranked(["touch"]), _catalog(), None)
 
-        assert result is None
+        assert result == []
 
-    def test_none_project_facts(self):
-        fake = FakeLLM([("Design a step-by-step", '{"name": "simple_recipe", "steps": [{"nerve": "touch"}]}')])
-
-        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
-             patch("arqitect.brain.planner.extract_json", return_value={
-                 "name": "simple_recipe",
-                 "steps": [{"nerve": "touch", "args_template": "ls"}],
-             }):
-            result = generate_recipe("list files", "explore", None)
-
-        assert result is not None
-        assert result["name"] == "simple_recipe"
-
-    def test_falls_back_to_category_name(self):
-        """When LLM result has no name, falls back to '{category}_recipe'."""
-        fake = FakeLLM([("Design a step-by-step", '{"steps": [{"nerve": "touch"}]}')])
+    def test_llm_returns_empty_array(self):
+        """Empty array from LLM yields empty chain."""
+        fake = FakeLLM([("Available nerves", "[]")])
 
         with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
-             patch("arqitect.brain.planner.extract_json", return_value={
-                 "steps": [{"nerve": "touch", "args_template": "ls"}],
-             }):
-            result = generate_recipe("task", "deploy", None)
+             patch("arqitect.brain.planner.extract_json", return_value=[]):
+            result = _sort_single_pass("task", _ranked(["touch"]), _catalog(), None)
 
-        assert result is not None
-        assert result["name"] == "deploy_recipe"
-
-    def test_prompt_includes_project_context(self):
-        """When project_facts are provided, the prompt includes them."""
-        fake = FakeLLM([("Design a step-by-step", '{"steps": [{"nerve": "touch"}]}')])
-
-        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
-             patch("arqitect.brain.planner.extract_json", return_value={
-                 "steps": [{"nerve": "touch", "args_template": "ls"}],
-             }):
-            generate_recipe("build", "coding", {"language": "rust", "framework": "actix"})
-
-        # Verify the LLM was called with project context in the prompt
-        calls_with_context = fake.prompts_containing("language=rust")
-        assert len(calls_with_context) == 1
+        assert result == []
 
 
-# ── plan_task ─────────────────────────────────────────────────────────────────
+# ── TestSortPairwise ─────────────────────────────────────────────────────────
 
 
 @pytest.mark.timeout(10)
-class TestPlanTask:
-    """Tests for plan_task — main entry point that matches or generates."""
+class TestSortPairwise:
+    """Tests for _sort_pairwise — small model sorting."""
 
-    def test_returns_chain_when_recipe_found(self):
-        with patch("arqitect.brain.planner.match_recipe", return_value=_make_recipe()):
-            result = plan_task("build app", "coding", None)
+    def test_single_candidate_no_llm(self):
+        """Single candidate returns directly without LLM call."""
+        candidates = _ranked(["touch"])
+        result = _sort_pairwise("task", candidates, _catalog(), None)
 
-        assert result is not None
-        assert result["action"] == Action.CHAIN_NERVES
-        assert "steps" in result
+        assert len(result) == 1
+        assert result[0]["nerve"] == "touch"
 
-    def test_generates_when_no_stored_recipe(self):
-        with patch("arqitect.brain.planner.match_recipe", return_value=None), \
-             patch("arqitect.brain.planner.generate_recipe", return_value=_make_recipe(recipe_id="gen1")) as mock_generate:
-            result = plan_task("build app", "coding", None)
+    def test_empty_candidates(self):
+        result = _sort_pairwise("task", [], _catalog(), None)
+        assert result == []
 
-        assert result is not None
-        assert result["action"] == Action.CHAIN_NERVES
-        mock_generate.assert_called_once()
+    def test_fallback_on_llm_garbage(self):
+        """When LLM returns garbage, falls back to candidate order."""
+        fake = FakeLLM([("Nerves:", "nope")])
 
-    def test_returns_none_when_generation_fails(self):
-        with patch("arqitect.brain.planner.match_recipe", return_value=None), \
-             patch("arqitect.brain.planner.generate_recipe", return_value=None):
-            result = plan_task("impossible task", "unknown", None)
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value=None):
+            result = _sort_pairwise(
+                "task",
+                _ranked(["touch", "sight"]),
+                _catalog(),
+                None,
+            )
 
-        assert result is None
-
-
-# ── _recipe_to_chain ──────────────────────────────────────────────────────────
-
-
-@pytest.mark.timeout(10)
-class TestRecipeToChain:
-    """Tests for _recipe_to_chain — converts a recipe dict to a chain decision."""
-
-    def test_placeholder_substitution(self):
-        recipe = _make_recipe(steps=[
-            {"nerve": "touch", "args_template": "build {task}", "description": "build step"},
-        ])
-
-        result = _recipe_to_chain(recipe, "the_app", {"path": "/project"})
-
-        assert result["steps"][0]["args"] == "build the_app"
-
-    def test_project_path_substitution(self):
-        recipe = _make_recipe(steps=[
-            {"nerve": "touch", "args_template": "cd {project_path} && make", "description": "build"},
-        ])
-
-        result = _recipe_to_chain(recipe, "build", {"path": "/my/project"})
-
-        assert result["steps"][0]["args"] == "cd /my/project && make"
-
-    def test_empty_steps(self):
-        recipe = _make_recipe(steps=[])
-
-        result = _recipe_to_chain(recipe, "task", None)
-
-        assert result["action"] == Action.CHAIN_NERVES
-        assert result["steps"] == []
-        assert result["goal"] == "task"
-
-    def test_no_project_facts(self):
-        recipe = _make_recipe(steps=[
-            {"nerve": "touch", "args_template": "{task}", "description": "run"},
-        ])
-
-        result = _recipe_to_chain(recipe, "hello", None)
-
-        assert result["steps"][0]["args"] == "hello"
-
-    def test_empty_args_template_defaults_to_task(self):
-        recipe = _make_recipe(steps=[
-            {"nerve": "touch", "args_template": "", "description": "run"},
-        ])
-
-        result = _recipe_to_chain(recipe, "my_task", None)
-
-        assert result["steps"][0]["args"] == "my_task"
-
-    def test_chain_preserves_recipe_metadata(self):
-        """The chain decision carries recipe_id and recipe_name for later evaluation."""
-        recipe = _make_recipe(recipe_id="meta1", name="meta_recipe")
-
-        result = _recipe_to_chain(recipe, "task", None)
-
-        assert result["recipe_id"] == "meta1"
-        assert result["recipe_name"] == "meta_recipe"
-
-    def test_multiple_steps_preserve_order(self):
-        """Steps should appear in the chain in the same order as the recipe."""
-        recipe = _make_recipe(steps=[
-            {"nerve": "touch", "args_template": "step1 {task}", "description": "first"},
-            {"nerve": "sight", "args_template": "step2 {task}", "description": "second"},
-            {"nerve": "hearing", "args_template": "step3 {task}", "description": "third"},
-        ])
-
-        result = _recipe_to_chain(recipe, "go", None)
-
-        assert len(result["steps"]) == 3
-        assert result["steps"][0]["nerve"] == "touch"
-        assert result["steps"][1]["nerve"] == "sight"
-        assert result["steps"][2]["nerve"] == "hearing"
-        assert result["steps"][0]["args"] == "step1 go"
+        assert len(result) == 2
+        assert result[0]["nerve"] == "touch"
+        assert result[1]["nerve"] == "sight"
 
 
-# ── evaluate_and_store_recipe ─────────────────────────────────────────────────
+# ── TestFindGaps ─────────────────────────────────────────────────────────────
 
 
 @pytest.mark.timeout(10)
-class TestEvaluateAndStoreRecipe:
-    """Tests for evaluate_and_store_recipe — post-execution evaluation and persistence."""
+class TestFindGaps:
+    """Tests for _find_gaps — LLM completeness check."""
 
-    def test_noop_when_no_recipe_id(self, recipes_dir):
-        decision = {"recipe_id": "", "recipe_name": "x", "steps": []}
-        evaluate_and_store_recipe(decision, [], "task", success=True)
+    def test_complete_chain_returns_empty(self):
+        """When LLM says complete, no gaps returned."""
+        fake = FakeLLM([("Is this chain complete", '{"complete": true}')])
+        chain = [{"nerve": "touch", "args": "build"}]
 
-        assert list(recipes_dir.iterdir()) == []
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value={"complete": True}):
+            result = _find_gaps("build project", chain, _catalog(), "medium")
 
-    def test_stores_new_recipe_on_success(self, recipes_dir):
-        decision = {
-            "recipe_id": "new1",
-            "recipe_name": "my_recipe",
-            "goal": "build app",
-            "steps": [{"nerve": "touch", "args": "make"}],
+        assert result == []
+
+    def test_gaps_returned(self):
+        """When LLM identifies gaps, they are returned as steps."""
+        gap_response = {
+            "complete": False,
+            "gaps": [
+                {"nerve": "linter", "description": "lint the code", "args": "run linting"},
+            ],
         }
+        fake = FakeLLM([("Is this chain complete", json.dumps(gap_response))])
+        chain = [{"nerve": "touch", "args": "build"}]
 
-        evaluate_and_store_recipe(decision, [], "build app", success=True)
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value=gap_response):
+            result = _find_gaps("build and lint", chain, _catalog(), "medium")
 
-        stored = json.loads((recipes_dir / "new1.json").read_text())
-        assert stored["success_rate"] == 1.0
-        assert stored["runs"] == 1
-        assert stored["name"] == "my_recipe"
+        assert len(result) == 1
+        assert result[0]["nerve"] == "linter"
 
-    def test_stores_new_recipe_on_failure(self, recipes_dir):
-        decision = {
-            "recipe_id": "fail1",
-            "recipe_name": "fail_recipe",
-            "goal": "deploy",
-            "steps": [],
+    def test_skipped_for_tinylm(self):
+        """tinylm models skip gap analysis entirely."""
+        chain = [{"nerve": "touch", "args": "build"}]
+        result = _find_gaps("task", chain, _catalog(), "tinylm")
+        assert result == []
+
+    def test_llm_returns_garbage(self):
+        """Garbage LLM output returns no gaps."""
+        fake = FakeLLM([("Is this chain complete", "yes it looks good")])
+        chain = [{"nerve": "touch", "args": "build"}]
+
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value=None):
+            result = _find_gaps("task", chain, _catalog(), "medium")
+
+        assert result == []
+
+    def test_malformed_gaps_filtered(self):
+        """Gaps without 'nerve' key are filtered out."""
+        gap_response = {
+            "complete": False,
+            "gaps": [
+                {"description": "no nerve key"},
+                {"nerve": "valid_gap", "args": "do something"},
+            ],
         }
-        fake = FakeLLM([("This recipe failed", "try harder")])
+        fake = FakeLLM([("Is this chain complete", json.dumps(gap_response))])
+        chain = [{"nerve": "touch", "args": "build"}]
 
-        with patch("arqitect.brain.planner._suggest_improvement", return_value="try harder"):
-            evaluate_and_store_recipe(decision, [], "deploy", success=False)
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value=gap_response):
+            result = _find_gaps("task", chain, _catalog(), "large")
 
-        stored = json.loads((recipes_dir / "fail1.json").read_text())
-        assert stored["success_rate"] == 0.0
-        assert stored["runs"] == 1
-        assert stored["eval_notes"] == "try harder"
+        assert len(result) == 1
+        assert result[0]["nerve"] == "valid_gap"
 
-    def test_updates_existing_recipe_stats(self, recipes_dir):
-        existing = _make_recipe(recipe_id="ex1", success_rate=1.0, runs=1)
-        _write_recipe(recipes_dir, existing)
+    def test_none_size_class_still_runs(self):
+        """None size class does not skip gap analysis."""
+        fake = FakeLLM([("Is this chain complete", '{"complete": true}')])
+        chain = [{"nerve": "touch", "args": "x"}]
 
-        decision = {"recipe_id": "ex1", "recipe_name": "test_recipe", "steps": []}
+        with patch("arqitect.brain.planner.llm_generate", side_effect=fake), \
+             patch("arqitect.brain.planner.extract_json", return_value={"complete": True}):
+            result = _find_gaps("task", chain, _catalog(), None)
 
-        evaluate_and_store_recipe(decision, [], "task", success=False)
-
-        updated = json.loads((recipes_dir / "ex1.json").read_text())
-        # Running average: ((1.0 * 1) + 0.0) / 2 = 0.5
-        assert updated["success_rate"] == 0.5
-        assert updated["runs"] == 2
-
-    def test_existing_recipe_running_average_on_success(self, recipes_dir):
-        existing = _make_recipe(recipe_id="ex2", success_rate=0.5, runs=2)
-        _write_recipe(recipes_dir, existing)
-
-        decision = {"recipe_id": "ex2", "recipe_name": "test_recipe", "steps": []}
-
-        evaluate_and_store_recipe(decision, [], "task", success=True)
-
-        updated = json.loads((recipes_dir / "ex2.json").read_text())
-        # Running average: ((0.5 * 2) + 1.0) / 3 = 2.0/3 ~ 0.667
-        assert updated["success_rate"] == pytest.approx(0.667, abs=0.001)
-        assert updated["runs"] == 3
-
-    def test_improvement_called_on_failure_with_fakellm(self, recipes_dir):
-        """Use FakeLLM to verify _suggest_improvement is driven by the LLM."""
-        existing = _make_recipe(recipe_id="imp1", success_rate=0.5, runs=1)
-        _write_recipe(recipes_dir, existing)
-
-        fake = FakeLLM([("This recipe failed", "add error handling")])
-        decision = {"recipe_id": "imp1", "recipe_name": "test_recipe", "steps": []}
-        step_results = [{"step": 0, "nerve": "touch", "status": "error"}]
-
-        with patch("arqitect.brain.planner.llm_generate", side_effect=fake):
-            evaluate_and_store_recipe(decision, step_results, "task", success=False)
-
+        assert result == []
         assert fake.call_count == 1
-        updated = json.loads((recipes_dir / "imp1.json").read_text())
-        assert "add error handling" in updated.get("eval_notes", "")
 
-    def test_no_improvement_on_success(self, recipes_dir):
-        """On success, _suggest_improvement should NOT be called."""
-        existing = _make_recipe(recipe_id="ok1", success_rate=0.5, runs=1)
-        _write_recipe(recipes_dir, existing)
 
-        fake = FakeLLM([("This recipe failed", "should not appear")])
-        decision = {"recipe_id": "ok1", "recipe_name": "test_recipe", "steps": []}
+# ── TestComposeChain ─────────────────────────────────────────────────────────
 
-        with patch("arqitect.brain.planner.llm_generate", side_effect=fake):
-            evaluate_and_store_recipe(decision, [], "task", success=True)
 
-        # LLM should not have been called at all on success
-        assert fake.call_count == 0
+@pytest.mark.timeout(10)
+class TestComposeChain:
+    """Tests for compose_chain — full 3-phase pipeline integration."""
 
-    @given(
-        initial_rate=st.floats(min_value=0.0, max_value=1.0),
-        initial_runs=st.integers(min_value=1, max_value=50),
-        success=st.booleans(),
-    )
-    @settings(max_examples=50)
-    def test_running_average_property(self, initial_rate, initial_runs, success):
-        """Property: running average is always between 0 and 1 after update."""
-        with tempfile.TemporaryDirectory() as td:
-            tmp = Path(td)
-            with patch("arqitect.brain.planner._RECIPES_DIR", td):
-                existing = _make_recipe(
-                    recipe_id="prop1", success_rate=initial_rate, runs=initial_runs,
-                )
-                _write_recipe(tmp, existing)
+    def test_full_pipeline(self):
+        """Happy path: filter → sort → gaps → chain decision."""
+        candidates = _ranked(["touch", "code_analyzer"])
+        sorted_steps = [
+            {"nerve": "code_analyzer", "args": "analyze"},
+            {"nerve": "touch", "args": "apply fix"},
+        ]
 
-                decision = {"recipe_id": "prop1", "recipe_name": "prop_recipe", "steps": []}
+        with patch("arqitect.brain.planner._filter_candidates", return_value=candidates), \
+             patch("arqitect.brain.planner._sort_into_sequence", return_value=sorted_steps), \
+             patch("arqitect.brain.planner._find_gaps", return_value=[]):
+            result = compose_chain("fix bugs", _catalog(), size_class="medium")
 
-                with patch("arqitect.brain.planner._suggest_improvement", return_value=""):
-                    evaluate_and_store_recipe(decision, [], "task", success=success)
+        assert result is not None
+        assert result["action"] == Action.CHAIN_NERVES
+        assert result["goal"] == "fix bugs"
+        assert len(result["steps"]) == 2
+        assert result["steps"][0]["nerve"] == "code_analyzer"
 
-                updated = json.loads((tmp / "prop1.json").read_text())
-                assert 0.0 <= updated["success_rate"] <= 1.0
-                assert updated["runs"] == initial_runs + 1
+    def test_gaps_appended(self):
+        """Gap nerves are appended to the chain."""
+        sorted_steps = [{"nerve": "touch", "args": "build"}]
+        gap_steps = [{"nerve": "linter", "args": "lint", "description": "lint code"}]
+
+        with patch("arqitect.brain.planner._filter_candidates", return_value=_ranked(["touch"])), \
+             patch("arqitect.brain.planner._sort_into_sequence", return_value=sorted_steps), \
+             patch("arqitect.brain.planner._find_gaps", return_value=gap_steps):
+            result = compose_chain("build and lint", _catalog())
+
+        assert result is not None
+        assert len(result["steps"]) == 2
+        assert result["steps"][1]["nerve"] == "linter"
+
+    def test_returns_none_for_empty_task(self):
+        result = compose_chain("", _catalog())
+        assert result is None
+
+    def test_returns_none_for_empty_catalog(self):
+        result = compose_chain("do something", {})
+        assert result is None
+
+    def test_returns_none_when_no_candidates(self):
+        with patch("arqitect.brain.planner._filter_candidates", return_value=[]):
+            result = compose_chain("impossible task", _catalog())
+
+        assert result is None
+
+    def test_returns_none_when_sort_fails(self):
+        with patch("arqitect.brain.planner._filter_candidates", return_value=_ranked(["touch"])), \
+             patch("arqitect.brain.planner._sort_into_sequence", return_value=[]):
+            result = compose_chain("task", _catalog())
+
+        assert result is None
+
+    def test_project_facts_passed_through(self):
+        """project_facts reach sort and gap phases."""
+        facts = {"language": "rust", "framework": "actix"}
+        sorted_steps = [{"nerve": "touch", "args": "cargo build"}]
+
+        with patch("arqitect.brain.planner._filter_candidates", return_value=_ranked(["touch"])), \
+             patch("arqitect.brain.planner._sort_into_sequence", return_value=sorted_steps) as mock_sort, \
+             patch("arqitect.brain.planner._find_gaps", return_value=[]):
+            compose_chain("build", _catalog(), project_facts=facts, size_class="large")
+
+        _, kwargs = mock_sort.call_args
+        # project_facts is the 4th positional arg
+        call_args = mock_sort.call_args[0]
+        assert call_args[3] == facts
+
+    def test_single_nerve_result(self):
+        """A chain with just one nerve is valid."""
+        with patch("arqitect.brain.planner._filter_candidates", return_value=_ranked(["touch"])), \
+             patch("arqitect.brain.planner._sort_into_sequence", return_value=[
+                 {"nerve": "touch", "args": "list files"},
+             ]), \
+             patch("arqitect.brain.planner._find_gaps", return_value=[]):
+            result = compose_chain("list files", _catalog())
+
+        assert result is not None
+        assert len(result["steps"]) == 1
+
+
+# ── TestValidateSteps ────────────────────────────────────────────────────────
+
+
+@pytest.mark.timeout(10)
+class TestValidateSteps:
+    """Tests for _validate_steps — input normalization."""
+
+    def test_filters_non_dict_entries(self):
+        result = _validate_steps(["string", 42, None, {"nerve": "touch", "args": "ok"}])
+        assert len(result) == 1
+
+    def test_filters_entries_without_nerve(self):
+        result = _validate_steps([{"args": "no nerve"}, {"nerve": "", "args": "empty"}])
+        assert len(result) == 0
+
+    def test_uses_args_template_fallback(self):
+        """Falls back to args_template if args is missing."""
+        result = _validate_steps([{"nerve": "touch", "args_template": "echo hi"}])
+        assert result[0]["args"] == "echo hi"
+
+    def test_preserves_description(self):
+        result = _validate_steps([{"nerve": "touch", "args": "go", "description": "do stuff"}])
+        assert result[0]["description"] == "do stuff"
+
+    def test_empty_list(self):
+        assert _validate_steps([]) == []
+
+    def test_deeply_nested_garbage(self):
+        """Completely wrong structure is filtered out."""
+        result = _validate_steps([[[]], {"nested": {"nerve": "touch"}}, True])
+        assert result == []
+
+
+# ── TestCandidatesToSteps ────────────────────────────────────────────────────
+
+
+@pytest.mark.timeout(10)
+class TestCandidatesToSteps:
+    """Tests for _candidates_to_steps — fallback conversion."""
+
+    def test_preserves_order(self):
+        candidates = _ranked(["sight", "touch", "hearing"])
+        result = _candidates_to_steps(candidates, _catalog(), "my task")
+
+        assert [s["nerve"] for s in result] == ["sight", "touch", "hearing"]
+
+    def test_uses_task_as_args(self):
+        candidates = _ranked(["touch"])
+        result = _candidates_to_steps(candidates, _catalog(), "build project")
+
+        assert result[0]["args"] == "build project"
+
+    def test_uses_catalog_description(self):
+        candidates = _ranked(["touch"])
+        result = _candidates_to_steps(candidates, _catalog(), "task")
+
+        assert result[0]["description"] == "file and shell operations"
+
+    def test_empty_candidates(self):
+        assert _candidates_to_steps([], _catalog(), "task") == []

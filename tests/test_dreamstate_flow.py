@@ -1803,8 +1803,9 @@ class TestReconciliationWorkQueue:
     @patch("arqitect.brain.consolidate._get_improvement_threshold", return_value=0.95)
     @patch("arqitect.brain.consolidate.CORE_SENSES", frozenset({"awareness"}))
     @patch("arqitect.brain.consolidate.mem")
-    def test_sense_excluded(self, mock_mem, *_):
-        """Core senses must never be reconciled."""
+    def test_sense_included_in_tuning(self, mock_mem, *_):
+        """Core senses must be included in the tuning queue — they need
+        model-specific prompt tuning just like nerves."""
         from arqitect.brain.consolidate import _build_work_queue
 
         self._patch_work_queue(
@@ -1817,7 +1818,7 @@ class TestReconciliationWorkQueue:
         queue = _build_work_queue()
         names = [item["name"] for item in queue]
 
-        assert "awareness" not in names, "Sense must be excluded from reconciliation"
+        assert "awareness" in names, "Sense must be included in tuning queue"
         assert "real_nerve" in names
 
     @patch("os.path.isfile", return_value=True)

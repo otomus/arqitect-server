@@ -122,6 +122,15 @@ The brain can generate new tools on the fly when a nerve needs a capability that
 5. The file is written to `mcp_tools/{name}.py`
 6. The MCP server picks it up on the next `scan()`
 
+### Validation
+
+Before a fabricated tool is written to disk, `tool_validator.py` scans the generated code for quality issues:
+
+- **Placeholder credentials** — `YOUR_API_KEY`, `DUMMY_*`, `INSERT_*_HERE`, `example.com`, and hardcoded `sk-...` API keys are rejected
+- **Credential dependency detection** — `get_credential()` calls are scanned to build a schema of which services and keys the tool requires at runtime. The brain uses this to request credentials from the user before the tool runs.
+
+If validation fails, the fabrication is retried. Tools that pass validation and use `get_credential()` automatically trigger the [credentials flow](/guide/bridge#credentials-flow) the first time they run.
+
 ### Constraints
 
 - Fabricated tools must use only standard library + `requests`

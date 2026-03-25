@@ -110,7 +110,8 @@ def _setup_brain(fake_llm, mem, test_redis, nerves_dir, sandbox_dir):
         patch("arqitect.brain.brain.NERVES_DIR", nerves_dir),
         patch("arqitect.brain.brain.SANDBOX_DIR", sandbox_dir),
         patch("arqitect.brain.brain.llm_generate", side_effect=fake_llm),
-        patch("arqitect.brain.dispatch.llm_generate", side_effect=fake_llm),
+        patch("arqitect.senses.communication.nerve.rewrite_response",
+              side_effect=lambda message="", **kw: {"response": message, "format": "text", "tone": "neutral"}),
         patch("arqitect.brain.helpers.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.intent.llm_generate", side_effect=fake_llm),
         patch("arqitect.matching._get_nerve_embedding", return_value=None),
@@ -125,6 +126,9 @@ def _setup_brain(fake_llm, mem, test_redis, nerves_dir, sandbox_dir):
         patch("arqitect.brain.brain.get_consolidator", return_value=MagicMock()),
         patch("arqitect.brain.permissions.can_use_nerve", return_value=True),
         patch("arqitect.brain.dispatch.can_use_nerve", return_value=True),
+        # Safety — real pipeline, FakeLLM handles classification
+        patch("arqitect.brain.safety.generate_for_role",
+              side_effect=fake_llm.generate_for_role),
     ]
 
 
@@ -268,8 +272,7 @@ class TestFlowScenarioRouting:
     def test_invoke_tags_route_to_correct_nerve(self, tag, expected_nerve):
         """Tags with invoke routing must dispatch to the right nerve."""
         cases = _pick_cases_by_tag(tag, limit=1)
-        if not cases:
-            pytest.skip(f"No cases for tag {tag}")
+        assert cases, f"No cases for tag {tag} — missing test data is a failure, not a skip"
 
         fake_llm = _build_fake_llm(tag)
         _, trace = _run_case_with_trace(
@@ -460,8 +463,10 @@ class TestFlowScenarioSafety:
 
     def test_blocked_input_produces_safety_event(self):
         """If safety blocks input, a safety_block event fires."""
-        case = {"id": 9997, "tag": "safety", "msgs": ["harmless greeting"]}
-        fake_llm = _build_fake_llm("greeting")
+        fake_llm = FakeLLM([
+            ("safety filter", '{"safe": false, "category": "harmful"}', True),
+            ("refusal message", "Blocked for safety.", True),
+        ])
 
         recorder = FlowRecorder(flow_id="safety-block")
         event_patches = [
@@ -480,13 +485,7 @@ class TestFlowScenarioSafety:
             self.nerves_dir, self.sandbox_dir,
         )
 
-        # Override safety to block this input
-        safety_patch = patch(
-            "arqitect.brain.brain._safety_check_input",
-            return_value=(False, "Blocked for safety."),
-        )
-
-        all_patches = brain_patches + event_patches + silence_patches + [safety_patch]
+        all_patches = brain_patches + event_patches + silence_patches
         for p in all_patches:
             p.start()
 

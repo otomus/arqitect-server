@@ -211,11 +211,17 @@ def publish_all_nerve_details():
 
 
 def _text_similarity(a: str, b: str) -> float:
-    """Simple character-level similarity ratio."""
+    """Symmetric character-level similarity ratio.
+
+    SequenceMatcher.ratio() is order-dependent, so we average both
+    directions to guarantee sim(a, b) == sim(b, a).
+    """
     if not a or not b:
         return 0.0
     from difflib import SequenceMatcher
-    return SequenceMatcher(None, a, b).ratio()
+    forward = SequenceMatcher(None, a, b).ratio()
+    backward = SequenceMatcher(None, b, a).ratio()
+    return (forward + backward) / 2
 
 
 def _validate_response(msg: str, task: str = "") -> str | None:
@@ -249,82 +255,6 @@ def _validate_response(msg: str, task: str = "") -> str | None:
             return "echo"
 
     return None
-
-
-def _apply_personality(msg: str, task: str = "") -> tuple[str, str]:
-    """Apply a light personality touch to a response.
-
-    Returns (flavored_msg, detected_tone). The original message is preserved
-    almost verbatim — only small adjustments to word choice, a brief quip,
-    or a greeting tweak are allowed.
-
-    Structured data (code, JSON, tables) passes through untouched.
-    Short messages (< 10 chars) are not worth touching.
-    """
-    if not msg or len(msg.strip()) < 10:
-        return msg, Tone.NEUTRAL
-    try:
-        from arqitect.senses.communication.nerve import (
-            _load_personality_traits, _build_personality_instruction, _is_structured_data,
-        )
-        if _is_structured_data(msg):
-            return msg, Tone.NEUTRAL
-
-        traits = _load_personality_traits()
-        personality = _build_personality_instruction(traits)
-
-        from arqitect.inference.router import generate_for_role
-        _comm = _resolve_adapter("communication") or {}
-        _comm_sys = _comm.get("system_prompt", "")
-        _comm_temp = get_temperature("communication")
-        result = generate_for_role(
-            "communication",
-            (
-                f"Original message:\n{msg}\n\n"
-                "Add a LIGHT personality touch. You may:\n"
-                "- Adjust a few words for warmth or wit\n"
-                "- Add a short quip (max 5 words) before or after\n"
-                "- Soften or sharpen phrasing slightly\n"
-                "You MUST keep 90%+ of the original text intact.\n"
-                "Do NOT replace the message. Do NOT add new information.\n"
-                "Output ONLY the lightly adjusted message."
-            ),
-            system=(
-                f"{personality} {_comm_sys} "
-                "You are adding a LIGHT personality flavor to an existing message. "
-                "The message is already complete and correct. "
-                "Make MINIMAL changes — a word here, a quip there. "
-                "NEVER replace the message with something different. "
-                "NEVER remove information. Keep it almost identical."
-            ),
-            max_tokens=max(len(msg) + 50, 150),
-            temperature=_comm_temp,
-        ).strip()
-
-        if not result or len(result) < 5 or result.startswith("Error:"):
-            return msg, Tone.NEUTRAL
-
-        # Sanity: if the result diverged too much from original, keep original
-        # Simple check: at least 40% of original words should appear in result
-        orig_words = set(msg.lower().split())
-        result_words = set(result.lower().split())
-        if orig_words and len(orig_words & result_words) < len(orig_words) * 0.4:
-            print(f"[PERSONALITY] Result diverged too much, keeping original")
-            return msg, Tone.NEUTRAL
-
-        # Detect tone from the result (lightweight keyword check, no LLM call)
-        result_lower = result.lower()
-        if any(w in result_lower for w in ("!", "awesome", "great", "excited")):
-            tone = Tone.ENTHUSIASTIC
-        elif any(w in result_lower for w in ("hey", "cool", "yeah", "btw")):
-            tone = Tone.CASUAL
-        else:
-            tone = Tone.NEUTRAL
-
-        return result, tone
-    except Exception as e:
-        print(f"[PERSONALITY] Apply failed: {e}")
-    return msg, Tone.NEUTRAL
 
 
 def _generate_blocked_message(task: str, issue: str) -> str:
@@ -381,7 +311,43 @@ def _is_voice_origin() -> bool:
     return get_task_origin().get("source", "") == "voice"
 
 
-def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTRAL, task: str = "", request_identity: bool = False, already_formatted: bool = False):
+def _record_personality_signal(task: str, msg: str, tone: str, nerve_result: dict | None) -> None:
+    """Record a personality signal for the dreamstate evolution pipeline.
+
+    Never blocks response delivery — all errors are caught and logged.
+
+    Args:
+        task: The user's original input.
+        msg: The final response text.
+        tone: The tone used for the response.
+        nerve_result: Optional nerve output dict with media fields.
+    """
+    try:
+        import time
+        from arqitect.brain.personality import record_signal
+        signal = {
+            "task_snippet": task[:100] if task else "",
+            "tone_used": tone,
+            "response_length": len(msg) if msg else 0,
+            "had_media": bool(nerve_result and isinstance(nerve_result, dict) and (
+                nerve_result.get("gif_url") or nerve_result.get("image_b64")
+            )),
+            "format": nerve_result.get("format", "text") if isinstance(nerve_result, dict) else "text",
+            "timestamp": time.time(),
+        }
+        record_signal(mem.cold, signal)
+    except Exception as e:
+        print(f"[WARN] _record_personality_signal: {e}")
+
+
+def publish_response(
+    msg: str,
+    nerve_result: dict = None,
+    tone: str = Tone.NEUTRAL,
+    task: str = "",
+    request_identity: bool = False,
+    request_credentials: dict | None = None,
+):
     """Publish a rich response envelope to brain:response.
 
     Args:
@@ -390,8 +356,8 @@ def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTR
         tone: Communication tone hint.
         task: The original user task (used for echo detection).
         request_identity: Whether to request user identity in the envelope.
-        already_formatted: When True, skip the personality LLM rewrite
-            (dispatch.py already rewrote through the communication model).
+        request_credentials: Optional credential request payload from
+            ``credentials.build_credential_request()``.
     """
     # Get current task for echo detection — prefer explicit param, fallback to conversation
     if not task:
@@ -423,17 +389,13 @@ def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTR
 
     from arqitect.brain.invoke import invoke_nerve
 
-    # Apply personality rewriting only when dispatch hasn't already formatted
-    # the response through the communication model.  When already_formatted is
-    # True the message was rewritten with full task context in dispatch.py, so
-    # a second LLM pass would be redundant and add latency.
-    if not already_formatted and tone == Tone.NEUTRAL:
-        msg, tone = _apply_personality(msg, task=task)
-
     envelope = build_envelope(message=msg, tone=tone, markdown=True)
 
     if request_identity:
         envelope["request_identity"] = True
+
+    if request_credentials and isinstance(request_credentials, dict):
+        envelope["request_credentials"] = request_credentials
 
     # Merge any media from nerve results (GIF, card, audio, etc.)
     if nerve_result:
@@ -448,6 +410,9 @@ def publish_response(msg: str, nerve_result: dict = None, tone: str = Tone.NEUTR
 
     # Send text response immediately — don't wait for TTS
     publish_event(Channel.BRAIN_RESPONSE, envelope)
+
+    # Record personality signal for dreamstate evolution pipeline
+    _record_personality_signal(task, msg, tone, nerve_result)
 
     # Generate TTS audio only when the original input was voice — text-only
     # tasks (dashboard, telegram, whatsapp, stress_test) don't need speech.

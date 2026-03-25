@@ -45,7 +45,7 @@ class PlanSession:
         project_facts: Detected project context, if any.
         related_plans: Past plans pulled for context.
         related_episodes: Past episodes pulled for context.
-        matched_recipe: Existing recipe if one was matched.
+        matched_chain: Matched nerve chain if one was composed.
         conversation_context: Plan-related messages only (not side messages).
         created_at: Unix timestamp of creation.
         updated_at: Unix timestamp of last modification.
@@ -61,7 +61,7 @@ class PlanSession:
     project_facts: dict | None = None
     related_plans: list[dict] = field(default_factory=list)
     related_episodes: list[dict] = field(default_factory=list)
-    matched_recipe: dict | None = None
+    matched_chain: dict | None = None
     conversation_context: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
@@ -117,28 +117,24 @@ class PlanSession:
         self.status = "approved"
         self.updated_at = time.time()
 
-    def to_recipe(self) -> dict:
-        """Convert an approved plan to a recipe decision for chain execution.
+    def to_chain_decision(self) -> dict:
+        """Convert an approved plan to a chain_nerves decision for dispatch.
 
         Returns:
-            A recipe dict with 'goal', 'steps', 'category', and 'context'.
+            A dict with action=chain_nerves, steps, and goal.
 
         Raises:
             ValueError: If plan is not in 'approved' status or has no steps.
         """
         if self.status != "approved":
-            raise ValueError(f"Cannot convert plan to recipe in '{self.status}' status")
+            raise ValueError(f"Cannot convert plan to chain in '{self.status}' status")
         if not self.steps:
-            raise ValueError("Plan has no steps to convert to recipe")
+            raise ValueError("Plan has no steps to convert to chain")
+        from arqitect.types import Action
         return {
+            "action": Action.CHAIN_NERVES,
             "goal": self.goal,
             "steps": self.steps,
-            "category": self.category,
-            "context": {
-                "requirements": self.requirements,
-                "project_facts": self.project_facts,
-                "conversation": self.conversation_context,
-            },
         }
 
     def complete(self, success: bool = True) -> None:
@@ -174,7 +170,7 @@ class PlanSession:
             "project_facts": self.project_facts,
             "related_plans": self.related_plans,
             "related_episodes": self.related_episodes,
-            "matched_recipe": self.matched_recipe,
+            "matched_chain": self.matched_chain,
             "conversation_context": self.conversation_context,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -201,7 +197,7 @@ class PlanSession:
             project_facts=data.get("project_facts"),
             related_plans=data.get("related_plans", []),
             related_episodes=data.get("related_episodes", []),
-            matched_recipe=data.get("matched_recipe"),
+            matched_chain=data.get("matched_chain", data.get("matched_recipe")),
             conversation_context=data.get("conversation_context", []),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),

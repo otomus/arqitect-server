@@ -23,7 +23,7 @@ import responses as responses_lib
 # ---------------------------------------------------------------------------
 
 class FakeLLM:
-    """Scripted replacement for llm_generate.
+    """Scripted replacement for llm_generate and generate_for_role.
 
     Usage:
         fake = FakeLLM([
@@ -34,6 +34,10 @@ class FakeLLM:
     Each (substring, response) pair matched against prompt+system in order.
     Consumed after use unless reuse=True. Unmatched calls return a
     pass-through for communication rewrites or empty JSON otherwise.
+
+    Also handles generate_for_role calls (safety classification, refusal
+    generation) via ``generate_for_role()``, ensuring the real safety
+    pipeline runs in tests rather than being bypassed.
     """
 
     def __init__(self, responses: list | None = None):
@@ -78,6 +82,37 @@ class FakeLLM:
         # Sense arg translation — pass through as-is
         if "Sense:" in prompt and "extract" in system.lower():
             return '{}'
+        return "{}"
+
+    def generate_for_role(self, role: str, prompt: str, system: str = "",
+                          max_tokens: int | None = None,
+                          temperature: float | None = None,
+                          json_mode: bool | None = None,
+                          lora_path: str | None = None) -> str:
+        """Handle generate_for_role calls (safety, refusal, etc.).
+
+        Routes through the same scripted responses, with built-in defaults
+        for safety classification and refusal generation.
+        """
+        call = {"model": f"role:{role}", "prompt": prompt, "system": system}
+        self.calls.append(call)
+
+        # Check scripted responses first
+        for entry in self._responses:
+            if entry["used"] and not entry["reuse"]:
+                continue
+            if entry["substr"] in prompt or entry["substr"] in system:
+                entry["used"] = True
+                return entry["response"]
+
+        # Safety classification — default to safe
+        if "safety filter" in system.lower():
+            return '{"safe": true}'
+
+        # Refusal generation — return a generic refusal
+        if "refusal message" in system.lower():
+            return "I can't help with that request."
+
         return "{}"
 
     @property
@@ -358,7 +393,8 @@ def setup_brain_patches(fake_llm, mem, test_redis, nerves_dir, sandbox_dir):
     """Return minimal patches for brain.think() tests.
 
     Mocked: LLM (no model), Redis pub/sub events (no listeners), consolidator (heavy).
-    Real: memory, matching, catalog, filesystem, intent (uses mocked LLM).
+    Real: memory, matching, catalog, filesystem, intent (uses mocked LLM),
+          safety filter (runs real pipeline via FakeLLM.generate_for_role).
 
     Args:
         fake_llm: FakeLLM instance (or any callable matching llm_generate signature).
@@ -380,10 +416,12 @@ def setup_brain_patches(fake_llm, mem, test_redis, nerves_dir, sandbox_dir):
         patch("arqitect.brain.brain.SANDBOX_DIR", sandbox_dir),
         # Patch llm_generate at every import site
         patch("arqitect.brain.brain.llm_generate", side_effect=fake_llm),
-        patch("arqitect.brain.dispatch.llm_generate", side_effect=fake_llm),
+        patch("arqitect.senses.communication.nerve.rewrite_response",
+              side_effect=lambda message="", **kw: {"response": message, "format": "text", "tone": "neutral"}),
         patch("arqitect.brain.helpers.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.intent.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.plan_router.llm_generate", side_effect=fake_llm),
+        patch("arqitect.brain.planner.llm_generate", side_effect=fake_llm),
         patch("arqitect.matching._get_nerve_embedding", return_value=None),
         patch("arqitect.brain.synthesis.classify_nerve_role", return_value="tool"),
         patch(
@@ -393,6 +431,9 @@ def setup_brain_patches(fake_llm, mem, test_redis, nerves_dir, sandbox_dir):
                 "start": lambda self: None,
             }),
         ),
+        # Safety — real pipeline, FakeLLM handles classification
+        patch("arqitect.brain.safety.generate_for_role",
+              side_effect=fake_llm.generate_for_role),
         # Events — patched at both brain and dispatch import sites
         patch("arqitect.brain.brain.publish_event"),
         patch("arqitect.brain.brain.publish_response"),
@@ -471,9 +512,11 @@ def patch_synthesize_nerve(return_value=None, side_effect=None):
 
 
 def setup_brain_patches_no_perms(fake_llm, mem, test_redis, nerves_dir, sandbox_dir):
-    """Brain patches with real permissions (not bypassed) + safety bypass.
+    """Brain patches with real permissions (not bypassed) and real safety pipeline.
 
     Used by security tests that need real permission enforcement.
+    Safety runs through the real check_input/check_output pipeline with
+    FakeLLM handling the classification calls.
 
     Args:
         Same as setup_brain_patches.
@@ -490,10 +533,12 @@ def setup_brain_patches_no_perms(fake_llm, mem, test_redis, nerves_dir, sandbox_
         patch("arqitect.brain.brain.NERVES_DIR", nerves_dir),
         patch("arqitect.brain.brain.SANDBOX_DIR", sandbox_dir),
         patch("arqitect.brain.brain.llm_generate", side_effect=fake_llm),
-        patch("arqitect.brain.dispatch.llm_generate", side_effect=fake_llm),
+        patch("arqitect.senses.communication.nerve.rewrite_response",
+              side_effect=lambda message="", **kw: {"response": message, "format": "text", "tone": "neutral"}),
         patch("arqitect.brain.helpers.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.intent.llm_generate", side_effect=fake_llm),
         patch("arqitect.brain.plan_router.llm_generate", side_effect=fake_llm),
+        patch("arqitect.brain.planner.llm_generate", side_effect=fake_llm),
         patch("arqitect.matching._get_nerve_embedding", return_value=None),
         patch("arqitect.brain.synthesis.classify_nerve_role", return_value="tool"),
         patch(
@@ -511,7 +556,8 @@ def setup_brain_patches_no_perms(fake_llm, mem, test_redis, nerves_dir, sandbox_
         patch("arqitect.brain.dispatch.publish_response"),
         patch("arqitect.brain.dispatch.publish_memory_state"),
         patch("arqitect.brain.brain.get_consolidator", return_value=MagicMock()),
-        # Safety bypass — tested separately in TestSafetyFilter
-        patch("arqitect.brain.brain._safety_check_input", return_value=(True, "")),
+        # Safety — real pipeline, FakeLLM handles classification
+        patch("arqitect.brain.safety.generate_for_role",
+              side_effect=fake_llm.generate_for_role),
         # NOTE: permissions NOT patched — real enforcement
     ]

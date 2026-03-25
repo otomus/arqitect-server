@@ -76,6 +76,7 @@ class Channel(StrEnum):
     TOOL_LIFECYCLE = "tool:lifecycle"
     PLAN_UPDATE = "plan:update"
     TASK_REGISTRY = "task:registry"
+    BRAIN_CREDENTIALS = "brain:credentials"
 
 
 class IntentType(StrEnum):
@@ -91,6 +92,7 @@ class NerveStatus(StrEnum):
     SUCCESS = "success"
     WRONG_NERVE = "wrong_nerve"
     NEEDS_DATA = "needs_data"
+    NEEDS_CREDENTIALS = "needs_credentials"
 
 
 class RedisKey(StrEnum):

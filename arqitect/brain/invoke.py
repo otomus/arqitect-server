@@ -128,8 +128,36 @@ def _enrich_nerve_result_with_image(nerve_result: dict) -> dict:
     return nerve_result
 
 
+def _load_sense_adapter(sense_name: str) -> dict | None:
+    """Load the community adapter for a sense, returning its context dict."""
+    try:
+        from arqitect.brain.adapters import resolve_prompt
+        return resolve_prompt(sense_name)
+    except Exception:
+        logger.debug("Failed to load adapter for sense '%s'", sense_name, exc_info=True)
+        return None
+
+
+def _format_adapter_examples(adapter: dict | None) -> str:
+    """Format few-shot examples from an adapter context into a prompt snippet."""
+    if not adapter:
+        return ""
+    examples = adapter.get("few_shot_examples", [])
+    if not examples:
+        return ""
+    lines = ["\nExamples:"]
+    for ex in examples:
+        lines.append(f'Request: "{ex["input"]}" → {ex["output"]}')
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _translate_sense_args(sense_name: str, raw_args: str, task: str) -> str:
-    """Use LLM to translate natural language args into structured JSON for a sense."""
+    """Use LLM to translate natural language args into structured JSON for a sense.
+
+    Loads system prompt and few-shot examples from the community adapter for
+    this sense. Falls back to a generic prompt if no adapter is available.
+    """
     from arqitect.brain.config import r, BRAIN_MODEL
     from arqitect.brain.helpers import llm_generate
 
@@ -156,23 +184,26 @@ def _translate_sense_args(sense_name: str, raw_args: str, task: str) -> str:
     if not available:
         return raw_args
 
+    # Load community adapter for this sense (system prompt + examples)
+    adapter = _load_sense_adapter(sense_name)
+    system_prompt = (
+        adapter.get("system_prompt", "") if adapter
+        else "You extract structured parameters from natural language. Output only valid JSON."
+    )
+    examples = _format_adapter_examples(adapter)
+
     prompt = (
         f"Sense: {sense_name}\n"
         f"Available modes: {', '.join(available)}\n"
         f"User request: {task}\n"
         f"Current args: {raw_args}\n\n"
-        f"Extract the correct JSON arguments for this sense. "
-        f"Pick the mode that best matches the user's intent. "
-        f"Include any relevant parameters (file paths, text, language, duration, etc).\n"
+        f"Pick the mode that best matches the user's intent and output JSON.\n"
+        f"{examples}"
         f"Output ONLY a valid JSON object, nothing else."
     )
 
     try:
-        result = llm_generate(
-            BRAIN_MODEL, prompt,
-            system="You extract structured parameters from natural language. Output only valid JSON."
-        )
-        # Validate it's JSON
+        result = llm_generate(BRAIN_MODEL, prompt, system=system_prompt)
         parsed = json.loads(result.strip())
         return json.dumps(parsed)
     except Exception as e:

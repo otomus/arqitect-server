@@ -1,295 +1,369 @@
-"""Recipe-based Planner — matches, generates, executes, and learns recipes.
+"""On-the-fly Nerve Chain Planner — composes chains dynamically from live catalog.
 
-A recipe is a learned pattern of nerve chain steps for a category of workflow.
-Recipes are stored as JSON files in brain/recipes/ and improve over time through
-evaluation after each execution.
+Instead of matching persisted recipes, the planner scans the live nerve catalog
+using hybrid keyword+embedding matching, orders candidates via LLM, and
+identifies gaps that need synthesis.
 
-Flow:
-  1. Match stored recipe by category + task similarity
-  2. If no match, generate a new recipe using brain LLM
-  3. Return a chain_nerves decision for the existing chain handler
-  4. After execution, evaluate results and store/update the recipe
+Three-phase pipeline:
+  1. Filter candidates — match_nerves() scan, no LLM, O(n)
+  2. Sort into sequence — LLM orders candidates into a chain
+  3. Find gaps — LLM identifies missing capabilities to synthesize
 """
-
-import hashlib
-import json
-import os
-import time
 
 from arqitect.brain.config import BRAIN_MODEL
 from arqitect.brain.helpers import llm_generate, extract_json
+from arqitect.matching import match_nerves
 from arqitect.types import Action
 
-
-_RECIPES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recipes")
-os.makedirs(_RECIPES_DIR, exist_ok=True)
+MAX_CANDIDATES = 15
+PAIRWISE_CAP = 5
 
 
 # ── Main entry point ─────────────────────────────────────────────────────────
 
-def plan_task(task: str, category: str, project_facts: dict | None) -> dict | None:
-    """Match or generate a recipe for the given workflow task.
+def compose_chain(
+    task: str,
+    nerve_catalog: dict[str, str],
+    project_facts: dict | None = None,
+    size_class: str | None = None,
+) -> dict | None:
+    """Compose a nerve chain for a task by scanning the live catalog.
 
-    Returns a chain_nerves decision dict, or None if planning fails.
-    The decision has: {"action": "chain_nerves", "steps": [...], "goal": "...",
-                       "recipe_id": "..."}
+    Pipeline: filter candidates → sort into sequence → find gaps.
+    Returns a chain_nerves decision dict or None if no candidates match.
+
+    Args:
+        task: The user's task description.
+        nerve_catalog: Full {name: description} mapping of available nerves.
+        project_facts: Optional detected project context (language, framework, etc.).
+        size_class: Model size class ('tinylm', 'small', 'medium', 'large').
+
+    Returns:
+        A dict with action=chain_nerves, steps, and goal — or None.
     """
-    # 1. Try to match a stored recipe
-    recipe = match_recipe(task, category)
-    if recipe:
-        print(f"[PLANNER] Matched stored recipe: {recipe['name']} "
-              f"(success_rate={recipe.get('success_rate', 0):.0%}, runs={recipe.get('runs', 0)})")
-        return _recipe_to_chain(recipe, task, project_facts)
-
-    # 2. No match — generate a new recipe
-    print(f"[PLANNER] No stored recipe for category='{category}', generating new recipe")
-    recipe = generate_recipe(task, category, project_facts)
-    if recipe:
-        return _recipe_to_chain(recipe, task, project_facts)
-
-    return None
-
-
-# ── Recipe matching ──────────────────────────────────────────────────────────
-
-def match_recipe(task: str, category: str) -> dict | None:
-    """Find a stored recipe that matches this task.
-
-    Matches by category first, then picks the best by success rate.
-    """
-    recipes = _load_all_recipes()
-    if not recipes:
+    if not task or not nerve_catalog:
         return None
 
-    # Filter by category
-    candidates = [r for r in recipes if r.get("category") == category] if category else []
-
-    # If no category match, try all recipes
+    candidates = _filter_candidates(task, nerve_catalog)
     if not candidates:
-        candidates = recipes
-
-    # Pick the one with highest success rate (and at least 1 run for confidence)
-    best = None
-    best_score = -1
-    for r in candidates:
-        score = r.get("success_rate", 0)
-        # Bonus for more runs (more tested = more trusted)
-        runs = r.get("runs", 0)
-        if runs > 0:
-            score += min(runs / 10, 0.1)  # small bonus, capped
-        if score > best_score:
-            best_score = score
-            best = r
-
-    return best
-
-
-# ── Recipe generation ────────────────────────────────────────────────────────
-
-def generate_recipe(task: str, category: str, project_facts: dict | None) -> dict | None:
-    """Use brain LLM to generate a new recipe for this task type.
-
-    The recipe is a list of nerve steps — each step describes WHAT a nerve
-    should do, and the nerve name is derived from the description.
-    """
-    project_context = ""
-    if project_facts:
-        project_context = (
-            f"\nProject context: language={project_facts.get('language', '?')}, "
-            f"framework={project_facts.get('framework', '?')}, "
-            f"test_framework={project_facts.get('test_framework', '?')}"
-        )
-
-    prompt = (
-        f"Design a step-by-step workflow recipe for this task.\n"
-        f"Task: {task}\n"
-        f"Category: {category}\n"
-        f"{project_context}\n\n"
-        f"Each step is a nerve (autonomous AI agent) that does ONE thing.\n\n"
-        f"IMPORTANT — Use core senses whenever possible instead of creating new nerves:\n"
-        f"  - touch: file/shell operations — read, write, list, exec shell commands, mkdir, etc.\n"
-        f"    For ANY shell command, use nerve='touch' with args_template as a JSON string:\n"
-        f'    {{"command": "exec", "cmd": "the shell command here"}}\n'
-        f"    For file writes: {{\"command\": \"write\", \"path\": \"file.py\", \"content\": \"code here\"}}\n"
-        f"  - sight: image analysis\n"
-        f"  - hearing: audio input/output\n"
-        f"  - communication: formatting, tone adjustment\n"
-        f"  - awareness: identity, capabilities\n\n"
-        f"Only create a NEW nerve name for tasks that genuinely need a specialized AI agent "
-        f"(e.g. code analysis, planning, research). Simple file/shell ops MUST use 'touch'.\n"
-        f"Keep recipes SHORT — 3-5 steps max. Combine related shell commands.\n\n"
-        f"Output a JSON object:\n"
-        f'{{"name": "recipe_name", "description": "what this recipe does", '
-        f'"steps": [{{"nerve": "nerve_name", "description": "what this nerve does", '
-        f'"args_template": "instruction or JSON args for the nerve"}}, ...]}}\n\n'
-        f"Output ONLY the JSON object."
-    )
-
-    raw = llm_generate(BRAIN_MODEL, prompt,
-                       "You design workflow recipes as nerve chain steps. Output only JSON.")
-    result = extract_json(raw)
-
-    if not result or not result.get("steps"):
-        print(f"[PLANNER] Failed to generate recipe")
         return None
 
-    # Build recipe structure
-    recipe_id = hashlib.md5(f"{category}:{task}".encode()).hexdigest()[:8]
-    recipe = {
-        "id": recipe_id,
-        "name": result.get("name", f"{category}_recipe"),
-        "category": category,
-        "description": result.get("description", task),
-        "steps": result["steps"],
-        "success_rate": 0,
-        "runs": 0,
-        "created": time.strftime("%Y-%m-%d"),
-        "last_used": time.strftime("%Y-%m-%d"),
-    }
+    chain = _sort_into_sequence(task, candidates, nerve_catalog, project_facts, size_class)
+    if not chain:
+        return None
 
-    print(f"[PLANNER] Generated recipe '{recipe['name']}' with {len(recipe['steps'])} steps")
-    return recipe
-
-
-# ── Recipe to chain_nerves ───────────────────────────────────────────────────
-
-def _recipe_to_chain(recipe: dict, task: str, project_facts: dict | None) -> dict:
-    """Convert a recipe into a chain_nerves decision."""
-    steps = []
-    for step in recipe.get("steps", []):
-        nerve_name = step.get("nerve", "")
-        args_template = step.get("args_template", "")
-        description = step.get("description", "")
-
-        # Fill in the task-specific args
-        args = args_template.replace("{task}", task) if args_template else task
-        if project_facts and project_facts.get("path"):
-            args = args.replace("{project_path}", project_facts["path"])
-
-        steps.append({
-            "nerve": nerve_name,
-            "args": args,
-            "description": description,
-        })
+    gaps = _find_gaps(task, chain, nerve_catalog, size_class)
+    if gaps:
+        chain.extend(gaps)
 
     return {
         "action": Action.CHAIN_NERVES,
-        "steps": steps,
+        "steps": chain,
         "goal": task,
-        "recipe_id": recipe.get("id", ""),
-        "recipe_name": recipe.get("name", ""),
     }
 
 
-# ── Recipe evaluation and storage ────────────────────────────────────────────
+# ── Phase 1: Filter candidates ───────────────────────────────────────────────
 
-def evaluate_and_store_recipe(recipe_decision: dict, step_results: list[dict],
-                              task: str, success: bool):
-    """Evaluate recipe execution results and store/update the recipe.
+def _filter_candidates(
+    task: str,
+    nerve_catalog: dict[str, str],
+) -> list[tuple[str, float]]:
+    """Filter nerve catalog to the top candidates for a task.
 
-    Called by _handle_recipe_chain after execution completes.
+    Uses hybrid keyword+embedding matching via match_nerves(). No LLM call.
+
+    Args:
+        task: The user's task description.
+        nerve_catalog: Full {name: description} mapping.
+
+    Returns:
+        Up to MAX_CANDIDATES ranked (name, score) pairs, descending by score.
     """
-    recipe_id = recipe_decision.get("recipe_id", "")
-    recipe_name = recipe_decision.get("recipe_name", "")
-
-    if not recipe_id:
-        return
-
-    # Try to load existing recipe
-    existing = _load_recipe(recipe_id)
-
-    if existing:
-        # Update stats
-        runs = existing.get("runs", 0) + 1
-        old_rate = existing.get("success_rate", 0)
-        # Running average
-        new_rate = ((old_rate * (runs - 1)) + (1.0 if success else 0.0)) / runs
-        existing["runs"] = runs
-        existing["success_rate"] = round(new_rate, 3)
-        existing["last_used"] = time.strftime("%Y-%m-%d")
-
-        # If failed, ask LLM for improvement suggestions
-        if not success:
-            improvement = _suggest_improvement(existing, step_results, task)
-            if improvement:
-                notes = existing.get("eval_notes", "")
-                existing["eval_notes"] = f"{notes}\n{improvement}".strip()
-
-        _save_recipe(recipe_id, existing)
-        print(f"[PLANNER] Updated recipe '{recipe_name}': "
-              f"success_rate={existing['success_rate']:.0%}, runs={existing['runs']}")
-    else:
-        # Store as new recipe
-        new_recipe = {
-            "id": recipe_id,
-            "name": recipe_name,
-            "category": recipe_decision.get("category", ""),
-            "description": recipe_decision.get("goal", task),
-            "steps": recipe_decision.get("steps", []),
-            "success_rate": 1.0 if success else 0.0,
-            "runs": 1,
-            "created": time.strftime("%Y-%m-%d"),
-            "last_used": time.strftime("%Y-%m-%d"),
-        }
-
-        if not success:
-            improvement = _suggest_improvement(new_recipe, step_results, task)
-            if improvement:
-                new_recipe["eval_notes"] = improvement
-
-        _save_recipe(recipe_id, new_recipe)
-        print(f"[PLANNER] Stored new recipe '{recipe_name}'")
+    ranked = match_nerves(task, nerve_catalog)
+    return ranked[:MAX_CANDIDATES]
 
 
-def _suggest_improvement(recipe: dict, step_results: list[dict], task: str) -> str:
-    """Ask LLM to suggest improvements based on failure."""
-    failed_steps = [r for r in step_results if r.get("status") == "error"]
-    if not failed_steps:
-        return ""
+# ── Phase 2: Sort into sequence ──────────────────────────────────────────────
 
-    failed_desc = ", ".join(f"step {r['step']+1} ({r.get('nerve', '?')})" for r in failed_steps)
+def _sort_into_sequence(
+    task: str,
+    candidates: list[tuple[str, float]],
+    nerve_catalog: dict[str, str],
+    project_facts: dict | None,
+    size_class: str | None,
+) -> list[dict]:
+    """Order candidates into an executable chain via LLM.
+
+    Picks a strategy based on model size:
+    - medium/large: single-pass LLM call with all candidates
+    - tinylm/small: pairwise comparison, capped at PAIRWISE_CAP candidates
+
+    Args:
+        task: The user's task description.
+        candidates: Ranked (name, score) pairs from phase 1.
+        nerve_catalog: Full catalog for description lookup.
+        project_facts: Optional project context.
+        size_class: Model size class.
+
+    Returns:
+        Ordered list of step dicts: [{"nerve": name, "args": instruction}, ...].
+    """
+    if size_class in ("tinylm", "small"):
+        return _sort_pairwise(task, candidates[:PAIRWISE_CAP], nerve_catalog, project_facts)
+    return _sort_single_pass(task, candidates, nerve_catalog, project_facts)
+
+
+def _sort_single_pass(
+    task: str,
+    candidates: list[tuple[str, float]],
+    nerve_catalog: dict[str, str],
+    project_facts: dict | None,
+) -> list[dict]:
+    """Sort candidates in one LLM call — for medium/large models.
+
+    Args:
+        task: The user's task description.
+        candidates: Ranked (name, score) pairs.
+        nerve_catalog: Full catalog for description lookup.
+        project_facts: Optional project context.
+
+    Returns:
+        Ordered list of step dicts.
+    """
+    candidate_lines = _format_candidate_list(candidates, nerve_catalog)
+    project_context = _format_project_context(project_facts)
+
     prompt = (
-        f"This recipe failed. Recipe: {recipe.get('name', '?')}\n"
         f"Task: {task}\n"
-        f"Failed steps: {failed_desc}\n"
-        f"Steps: {json.dumps(recipe.get('steps', []), indent=2)[:500]}\n\n"
-        f"Suggest ONE concise improvement (max 100 chars)."
+        f"{project_context}"
+        f"Available nerves:\n{candidate_lines}\n\n"
+        f"Select the nerves needed for this task and order them into a step-by-step chain.\n"
+        f"Each step should have a specific instruction for what that nerve should do.\n"
+        f"Use core senses (touch, sight, hearing, communication, awareness) for basic ops.\n"
+        f"Keep the chain SHORT — 3-6 steps max.\n\n"
+        f'Output a JSON array: [{{"nerve": "name", "args": "instruction for this step"}}, ...]\n'
+        f"Output ONLY the JSON array."
     )
-    raw = llm_generate(BRAIN_MODEL, prompt,
-                       "You suggest recipe improvements. Be concise — one sentence max.")
-    return raw.strip()[:200]
+
+    raw = llm_generate(
+        BRAIN_MODEL, prompt,
+        "You compose nerve chains for tasks. Output only a JSON array of steps.",
+    )
+    result = extract_json(raw)
+
+    if isinstance(result, list):
+        return _validate_steps(result)
+
+    if isinstance(result, dict):
+        if "steps" in result:
+            return _validate_steps(result["steps"])
+        # Single step dict — wrap in list
+        if "nerve" in result:
+            return _validate_steps([result])
+
+    return []
 
 
-# ── Recipe persistence ───────────────────────────────────────────────────────
+def _sort_pairwise(
+    task: str,
+    candidates: list[tuple[str, float]],
+    nerve_catalog: dict[str, str],
+    project_facts: dict | None,
+) -> list[dict]:
+    """Sort candidates via pairwise comparison — for tinylm/small models.
 
-def _load_all_recipes() -> list[dict]:
-    """Load all stored recipes from disk."""
-    recipes = []
-    for fname in os.listdir(_RECIPES_DIR):
-        if fname.endswith(".json"):
-            path = os.path.join(_RECIPES_DIR, fname)
-            try:
-                with open(path) as f:
-                    recipes.append(json.load(f))
-            except (json.JSONDecodeError, OSError):
-                continue
-    return recipes
+    Uses simpler prompts that small models can handle reliably.
+
+    Args:
+        task: The user's task description.
+        candidates: Ranked (name, score) pairs (capped at PAIRWISE_CAP).
+        nerve_catalog: Full catalog for description lookup.
+        project_facts: Optional project context.
+
+    Returns:
+        Ordered list of step dicts.
+    """
+    if len(candidates) <= 1:
+        return _candidates_to_steps(candidates, nerve_catalog, task)
+
+    candidate_lines = _format_candidate_list(candidates, nerve_catalog)
+    project_context = _format_project_context(project_facts)
+
+    prompt = (
+        f"Task: {task}\n"
+        f"{project_context}"
+        f"Nerves:\n{candidate_lines}\n\n"
+        f"Order these into a chain for the task. Keep only the needed ones.\n"
+        f'Output JSON array: [{{"nerve": "name", "args": "instruction"}}, ...]\n'
+        f"Output ONLY the JSON."
+    )
+
+    raw = llm_generate(
+        BRAIN_MODEL, prompt,
+        "Order nerves into a chain. Output only JSON.",
+    )
+    result = extract_json(raw)
+
+    if isinstance(result, list):
+        return _validate_steps(result)
+
+    if isinstance(result, dict):
+        if "steps" in result:
+            return _validate_steps(result["steps"])
+        if "nerve" in result:
+            return _validate_steps([result])
+
+    # Fallback: use candidates in score order
+    return _candidates_to_steps(candidates, nerve_catalog, task)
 
 
-def _load_recipe(recipe_id: str) -> dict | None:
-    """Load a specific recipe by ID."""
-    path = os.path.join(_RECIPES_DIR, f"{recipe_id}.json")
-    if os.path.exists(path):
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return None
+# ── Phase 3: Find gaps ───────────────────────────────────────────────────────
+
+def _find_gaps(
+    task: str,
+    chain: list[dict],
+    nerve_catalog: dict[str, str],
+    size_class: str | None,
+) -> list[dict]:
+    """Ask LLM whether the chain is missing any capabilities.
+
+    Gap nerves are returned for synthesis by dispatch's _handle_chain.
+    Skipped for tinylm models — they can't reliably assess completeness.
+
+    Args:
+        task: The user's task description.
+        chain: Current ordered chain steps.
+        nerve_catalog: Full catalog for context.
+        size_class: Model size class.
+
+    Returns:
+        List of gap step dicts to append, or empty list.
+    """
+    if size_class == "tinylm":
+        return []
+
+    chain_desc = "\n".join(
+        f"  {i+1}. {s.get('nerve', '?')}: {s.get('args', '')[:80]}"
+        for i, s in enumerate(chain)
+    )
+
+    prompt = (
+        f"Task: {task}\n"
+        f"Current chain:\n{chain_desc}\n\n"
+        f"Is this chain complete for the task? If not, what nerves are missing?\n"
+        f"Only suggest genuinely missing capabilities — do NOT duplicate existing steps.\n\n"
+        f'If complete, output: {{"complete": true}}\n'
+        f'If missing steps, output: {{"complete": false, "gaps": '
+        f'[{{"nerve": "name", "description": "what it does", "args": "instruction"}}]}}\n'
+        f"Output ONLY the JSON."
+    )
+
+    raw = llm_generate(
+        BRAIN_MODEL, prompt,
+        "You assess nerve chain completeness. Output only JSON.",
+    )
+    result = extract_json(raw)
+
+    if not isinstance(result, dict):
+        return []
+
+    if result.get("complete", True):
+        return []
+
+    gaps = result.get("gaps", [])
+    if not isinstance(gaps, list):
+        return []
+
+    return _validate_steps(gaps)
 
 
-def _save_recipe(recipe_id: str, recipe: dict):
-    """Save a recipe to disk."""
-    path = os.path.join(_RECIPES_DIR, f"{recipe_id}.json")
-    with open(path, "w") as f:
-        json.dump(recipe, f, indent=2)
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _format_candidate_list(
+    candidates: list[tuple[str, float]],
+    nerve_catalog: dict[str, str],
+) -> str:
+    """Format candidates as numbered lines for LLM prompts.
+
+    Args:
+        candidates: Ranked (name, score) pairs.
+        nerve_catalog: Full catalog for description lookup.
+
+    Returns:
+        Formatted string with one nerve per line.
+    """
+    lines = []
+    for i, (name, _score) in enumerate(candidates):
+        desc = nerve_catalog.get(name, "")
+        lines.append(f"  {i+1}. {name}: {desc}")
+    return "\n".join(lines)
+
+
+def _format_project_context(project_facts: dict | None) -> str:
+    """Format project facts as a prompt line, or empty string.
+
+    Args:
+        project_facts: Optional project context dict.
+
+    Returns:
+        Formatted context line or empty string.
+    """
+    if not project_facts:
+        return ""
+    return (
+        f"Project: language={project_facts.get('language', '?')}, "
+        f"framework={project_facts.get('framework', '?')}, "
+        f"test_framework={project_facts.get('test_framework', '?')}\n"
+    )
+
+
+def _validate_steps(steps: list) -> list[dict]:
+    """Filter and normalize a list of step dicts from LLM output.
+
+    Ensures each step has at minimum a 'nerve' key.
+
+    Args:
+        steps: Raw list from LLM JSON output.
+
+    Returns:
+        Validated list of step dicts with 'nerve' and 'args' keys.
+    """
+    validated = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        nerve = step.get("nerve", "")
+        if not nerve:
+            continue
+        validated.append({
+            "nerve": nerve,
+            "args": step.get("args", step.get("args_template", "")),
+            "description": step.get("description", ""),
+        })
+    return validated
+
+
+def _candidates_to_steps(
+    candidates: list[tuple[str, float]],
+    nerve_catalog: dict[str, str],
+    task: str,
+) -> list[dict]:
+    """Convert raw candidates to step dicts as a fallback when LLM fails.
+
+    Args:
+        candidates: Ranked (name, score) pairs.
+        nerve_catalog: Full catalog for description lookup.
+        task: The user's task, used as default args.
+
+    Returns:
+        List of step dicts in candidate order.
+    """
+    return [
+        {
+            "nerve": name,
+            "args": task,
+            "description": nerve_catalog.get(name, ""),
+        }
+        for name, _score in candidates
+    ]

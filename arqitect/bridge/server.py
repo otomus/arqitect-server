@@ -22,6 +22,7 @@ from arqitect.config.loader import (
 from arqitect.types import Channel
 from arqitect.auth.token import create_token, decode_token, should_refresh
 from arqitect.brain.onboarding import handle_onboarding, get_onboarding_state, VERIFIED
+from arqitect.brain.credentials import store_credentials
 
 # Module-level Redis client (created once at startup via _init_redis)
 _redis_client: redis.Redis | None = None
@@ -52,10 +53,12 @@ def _get_cold():
 # Redis channels to subscribe to
 CHANNELS = [
     Channel.BRAIN_THOUGHT, Channel.BRAIN_ACTION, Channel.BRAIN_RESPONSE,
+    Channel.BRAIN_CREDENTIALS,
     Channel.NERVE_RESULT, Channel.NERVE_QUALIFICATION,
     Channel.SYSTEM_STATUS,
     Channel.MEMORY_EPISODE, Channel.MEMORY_TOOL_LEARNED,
     Channel.SENSE_SIGHT_FRAME, Channel.SENSE_STT_RESULT,
+    Channel.SENSE_CALIBRATION,
 ]
 
 # Channels that should be routed per-client (not broadcast)
@@ -112,6 +115,10 @@ async def handle_client_message(data: dict, websocket=None):
 
     if msg_type == "auth":
         await _handle_auth(data, websocket)
+        return
+
+    if msg_type == "fix_list":
+        await _handle_fix_list(websocket)
         return
 
     if msg_type == "nerve_details":
@@ -189,6 +196,15 @@ async def handle_client_message(data: dict, websocket=None):
                     "sense": sense, "key": key, "value": value,
                 }),
             )
+
+    elif msg_type == "fix_details":
+        await _handle_fix_details(data, websocket)
+
+    elif msg_type == "fix_feedback":
+        await _handle_fix_feedback(data, websocket)
+
+    elif msg_type == "credentials":
+        await _handle_credentials(data, websocket)
 
     elif msg_type == "kill":
         await asyncio.to_thread(r.publish, Channel.SYSTEM_KILL, "kill")
@@ -271,6 +287,161 @@ def _complete_onboarding(websocket, session_id: str, user_id: str, cold):
     })))
 
 
+async def _handle_fix_list(websocket):
+    """Return all pending fix items from all senses.
+
+    Sent when the dashboard connects or explicitly requests the list.
+    Reads from the ``synapse:sense_calibration`` hash in Redis.
+    """
+    r = _init_redis()
+    raw_all = await asyncio.to_thread(r.hgetall, "synapse:sense_calibration")
+
+    actions = []
+    for sense_name, raw_cal in raw_all.items():
+        try:
+            cal = json.loads(raw_cal)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        for action in cal.get("user_action_needed", []):
+            action["sense"] = sense_name
+            action["sense_status"] = cal.get("status", "unknown")
+            actions.append(action)
+
+    await websocket.send(json.dumps({
+        "type": "fix_list",
+        "actions": actions,
+    }))
+
+
+async def _handle_fix_details(data: dict, websocket):
+    """Return full calibration details for a specific sense/fix item.
+
+    The client sends: ``{"type": "fix_details", "sense": "hearing", "key": "preferred_voice"}``
+    Response includes the full calibration result for that sense plus
+    the specific action item with its options.
+    """
+    sense = data.get("sense", "")
+    key = data.get("key", "")
+    if not sense:
+        return
+
+    r = _init_redis()
+    raw = await asyncio.to_thread(r.hget, "synapse:sense_calibration", sense)
+    if not raw:
+        await websocket.send(json.dumps({
+            "type": "fix_details",
+            "sense": sense,
+            "error": "no calibration data",
+        }))
+        return
+
+    cal = json.loads(raw)
+
+    # Find the specific action item if key is provided
+    action = None
+    if key:
+        for item in cal.get("user_action_needed", []):
+            if item.get("key") == key:
+                action = item
+                break
+
+    await websocket.send(json.dumps({
+        "type": "fix_details",
+        "sense": sense,
+        "status": cal.get("status", "unknown"),
+        "capabilities": cal.get("capabilities", {}),
+        "config": cal.get("config", {}),
+        "action": action,
+        "all_actions": cal.get("user_action_needed", []),
+    }))
+
+
+async def _handle_fix_feedback(data: dict, websocket):
+    """Process user feedback on a fix item and request the brain to rethink.
+
+    The client sends::
+
+        {"type": "fix_feedback", "sense": "hearing", "key": "preferred_voice",
+         "feedback": "I want a deeper voice, these options don't work for me"}
+
+    The feedback is published to the brain as a task so it can recalibrate
+    or adjust the options based on user input.
+    """
+    sense = data.get("sense", "")
+    key = data.get("key", "")
+    feedback = data.get("feedback", "")
+    if not sense or not feedback:
+        await websocket.send(json.dumps({
+            "type": "fix_feedback_error",
+            "reason": "missing sense or feedback",
+        }))
+        return
+
+    session_id = _client_sessions.get(websocket, "")
+    claims = _client_user.get(websocket)
+    connector_user_id = f"usr_{claims['sub']}" if claims else ""
+
+    # Publish as a brain task with calibration context
+    r = _init_redis()
+    await asyncio.to_thread(
+        r.publish, Channel.BRAIN_TASK, json.dumps({
+            "task": f"[calibration feedback] sense={sense} key={key}: {feedback}",
+            "source": "dashboard",
+            "chat_id": session_id,
+            "connector_user_id": connector_user_id,
+            "metadata": {
+                "type": "fix_feedback",
+                "sense": sense,
+                "key": key,
+                "feedback": feedback,
+            },
+        }),
+    )
+
+    await websocket.send(json.dumps({
+        "type": "fix_feedback_ok",
+        "sense": sense,
+        "key": key,
+    }))
+
+
+async def _handle_credentials(data: dict, websocket):
+    """Store submitted credentials and notify the brain they are available.
+
+    The client sends: {"type": "credentials", "service": "kaggle",
+    "credentials": {"username": "...", "api_key": "..."}}
+    """
+    service = data.get("service", "")
+    creds = data.get("credentials", {})
+    if not service or not creds:
+        await websocket.send(json.dumps({
+            "type": "credentials_error",
+            "reason": "missing_fields",
+        }))
+        return
+
+    await asyncio.to_thread(store_credentials, service, creds)
+
+    r = _init_redis()
+    session_id = _client_sessions.get(websocket, "")
+    await asyncio.to_thread(
+        r.publish, Channel.BRAIN_CREDENTIALS, json.dumps({
+            "service": service,
+            "keys": list(creds.keys()),
+            "chat_id": session_id,
+        }),
+    )
+
+    await websocket.send(json.dumps({
+        "type": "credentials_ok",
+        "service": service,
+    }))
+
+
+# Sessions awaiting credential submission
+_credentials_pending: set = set()
+
+
 async def _route_or_broadcast(channel: str, data, payload: str):
     """Route per-client or broadcast depending on channel and chat_id."""
     chat_id = data.get("chat_id", "") if isinstance(data, dict) else ""
@@ -278,6 +449,10 @@ async def _route_or_broadcast(channel: str, data, payload: str):
     # Detect identity request signal — activate onboarding
     if isinstance(data, dict) and data.get("request_identity") and chat_id:
         _onboarding_active.add(chat_id)
+
+    # Detect credential request signal — track pending credential sessions
+    if isinstance(data, dict) and data.get("request_credentials") and chat_id:
+        _credentials_pending.add(chat_id)
 
     if channel in _ROUTED_CHANNELS and chat_id and chat_id in _session_clients:
         # Inject pending token refresh

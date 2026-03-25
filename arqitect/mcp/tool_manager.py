@@ -53,6 +53,7 @@ class ToolMeta:
     timeout: int
     version: str
     tool_dir: str
+    credentials: list = field(default_factory=list)
 
 
 @dataclass
@@ -143,6 +144,7 @@ class ToolManager:
             timeout=manifest.get("timeout", CALL_TIMEOUT),
             version=manifest.get("version", "0.0.0"),
             tool_dir=tool_dir,
+            credentials=manifest.get("credentials", []),
         )
 
     def call(self, tool_name: str, params: dict) -> str:
@@ -561,13 +563,16 @@ class ToolManager:
         Returns:
             Dict mapping tool name to {description, params}.
         """
-        return {
-            name: {
+        result = {}
+        for name, meta in self._registry.items():
+            info = {
                 "description": meta.description,
                 "params": list(meta.params.keys()) if isinstance(meta.params, dict) else meta.params,
             }
-            for name, meta in self._registry.items()
-        }
+            if meta.credentials:
+                info["credentials"] = meta.credentials
+            result[name] = info
+        return result
 
     def get_meta(self, tool_name: str) -> ToolMeta | None:
         """Get metadata for a tool.

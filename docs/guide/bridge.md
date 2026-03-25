@@ -69,6 +69,8 @@ Every connected client receives these.
 | `memory:tool_learned` | New tool learned notification |
 | `sense:sight:frame` | Vision frame data |
 | `sense:stt:result` | Speech-to-text transcription result |
+| `sense:calibration` | Calibration results with pending fix items |
+| `task:registry` | Task lifecycle events (queued → active → done/failed) |
 
 ## Client message types
 
@@ -83,6 +85,10 @@ The bridge accepts these message types from WebSocket clients:
 | `voice` | `{ audio_b64 }` | Send audio for speech-to-text |
 | `image` | `{ image_b64, prompt }` | Send an image for vision analysis |
 | `sense_config` | `{ sense, key, value }` | Update a sense configuration value |
+| `fix_list` | — | Fetch all pending fix items from calibration |
+| `fix_details` | `{ sense, key }` | Get full details for a specific fix item |
+| `fix_feedback` | `{ sense, key, feedback }` | Send feedback to rethink a fix item |
+| `credentials` | `{ service, credentials }` | Store service credentials |
 | `kill` | — | Shut down the system |
 
 ## Data flow
@@ -102,6 +108,36 @@ brain:task ──► Brain ──► brain:response
                            ▼  WebSocket (routed by session ID)
                       Dashboard (browser)
 ```
+
+## Credentials Flow
+
+When the brain needs API keys or secrets for an external service, it sends a credential request through the response envelope instead of asking the user in chat. The bridge routes this into a secure form on the dashboard.
+
+```
+Brain needs Kaggle API key
+  → publishes request_credentials in envelope
+  → Bridge detects it → sends secure-form prompt to dashboard client
+  → User fills in credentials (never in chat)
+  → Client sends {"type": "credentials", "service": "kaggle", "credentials": {...}}
+  → Bridge stores to arqitect.yaml secrets → notifies brain via brain:credentials
+  → Brain resumes with get_credential("kaggle", "api_key")
+```
+
+Credentials are stored under `secrets.<service>.<key>` in `arqitect.yaml` and never transmitted over the task channel.
+
+## Task Registry
+
+Every task flowing through the brain is tracked and its state changes are broadcast on `task:registry`. The dashboard uses this for real-time task visibility.
+
+| Status | Meaning |
+|---|---|
+| `queued` | Task received, waiting for brain |
+| `active` | Brain is processing |
+| `chain_running` | Multi-step nerve chain executing |
+| `done` | Completed successfully |
+| `failed` | Terminal failure |
+
+Historical task records are persisted to cold memory so they survive Redis flushes and are available for post-mortem analysis.
 
 ## Connecting the dashboard
 

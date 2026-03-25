@@ -55,8 +55,37 @@ def get_tool_list():
             info = all_tools[name]
             desc = info.get("description", "") if isinstance(info, dict) else ""
             params = info.get("params", []) if isinstance(info, dict) else []
-            tool_info[name] = {"description": desc, "params": params}
+            entry = {"description": desc, "params": params}
+            creds = info.get("credentials", []) if isinstance(info, dict) else []
+            if creds:
+                entry["credentials"] = creds
+            tool_info[name] = entry
     return tool_info
+
+
+def get_missing_credentials(tool_name, tool_info):
+    """Check if a tool has credential requirements that are not yet stored.
+
+    Args:
+        tool_name: Name of the tool to check.
+        tool_info: Dict of tool metadata from get_tool_list().
+
+    Returns:
+        List of {service, fields} dicts for missing credentials, or empty list.
+    """
+    from arqitect.brain.credentials import has_credentials
+    info = tool_info.get(tool_name, {})
+    creds = info.get("credentials", [])
+    missing = []
+    for dep in creds:
+        service = dep.get("service", "")
+        keys = dep.get("keys", [])
+        if service and keys and not has_credentials(service, keys):
+            missing.append({
+                "service": service,
+                "fields": [{"key": k, "label": k.replace("_", " ").title()} for k in keys],
+            })
+    return missing
 
 
 def get_tool_names():
@@ -468,12 +497,41 @@ def main():
                 _err(f"[NERVE:{NERVE_NAME}] Using acquired tool: {tool_name}")
 
         publish_tool_learned(NERVE_NAME, tool_name)
+
+        # Pre-flight: check if the tool requires credentials we don't have yet
+        missing_creds = get_missing_credentials(tool_name, tool_info)
+        if missing_creds:
+            _err(f"[NERVE:{NERVE_NAME}] Tool \\'{tool_name}\\' needs credentials: {missing_creds}")
+            respond({
+                "nerve": NERVE_NAME,
+                "input": user_input,
+                "tool": tool_name,
+                "status": "needs_credentials",
+                "credentials": missing_creds,
+                "reason": f"Tool \\'{tool_name}\\' requires credentials before it can run",
+            })
+            return
+
         # Phase 2: Fix garbled values from small model context
         tool_args = substitute_fact_values(tool_args, facts, session)
         tool_result = mcp_call(tool_name, tool_args) or ""
 
+        # Credential-related errors from tool execution
+        _CRED_SIGNALS = ("credential", "api_key", "api key", "auth", "token", "unauthorized", "403", "401")
+        _is_cred_error = lambda msg: any(s in msg.lower() for s in _CRED_SIGNALS)
+
         if tool_result.startswith("MCP call error") or tool_result.startswith("Tool error") or tool_result.startswith("Error:") or tool_result.startswith("Error "):
             _err(f"[NERVE:{NERVE_NAME}] Tool call failed ({tool_name}): {tool_result}")
+            if _is_cred_error(tool_result):
+                respond({
+                    "nerve": NERVE_NAME,
+                    "input": user_input,
+                    "tool": tool_name,
+                    "status": "needs_credentials",
+                    "credentials": missing_creds or [{"service": tool_name, "fields": [{"key": "api_key", "label": "API Key"}]}],
+                    "reason": tool_result,
+                })
+                return
             respond({"nerve": NERVE_NAME, "input": user_input, "tool": tool_name, "error": tool_result,
                      "response": f"Tool \\'{tool_name}\\' returned an error. Please try again."})
             return
@@ -482,12 +540,23 @@ def main():
             result_data = json.loads(tool_result)
             if isinstance(result_data, dict) and "error" in result_data:
                 _err(f"[NERVE:{NERVE_NAME}] Tool returned error: {result_data['error']}")
+                error_msg = str(result_data["error"])
+                if _is_cred_error(error_msg):
+                    respond({
+                        "nerve": NERVE_NAME,
+                        "input": user_input,
+                        "tool": tool_name,
+                        "status": "needs_credentials",
+                        "credentials": missing_creds or [{"service": tool_name, "fields": [{"key": "api_key", "label": "API Key"}]}],
+                        "reason": error_msg,
+                    })
+                    return
                 respond({
                     "nerve": NERVE_NAME,
                     "input": user_input,
                     "tool": tool_name,
                     "status": "needs_data",
-                    "needs": result_data["error"],
+                    "needs": error_msg,
                     "reason": f"Tool \\'{tool_name}\\' could not complete without proper input",
                 })
                 return

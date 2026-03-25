@@ -5,6 +5,7 @@
 - **Python 3.x**
 - **Redis** — required for hot memory
 - **Make** — for the setup commands
+- **gh CLI** *(optional)* — for GitHub App setup during init. Install from [cli.github.com](https://cli.github.com/)
 
 ## Quick Start
 
@@ -18,7 +19,7 @@ This launches the interactive setup wizard that walks you through every configur
 
 ## The Init Wizard
 
-The wizard is a 10-step interactive flow that generates your `arqitect.yaml`. It handles everything — from choosing your inference provider to configuring your AI's personality.
+The wizard is an 11-step interactive flow that generates your `arqitect.yaml`. It handles everything — from choosing your inference provider to configuring your AI's personality and GitHub identity.
 
 ### Step 1: Environment
 
@@ -128,6 +129,25 @@ Configure where data lives.
 - Your name and email
 - JWT secret — auto-generated, cryptographically secure
 - Optional SMTP configuration for email notifications — highly recommended when using the Web SDK, since only users with verified identity can request fabricated nerves on demand (prevents anonymous users from overloading the system)
+
+### Step 11: GitHub Integration
+
+Give your arqitect server its own GitHub identity via a [GitHub App](https://docs.github.com/en/apps).
+
+- **App name** — defaults to `arqitect-{personality-name}` (e.g. `arqitect-ob1`)
+- **Automatic setup** — if `gh` CLI is installed, the wizard creates the app and stores its credentials
+- **Manual setup** — if `gh` is not available, the wizard provides step-by-step instructions to create the app at github.com/settings/apps
+
+The GitHub App gives your server a distinct bot identity (`arqitect-ob1[bot]`) for:
+- Contributing nerves to the community repo via pull requests
+- Working on your own repositories (bug fixes, code contributions)
+- Creating PRs with rich descriptions including qualification scores and usage stats
+
+After creation, install the app on any repositories you want it to access. The community repo owner approves installations for community contributions.
+
+::: tip Skip for now
+GitHub integration is optional. You can set it up later by re-running `make init`.
+:::
 
 ## What Happens Next
 

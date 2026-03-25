@@ -71,14 +71,14 @@ class TestClassify:
     """Tests for the internal LLM classification helper."""
 
     def test_returns_safe_dict_for_safe_content(self):
-        fake = _make_safety_llm([("safe?", '{"safe": true}', True)])
+        fake = _make_safety_llm([("safety filter", '{"safe": true}', True)])
         with _patch_generate(fake):
             result = _classify("hello world")
         assert result == {"safe": True}
 
     def test_returns_unsafe_dict_with_category(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": false, "category": "hate"}', True),
+            ("safety filter", '{"safe": false, "category": "hate"}', True),
         ])
         with _patch_generate(fake):
             result = _classify("some hateful text")
@@ -87,7 +87,7 @@ class TestClassify:
 
     def test_defaults_to_safe_on_error_prefix(self):
         fake = _make_safety_llm([
-            ("safe?", "Error: model unavailable", True),
+            ("safety filter", "Error: model unavailable", True),
         ])
         with _patch_generate(fake):
             result = _classify("anything")
@@ -95,7 +95,7 @@ class TestClassify:
 
     def test_defaults_to_safe_on_invalid_json(self):
         fake = _make_safety_llm([
-            ("safe?", "not json at all", True),
+            ("safety filter", "not json at all", True),
         ])
         with _patch_generate(fake):
             result = _classify("anything")
@@ -103,7 +103,7 @@ class TestClassify:
 
     def test_defaults_to_safe_when_safe_key_missing(self):
         fake = _make_safety_llm([
-            ("safe?", '{"unrelated": 42}', True),
+            ("safety filter", '{"unrelated": 42}', True),
         ])
         with _patch_generate(fake):
             result = _classify("anything")
@@ -111,7 +111,7 @@ class TestClassify:
 
     def test_defaults_to_safe_when_safe_is_not_bool(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": "yes"}', True),
+            ("safety filter", '{"safe": "yes"}', True),
         ])
         with _patch_generate(fake):
             result = _classify("anything")
@@ -123,7 +123,7 @@ class TestClassify:
         assert result == {"safe": True}
 
     def test_truncates_long_text(self):
-        fake = _make_safety_llm([("safe?", '{"safe": true}', True)])
+        fake = _make_safety_llm([("safety filter", '{"safe": true}', True)])
         with _patch_generate(fake):
             long_text = "x" * 10_000
             _classify(long_text)
@@ -136,7 +136,7 @@ class TestClassify:
     @settings(max_examples=30, deadline=5000)
     def test_never_raises_on_arbitrary_input(self, text):
         """_classify must never propagate exceptions to the caller."""
-        fake = _make_safety_llm([("safe?", '{"safe": true}', True)])
+        fake = _make_safety_llm([("safety filter", '{"safe": true}', True)])
         with _patch_generate(fake):
             result = _classify(text)
         assert isinstance(result, dict)
@@ -247,7 +247,7 @@ class TestCheckInput:
 
     def test_safe_message_passes(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": true}', True),
+            ("safety filter", '{"safe": true}', True),
         ])
         with _patch_generate(fake):
             is_safe, reason = check_input("Tell me a joke")
@@ -256,7 +256,7 @@ class TestCheckInput:
 
     def test_unsafe_message_blocked_with_refusal(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": false, "category": "hate"}'),
+            ("safety filter", '{"safe": false, "category": "hate"}'),
             ("blocked", "Blocked."),
         ])
         with _patch_generate(fake):
@@ -266,7 +266,7 @@ class TestCheckInput:
 
     def test_unsafe_without_category_uses_unknown(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": false}'),
+            ("safety filter", '{"safe": false}'),
             ("blocked", "No."),
         ])
         with _patch_generate(fake):
@@ -298,7 +298,7 @@ class TestCheckOutput:
 
     def test_safe_response_passes(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": true}', True),
+            ("safety filter", '{"safe": true}', True),
         ])
         with _patch_generate(fake):
             is_safe, reason = check_output("Here is a joke for you.")
@@ -307,7 +307,7 @@ class TestCheckOutput:
 
     def test_unsafe_response_blocked(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": false, "category": "sensitive_data"}'),
+            ("safety filter", '{"safe": false, "category": "sensitive_data"}'),
             ("blocked", "Blocked output."),
         ])
         with _patch_generate(fake):
@@ -317,7 +317,7 @@ class TestCheckOutput:
 
     def test_no_media_urls_passes(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": true}', True),
+            ("safety filter", '{"safe": true}', True),
         ])
         with _patch_generate(fake):
             is_safe, reason = check_output("safe text", media_urls=None)
@@ -325,7 +325,7 @@ class TestCheckOutput:
 
     def test_empty_media_urls_passes(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": true}', True),
+            ("safety filter", '{"safe": true}', True),
         ])
         with _patch_generate(fake):
             is_safe, reason = check_output("safe text", media_urls=[])
@@ -334,9 +334,9 @@ class TestCheckOutput:
     def test_unsafe_media_url_blocks_response(self):
         fake = _make_safety_llm([
             # First call: response text is safe
-            ("safe?", '{"safe": true}'),
+            ("safety filter", '{"safe": true}'),
             # Second call: media URL is unsafe
-            ("safe?", '{"safe": false, "category": "nsfw_url"}'),
+            ("safety filter", '{"safe": false, "category": "nsfw_url"}'),
             ("blocked", "NSFW blocked."),
         ])
         with _patch_generate(fake):
@@ -349,7 +349,7 @@ class TestCheckOutput:
 
     def test_media_urls_with_none_entries_filtered(self):
         fake = _make_safety_llm([
-            ("safe?", '{"safe": true}', True),
+            ("safety filter", '{"safe": true}', True),
         ])
         with _patch_generate(fake):
             is_safe, reason = check_output("text", media_urls=[None, "", None])
@@ -360,9 +360,9 @@ class TestCheckOutput:
     def test_safe_media_urls_pass(self):
         fake = _make_safety_llm([
             # Response text: safe
-            ("safe?", '{"safe": true}'),
+            ("safety filter", '{"safe": true}'),
             # Media URLs: safe
-            ("safe?", '{"safe": true}'),
+            ("safety filter", '{"safe": true}'),
         ])
         with _patch_generate(fake):
             is_safe, reason = check_output(

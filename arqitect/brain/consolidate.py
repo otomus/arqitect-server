@@ -36,7 +36,7 @@ import shutil
 import time
 import threading
 
-from arqitect.brain.config import CORE_SENSES, NERVES_DIR, mem
+from arqitect.brain.config import CORE_SENSES, NERVES_DIR, SENSES_DIR, mem
 from arqitect.brain.events import publish_event, publish_nerve_status
 from arqitect.types import Channel, InferenceRole
 
@@ -67,6 +67,110 @@ MIN_TEST_COVERAGE = 0.8  # Must run 80% of test bank before score is trustworthy
 
 # Extension-to-language mapping (shared across contribution methods)
 _EXT_TO_LANG = {".py": "python", ".js": "javascript", ".ts": "typescript"}
+
+
+def _get_project_specific_names() -> set[str]:
+    """Collect all project-specific names that must be stripped from community PRs.
+
+    Sources: config name, personality name, connector bot_names, bot_aliases.
+    Returns lowercase set for case-insensitive matching.
+    """
+    from arqitect.config.loader import get_config
+    names: set[str] = set()
+    for key in ("name", "personality.name", "admin.name"):
+        val = get_config(key, "")
+        if val and isinstance(val, str) and len(val) > 1:
+            names.add(val.lower())
+    for connector in ("telegram", "whatsapp", "discord", "slack"):
+        bot_name = get_config(f"connectors.{connector}.bot_name", "")
+        if bot_name and isinstance(bot_name, str) and len(bot_name) > 1:
+            names.add(bot_name.lower())
+        aliases = get_config(f"connectors.{connector}.bot_aliases", [])
+        if isinstance(aliases, list):
+            for alias in aliases:
+                if alias and isinstance(alias, str) and len(alias) > 1:
+                    names.add(alias.lower())
+    # Never strip generic words that happen to match
+    names.discard("bot")
+    names.discard("ai")
+    names.discard("assistant")
+    return names
+
+
+def _generalize_text(text: str, project_names: set[str] | None = None) -> str:
+    """Strip project-specific references from text for community contribution.
+
+    Replaces bot/project names with "the assistant" so nerves work for any project.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    if project_names is None:
+        project_names = _get_project_specific_names()
+    if not project_names:
+        return text
+    import re
+    for name in sorted(project_names, key=len, reverse=True):
+        # Word-boundary replacement to avoid corrupting substrings
+        # e.g. "essential" must not become "the assistantial"
+        pattern = re.compile(r"\b" + re.escape(name) + r"\b", re.IGNORECASE)
+        text = pattern.sub("the assistant", text)
+    return text
+
+
+def _generalize_examples(
+    examples: list[dict], project_names: set[str] | None = None,
+) -> list[dict]:
+    """Strip project-specific references from example input/output pairs."""
+    if not examples:
+        return examples
+    if project_names is None:
+        project_names = _get_project_specific_names()
+    result = []
+    for ex in examples:
+        if not isinstance(ex, dict):
+            continue
+        cleaned = {}
+        for key, val in ex.items():
+            if isinstance(val, str):
+                cleaned[key] = _generalize_text(val, project_names)
+            else:
+                cleaned[key] = val
+        result.append(cleaned)
+    return result
+
+
+def _generalize_test_bank(
+    test_bank: list[dict], project_names: set[str] | None = None,
+) -> list[dict]:
+    """Strip project-specific references from test cases for community contribution."""
+    if not test_bank:
+        return test_bank
+    if project_names is None:
+        project_names = _get_project_specific_names()
+    result = []
+    for tc in test_bank:
+        if not isinstance(tc, dict):
+            continue
+        cleaned = {}
+        for key, val in tc.items():
+            if isinstance(val, str):
+                cleaned[key] = _generalize_text(val, project_names)
+            else:
+                cleaned[key] = val
+        result.append(cleaned)
+    return result
+
+
+def _resolve_nerve_py(name: str) -> str:
+    """Return the path to a nerve's nerve.py, checking both nerves and senses dirs.
+
+    Core senses live under SENSES_DIR, regular nerves under NERVES_DIR.
+    Uses dynamic lookup so test patches take effect.
+    """
+    from arqitect.config.loader import get_nerves_dir, get_senses_dir
+    if name in CORE_SENSES or mem.cold.is_sense(name):
+        return os.path.join(get_senses_dir(), name, "nerve.py")
+    return os.path.join(get_nerves_dir(), name, "nerve.py")
 
 # Sibling discovery constants
 _STDLIB_MODULES = frozenset({
@@ -469,8 +573,12 @@ def _fabricate_sibling_tools(nerve_name: str, candidates: list[dict],
 def _system_prompt_to_plain_text(system_prompt: str, tool_names: list[str] | None = None) -> str:
     """Convert a JSON-structured system_prompt to community-format plain text.
 
-    If already plain text, returns as-is. JSON prompts with goal/output/boundary
-    keys are flattened into readable paragraphs.
+    Handles several formats LLMs produce:
+    - Plain text → returned as-is
+    - ``{"system_prompt": "..."}`` → unwrapped to the inner string
+    - ``{"goal": "...", "output": "...", "boundary": "..."}`` → flattened
+    - ``{"name": "...", "description": "..."}`` → description extracted
+    - JSON prefix followed by plain-text rules → JSON extracted, rest kept
 
     Args:
         system_prompt: Raw system prompt (JSON object string or plain text).
@@ -479,20 +587,157 @@ def _system_prompt_to_plain_text(system_prompt: str, tool_names: list[str] | Non
     Returns:
         Plain-text system prompt suitable for community contribution.
     """
+    json_text, remainder = _split_json_prefix(system_prompt)
+    plain = _extract_plain_from_json(json_text, tool_names)
+    if plain is not None:
+        return f"{plain}\n{remainder}".strip() if remainder else plain
+    return system_prompt
+
+
+def _split_json_prefix(text: str) -> tuple[str, str]:
+    """Split a string into a leading JSON object and any trailing text.
+
+    Returns:
+        (json_part, remainder) — remainder is empty when the entire
+        string is valid JSON or when no JSON prefix is found.
+    """
+    stripped = text.strip()
+    if not stripped.startswith("{"):
+        return text, ""
+    try:
+        json.loads(stripped)
+        return stripped, ""
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Find where the top-level JSON object ends by scanning for balanced braces
+    depth = 0
+    for i, ch in enumerate(stripped):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                json_part = stripped[:i + 1]
+                remainder = stripped[i + 1:].strip()
+                try:
+                    json.loads(json_part)
+                    return json_part, remainder
+                except (json.JSONDecodeError, TypeError):
+                    break
+    return text, ""
+
+
+def _extract_plain_from_json(text: str, tool_names: list[str] | None = None) -> str | None:
+    """Extract plain-text content from a JSON-structured system prompt.
+
+    Returns None when the text isn't parseable JSON or doesn't match any
+    known structure.
+    """
+    try:
+        obj = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(obj, dict):
+        return None
+
+    # {"system_prompt": "..."} → unwrap
+    if "system_prompt" in obj and isinstance(obj["system_prompt"], str):
+        return obj["system_prompt"]
+
+    # {"goal": "...", "output": "...", "boundary": "..."}
+    if "goal" in obj:
+        parts = [obj["goal"]]
+        if obj.get("output"):
+            parts.append(f"Output: {obj['output']}")
+        if obj.get("boundary"):
+            parts.append(f"Boundary: {obj['boundary']}")
+        if tool_names:
+            parts.append(f"Available tools: {', '.join(tool_names)}.")
+        return "\n\n".join(parts)
+
+    # {"name": "...", "description": "..."} or any dict with a description
+    if "description" in obj and isinstance(obj["description"], str):
+        return obj["description"]
+
+    return None
+
+
+_SIZE_CONFIGS = {
+    "tinylm": {"few_shot_limit": 2, "max_context": 2048, "max_messages": 1, "include_summary": True},
+    "small":  {"few_shot_limit": 3, "max_context": 4096, "max_messages": 5, "include_summary": True},
+    "medium": {"few_shot_limit": 5, "max_context": 8192, "max_messages": 20, "include_summary": False},
+    "large":  {"few_shot_limit": 8, "max_context": 16384, "max_messages": 100, "include_summary": False},
+}
+
+
+def _parse_examples(examples) -> list:
+    """Parse examples from nerve metadata, handling both list and JSON string formats."""
+    if isinstance(examples, str):
+        try:
+            return json.loads(examples)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    return examples if isinstance(examples, list) else []
+
+
+def _fallback_examples(name: str, role: str) -> list:
+    """Read examples from local adapter context.json when cold memory is empty."""
+    try:
+        from arqitect.brain.adapters import resolve_nerve_prompt
+        ctx = resolve_nerve_prompt(name, role)
+        if ctx and ctx.get("few_shot_examples"):
+            return ctx["few_shot_examples"]
+    except (ImportError, ValueError):
+        pass
+    return []
+
+
+def _extract_description_from_prompt(system_prompt: str, fallback: str) -> str:
+    """Extract a description from a JSON-structured system_prompt's goal field."""
     try:
         prompt_obj = json.loads(system_prompt)
         if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
-            parts = [prompt_obj["goal"]]
-            if prompt_obj.get("output"):
-                parts.append(f"Output: {prompt_obj['output']}")
-            if prompt_obj.get("boundary"):
-                parts.append(f"Boundary: {prompt_obj['boundary']}")
-            if tool_names:
-                parts.append(f"Available tools: {', '.join(tool_names)}.")
-            return "\n\n".join(parts)
+            return prompt_obj["goal"]
     except (json.JSONDecodeError, TypeError):
         pass
-    return system_prompt
+    return fallback
+
+
+def _collect_contribution_tool_names(name: str) -> list[str]:
+    """Collect tool names that qualify for contribution (enough usage, not self-referencing)."""
+    tools_with_counts = mem.cold.get_nerve_tools_with_counts(name)
+    return [t["tool"] for t in tools_with_counts
+            if t["tool"] != name and t["use_count"] >= MIN_TOOL_USES_FOR_CONTRIBUTION]
+
+
+def _write_size_class_files(
+    sc_dir: str, system_prompt: str, size_class: str, tool_names: list[str],
+    examples: list, cfg: dict, role: str, description: str, score: float,
+    build_meta_json, temperature: float = 0.7,
+):
+    """Write context.json and meta.json for a single size class directory."""
+    adapted_prompt = _adapt_prompt_for_size(system_prompt, size_class, tool_names=tool_names)
+    context = {
+        "system_prompt": adapted_prompt,
+        "few_shot_examples": examples[:cfg["few_shot_limit"]],
+        "temperature": temperature,
+        "qualification_score": round(score, 2),
+    }
+
+    meta = build_meta_json(role, size_class, size_class, score=score, has_lora=False)
+    meta["capabilities"] = {
+        "json_mode": True,
+        "tool_calling": True,
+        "max_context": cfg["max_context"],
+        "max_messages": cfg["max_messages"],
+        "include_summary": cfg["include_summary"],
+    }
+    meta["description"] = description
+
+    with open(os.path.join(sc_dir, "context.json"), "w") as f:
+        json.dump(context, f, indent=2)
+    with open(os.path.join(sc_dir, "meta.json"), "w") as f:
+        json.dump(meta, f, indent=2)
 
 
 def _resolve_tool_source(mcp_tools_dir: str, tool_name: str, lang: str) -> str | None:
@@ -549,17 +794,9 @@ def _adapt_prompt_for_size(system_prompt: str, size_class: str,
     if size_class == "medium":
         return f"{plain}\n\nReturn tool calls as JSON when appropriate.\n\n{context_block}"
 
-    # Extract goal for smaller models
-    goal = plain
-    try:
-        prompt_obj = json.loads(system_prompt)
-        if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
-            goal = prompt_obj["goal"]
-    except (json.JSONDecodeError, TypeError):
-        # For plain text, use first line as goal
-        lines = plain.strip().splitlines()
-        if lines:
-            goal = lines[0]
+    # Extract first line as a concise goal for smaller models
+    lines = plain.strip().splitlines()
+    goal = lines[0] if lines else plain
 
     if size_class == "small":
         tools_sentence = ""
@@ -574,89 +811,399 @@ def _adapt_prompt_for_size(system_prompt: str, size_class: str,
     return f"{goal}{tools_csv}\nRespond with JSON tool calls."
 
 
-def _contribute_pr(community_dir: str, add_path: str, commit_msg: str,
-                   pr_title: str, pr_body: str, branch_prefix: str,
-                   search_key: str) -> str | None:
-    """Create or update a community PR.
+def _sync_with_main(community_dir: str, _run) -> None:
+    """Sync the current branch with origin/main, handling conflicts.
 
-    Deduplicates by searching for an existing open PR from @me matching search_key.
-    If found, checks out its branch, updates, rebases, and force-pushes.
-    If not, creates a new branch and PR.
+    Tries rebase first. If that fails (conflict), falls back to merge.
+    If merge also conflicts, uses ``-X ours`` to prefer our changes.
 
-    Returns the PR URL on success, None on failure.
+    Args:
+        community_dir: Path to the community repo clone.
+        _run: Subprocess runner bound to community_dir.
     """
+    rebase = _run(["git", "pull", "--rebase", "origin", "main"])
+    if rebase.returncode == 0:
+        return
+    logger.warning("[CONTRIBUTE] Rebase conflict, falling back to merge")
+    _run(["git", "rebase", "--abort"])
+    merge = _run(["git", "merge", "origin/main", "--no-edit"])
+    if merge.returncode == 0:
+        return
+    logger.warning("[CONTRIBUTE] Merge conflict, resolving with -X ours")
+    _run(["git", "merge", "--abort"])
+    _run(["git", "merge", "origin/main", "-X", "ours", "--no-edit"])
+
+
+def _parse_nerve_from_branch(branch: str) -> str:
+    """Extract nerve name from a contribution branch name.
+
+    Branch formats:
+    - ``contribute/nerve_name-1234567890``
+    - ``nerve-adapter/nerve_name-size-1234567890``
+    - ``nerve-stack/nerve_name-lang-1234567890``
+
+    Args:
+        branch: Git branch name.
+
+    Returns:
+        Nerve name, or empty string if unparseable.
+    """
+    import re
+    # contribute/weather_lookup-1711234567
+    match = re.match(r"contribute/(.+?)-\d+$", branch)
+    if match:
+        return match.group(1)
+    # nerve-adapter/weather_lookup-medium-1711234567
+    match = re.match(r"nerve-adapter/(.+?)-\w+-\d+$", branch)
+    if match:
+        return match.group(1)
+    # nerve-stack/weather_lookup-python-1711234567
+    match = re.match(r"nerve-stack/(.+?)-\w+-\d+$", branch)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _build_pr_body(name: str, bundle: dict, role: str = "tool") -> str:
+    """Build a rich markdown PR body for a community nerve contribution.
+
+    Pulls qualification, invocation stats, tools, examples, and system
+    prompt goal from cold memory to give reviewers full context.
+
+    Args:
+        name: Nerve identifier.
+        bundle: The nerve bundle dict (description, tools, etc.).
+        role: Nerve role classification.
+
+    Returns:
+        Markdown-formatted PR body string.
+    """
+    sections: list[str] = [f"## Nerve: {name}"]
+
+    description = bundle.get("description", "")
+    if description:
+        sections.append(f"\n**Why:** {description}")
+
+    sections.append(f"\n**Role:** {role}")
+
+    # Qualification stats
+    qual = mem.cold.get_qualification("nerve", name)
+    if qual:
+        score_pct = f"{qual['score'] * 100:.0f}%"
+        sections.append(
+            f"**Qualification:** {score_pct} "
+            f"({qual.get('pass_count', 0)}/{qual.get('test_count', 0)} tests passed, "
+            f"{qual.get('iterations', 1)} iterations)"
+        )
+
+    # Invocation stats
+    info = mem.cold.get_nerve_info(name)
+    if info:
+        total = info.get("total_invocations", 0) or 0
+        successes = info.get("successes", 0) or 0
+        rate = f"{successes / total * 100:.0f}%" if total > 0 else "N/A"
+        sections.append(f"**Usage:** {total} invocations, {rate} success rate")
+        trigger = info.get("trigger_task", "")
+        if trigger:
+            sections.append(f"\n**Origin:** {trigger}")
+
+    # Tools table
+    tools = bundle.get("tools", [])
+    if tools:
+        tools_with_counts = {
+            t["tool"]: t["use_count"]
+            for t in mem.cold.get_nerve_tools_with_counts(name)
+        }
+        rows = []
+        for t in tools:
+            t_name = t.get("name", "")
+            uses = tools_with_counts.get(t_name, 0)
+            desc = t.get("description", "")
+            rows.append(f"| {t_name} | {uses} | {desc} |")
+        if rows:
+            sections.append("\n### Tools")
+            sections.append("| Tool | Uses | Description |")
+            sections.append("|------|------|-------------|")
+            sections.extend(rows)
+
+    # Examples from nerve metadata
+    nerve_meta = mem.cold.get_nerve_metadata(name)
+    examples = nerve_meta.get("examples", [])[:2]
+    if examples:
+        sections.append("\n### Examples")
+        for ex in examples:
+            if isinstance(ex, dict):
+                inp = ex.get("input", ex.get("user", ""))
+                out = ex.get("output", ex.get("assistant", ""))
+                if inp:
+                    sections.append(f"- **Input:** {inp}")
+                if out:
+                    out_short = out[:200] + "..." if len(out) > 200 else out
+                    sections.append(f"- **Output:** {out_short}")
+
+    # System prompt goal
+    sys_prompt = nerve_meta.get("system_prompt", "")
+    if sys_prompt:
+        tool_names = [t.get("name", "") for t in tools]
+        plain = _system_prompt_to_plain_text(sys_prompt, tool_names)
+        if plain:
+            goal_short = plain[:500] + "..." if len(plain) > 500 else plain
+            sections.append(f"\n### System Prompt Goal\n{goal_short}")
+
+    sections.append("\n---\nAuto-contributed by dreamstate "
+                    "· [arqitect](https://github.com/otomus/arqitect)")
+    return "\n".join(sections)
+
+
+def _contribute_pr(community_dir: str, add_path: str | list[str], commit_msg: str,
+                   pr_title: str, pr_body: str, branch_prefix: str,
+                   search_key: str,
+                   prepare_fn: callable | None = None) -> str | None:
+    """Create or update a community PR using a git worktree for isolation.
+
+    Each contribution gets its own worktree so the main clone stays on
+    ``main`` and concurrent contributions don't interfere. Authenticates
+    via the GitHub App when configured, falling back to ``gh`` CLI.
+
+    Deduplicates by searching for an existing open PR matching search_key.
+    If found, updates the existing branch. Otherwise creates a new one.
+
+    Args:
+        community_dir: Path to the community repo clone.
+        add_path: Single path or list of paths to ``git add``.
+        commit_msg: Commit message.
+        pr_title: PR title.
+        pr_body: PR description (markdown).
+        branch_prefix: Branch name prefix (e.g. ``contribute/weather``).
+        search_key: String to search in existing PR titles for dedup.
+        prepare_fn: Optional callback ``(worktree_dir) -> None`` that writes
+            files into the worktree before staging. Called after the worktree
+            is created but before ``git add``.
+
+    Returns:
+        PR URL or branch name on success, None on failure.
+    """
+    add_paths = [add_path] if isinstance(add_path, str) else add_path
     import subprocess
 
-    def _run(cmd, **kw):
-        return subprocess.run(cmd, cwd=community_dir, capture_output=True,
+    def _run(cmd, cwd=community_dir, **kw):
+        return subprocess.run(cmd, cwd=cwd, capture_output=True,
                               text=True, timeout=kw.pop("timeout", 30), **kw)
 
+    repo = _get_community_repo()
+    use_app = _configure_app_auth(community_dir, repo)
+
     try:
-        # Check for existing open PR from us
-        existing_branch = None
-        check = _run(["gh", "pr", "list", "--author", "@me", "--state", "open",
-                       "--search", search_key, "--json", "headRefName", "--limit", "1"])
-        if check.returncode == 0 and check.stdout.strip() not in ("", "[]"):
-            prs = json.loads(check.stdout)
-            if prs:
-                existing_branch = prs[0]["headRefName"]
+        existing_branch = _find_existing_pr_branch(community_dir, _run, search_key,
+                                                   repo, use_app)
 
         if existing_branch:
-            # Update existing PR — checkout its branch, update files, amend
-            _run(["git", "checkout", existing_branch])
-            _run(["git", "add", add_path])
-            # Check if there are staged changes
-            diff = _run(["git", "diff", "--cached", "--quiet"])
-            if diff.returncode == 0:
-                # No changes — nothing to update
-                _run(["git", "checkout", "main"])
-                return None
-            _run(["git", "commit", "-m", commit_msg])
-            _run(["git", "pull", "--rebase", "origin", "main"])
-            _run(["git", "push", "--force-with-lease"], timeout=60)
-            logger.info("[CONTRIBUTE] Updated existing PR on branch '%s'", existing_branch)
-            _run(["git", "checkout", "main"])
-            return existing_branch
+            return _update_existing_pr(community_dir, _run, existing_branch,
+                                       add_paths, commit_msg, prepare_fn,
+                                       repo, use_app)
         else:
-            # New PR
-            branch_name = f"{branch_prefix}-{int(time.time())}"
-            _run(["git", "checkout", "main"])
-            _run(["git", "pull", "origin", "main"])
-            _run(["git", "checkout", "-b", branch_name])
-            _run(["git", "add", add_path])
-            commit_result = _run(["git", "commit", "-m", commit_msg])
-            if commit_result.returncode != 0:
-                logger.warning("[CONTRIBUTE] Commit failed: %s", commit_result.stderr[:200])
-                _run(["git", "checkout", "main"])
-                return None
-            _run(["git", "pull", "--rebase", "origin", "main"])
-            push_result = _run(["git", "push", "-u", "origin", branch_name], timeout=60)
-            if push_result.returncode != 0:
-                logger.warning("[CONTRIBUTE] Push failed: %s", push_result.stderr[:200])
-                _run(["git", "checkout", "main"])
-                return None
-            pr_result = _run(["gh", "pr", "create",
-                              "--title", pr_title, "--body", pr_body], timeout=60)
-            _run(["git", "checkout", "main"])
-            url = pr_result.stdout.strip()
-            if pr_result.returncode == 0 or url.startswith("http"):
-                logger.info("[CONTRIBUTE] PR created: %s", url)
-                return url
-            else:
-                logger.warning("[CONTRIBUTE] PR creation failed: %s",
-                               (pr_result.stderr or pr_result.stdout)[:200])
-                return None
+            return _create_new_pr(community_dir, _run, branch_prefix, add_paths,
+                                  commit_msg, pr_title, pr_body, repo, use_app,
+                                  prepare_fn)
 
     except subprocess.TimeoutExpired:
         logger.warning("[CONTRIBUTE] Git timeout for '%s'", search_key)
     except Exception as e:
         logger.warning("[CONTRIBUTE] Git error for '%s': %s", search_key, e)
-    finally:
-        try:
-            _run(["git", "checkout", "main"])
-        except Exception as exc:
-            logger.debug("[CONTRIBUTE] Could not checkout main in finally: %s", exc)
     return None
+
+
+def _get_community_repo() -> str:
+    """Read the community repo from config, defaulting to otomus/arqitect-community."""
+    from arqitect.config.loader import get_config
+    return get_config("github.community_repo", "otomus/arqitect-community")
+
+
+def _configure_app_auth(community_dir: str, repo: str) -> bool:
+    """Configure GitHub App auth on the repo if available.
+
+    Returns True if app auth is active, False if falling back to gh CLI.
+    """
+    try:
+        from arqitect.github_app import is_configured, configure_git_auth
+        if is_configured():
+            configure_git_auth(community_dir, repo)
+            return True
+    except ImportError:
+        pass
+    return False
+
+
+def _find_existing_pr_branch(community_dir: str, _run, search_key: str,
+                             repo: str, use_app: bool) -> str | None:
+    """Search for an existing open PR matching the search key.
+
+    Uses the GitHub App API when available, otherwise ``gh`` CLI.
+
+    Returns:
+        Branch name if found, None otherwise.
+    """
+    if use_app:
+        return _find_pr_branch_via_api(repo, search_key)
+
+    check = _run(["gh", "pr", "list", "--author", "@me", "--state", "open",
+                   "--search", search_key, "--json", "headRefName", "--limit", "1"])
+    if check.returncode == 0 and check.stdout.strip() not in ("", "[]"):
+        prs = json.loads(check.stdout)
+        if prs:
+            return prs[0]["headRefName"]
+    return None
+
+
+def _find_pr_branch_via_api(repo: str, search_key: str) -> str | None:
+    """Find an existing PR branch using the GitHub App API."""
+    try:
+        from arqitect.github_app import list_open_prs, get_app_slug
+        slug = get_app_slug()
+        prs = list_open_prs(repo, author=slug) if slug else list_open_prs(repo)
+        for pr in prs:
+            if search_key.lower() in pr.get("title", "").lower():
+                return pr.get("head", {}).get("ref", "")
+    except ImportError:
+        pass
+    return None
+
+
+def _update_existing_pr(community_dir: str, _run, branch: str,
+                        add_paths: list[str], commit_msg: str,
+                        prepare_fn: callable | None = None,
+                        repo: str = "", use_app: bool = False) -> str | None:
+    """Update an existing PR branch using a worktree.
+
+    Args:
+        community_dir: Path to community repo clone.
+        _run: Subprocess runner.
+        branch: Existing branch name.
+        add_paths: Paths to ``git add``.
+        commit_msg: Commit message.
+        prepare_fn: Optional callback to write files into the worktree.
+        repo: Repository for app auth.
+        use_app: Whether GitHub App auth is active.
+
+    Returns:
+        Branch name on success, None if no changes or on failure.
+    """
+    worktree_dir = os.path.join(community_dir, ".worktrees", branch.replace("/", "_"))
+    try:
+        _run(["git", "fetch", "origin", branch])
+        _clean_worktree(community_dir, _run, worktree_dir)
+        _run(["git", "worktree", "add", worktree_dir, branch])
+
+        if use_app:
+            _configure_app_auth(worktree_dir, repo)
+        if prepare_fn:
+            prepare_fn(worktree_dir)
+
+        wt_run = lambda cmd, **kw: _run(cmd, cwd=worktree_dir, **kw)
+        wt_run(["git", "add"] + add_paths)
+        diff = wt_run(["git", "diff", "--cached", "--quiet"])
+        if diff.returncode == 0:
+            return None
+
+        wt_run(["git", "commit", "-m", commit_msg])
+        _sync_with_main(worktree_dir, wt_run)
+        wt_run(["git", "push", "--force-with-lease"], timeout=60)
+        logger.info("[CONTRIBUTE] Updated existing PR on branch '%s'", branch)
+        return branch
+    finally:
+        _clean_worktree(community_dir, _run, worktree_dir)
+
+
+def _create_new_pr(community_dir: str, _run, branch_prefix: str,
+                   add_paths: list[str], commit_msg: str,
+                   pr_title: str, pr_body: str,
+                   repo: str, use_app: bool,
+                   prepare_fn: callable | None = None) -> str | None:
+    """Create a new PR using a worktree.
+
+    Args:
+        community_dir: Path to community repo clone.
+        _run: Subprocess runner.
+        branch_prefix: Branch name prefix.
+        add_paths: Paths to ``git add``.
+        commit_msg: Commit message.
+        pr_title: PR title.
+        pr_body: PR description.
+        repo: Repository for app auth and PR creation.
+        use_app: Whether GitHub App auth is active.
+        prepare_fn: Optional callback to write files into the worktree.
+
+    Returns:
+        PR URL on success, None on failure.
+    """
+    branch_name = f"{branch_prefix}-{int(time.time())}"
+    worktree_dir = os.path.join(community_dir, ".worktrees", branch_name.replace("/", "_"))
+
+    try:
+        _run(["git", "fetch", "origin", "main"])
+        _clean_worktree(community_dir, _run, worktree_dir)
+        _run(["git", "worktree", "add", "-b", branch_name, worktree_dir, "origin/main"])
+
+        if use_app:
+            _configure_app_auth(worktree_dir, repo)
+        if prepare_fn:
+            prepare_fn(worktree_dir)
+
+        wt_run = lambda cmd, **kw: _run(cmd, cwd=worktree_dir, **kw)
+        wt_run(["git", "add"] + add_paths)
+        commit_result = wt_run(["git", "commit", "-m", commit_msg])
+        if commit_result.returncode != 0:
+            logger.warning("[CONTRIBUTE] Commit failed: %s", commit_result.stderr[:200])
+            return None
+
+        push_result = wt_run(["git", "push", "-u", "origin", branch_name], timeout=60)
+        if push_result.returncode != 0:
+            logger.warning("[CONTRIBUTE] Push failed: %s", push_result.stderr[:200])
+            return None
+
+        return _open_pr(community_dir, wt_run, pr_title, pr_body,
+                        branch_name, repo, use_app)
+    finally:
+        _clean_worktree(community_dir, _run, worktree_dir)
+
+
+def _open_pr(community_dir: str, _run, pr_title: str, pr_body: str,
+             branch_name: str, repo: str, use_app: bool) -> str | None:
+    """Open a PR using the GitHub App API or ``gh`` CLI.
+
+    Returns:
+        PR URL on success, None on failure.
+    """
+    if use_app:
+        try:
+            from arqitect.github_app import create_pr
+            url = create_pr(repo, pr_title, pr_body, branch_name)
+            if url:
+                logger.info("[CONTRIBUTE] PR created (app): %s", url)
+                return url
+        except ImportError:
+            pass
+
+    pr_result = _run(["gh", "pr", "create", "--title", pr_title, "--body", pr_body,
+                       "--repo", repo], timeout=60)
+    url = pr_result.stdout.strip()
+    if pr_result.returncode == 0 or url.startswith("http"):
+        logger.info("[CONTRIBUTE] PR created (gh): %s", url)
+        return url
+
+    logger.warning("[CONTRIBUTE] PR creation failed: %s",
+                   (pr_result.stderr or pr_result.stdout)[:200])
+    return None
+
+
+def _clean_worktree(community_dir: str, _run, worktree_dir: str) -> None:
+    """Remove a worktree if it exists, cleaning up stale entries."""
+    import shutil
+    if os.path.isdir(worktree_dir):
+        _run(["git", "worktree", "remove", "--force", worktree_dir])
+    if os.path.isdir(worktree_dir):
+        shutil.rmtree(worktree_dir, ignore_errors=True)
+    _run(["git", "worktree", "prune"])
 
 
 def _update_nerve_file_description(nerve_name: str, new_desc: str):
@@ -1188,9 +1735,9 @@ def _build_work_queue() -> list[dict]:
     2. Within each group, weakest score first
 
     This ensures nerves the user actually invokes get tuned before
-    dormant ones. Only includes nerves that:
-    - Are not core senses
-    - Have a nerve.py file on disk
+    dormant ones. Includes both nerves and senses — senses need
+    model-specific tuning too. Only includes entries that:
+    - Have a nerve.py file on disk (nerves dir or senses dir)
     - Score below _get_improvement_threshold()
     """
     quals = mem.cold.list_qualifications()
@@ -1213,9 +1760,7 @@ def _build_work_queue() -> list[dict]:
 
     queue = []
     for name, desc in all_nerves.items():
-        if name in CORE_SENSES or mem.cold.is_sense(name):
-            continue
-        nerve_py = os.path.join(nerves_dir, name, "nerve.py")
+        nerve_py = _resolve_nerve_py(name)
         if not os.path.isfile(nerve_py):
             continue
         score = nerve_scores.get(name, 0.0)
@@ -1246,12 +1791,9 @@ def _validate_nerve(name: str) -> bool:
     since we built the queue.
     """
     # Check nerve exists on disk (don't use catalog — it excludes 0% nerves)
-    from arqitect.config.loader import get_nerves_dir; nerves_dir = get_nerves_dir()
-    nerve_py = os.path.join(nerves_dir, name, "nerve.py")
+    nerve_py = _resolve_nerve_py(name)
     if not os.path.isfile(nerve_py):
         return False  # deleted by consolidation
-    if name in CORE_SENSES or mem.cold.is_sense(name):
-        return False
 
     # Check current score
     quals = mem.cold.list_qualifications()
@@ -1691,22 +2233,23 @@ class Dreamstate:
         self._schedule()
 
     def wake(self):
-        """Signal brain to wake up after current nerve improvement finishes.
+        """Signal brain to wake up without blocking on dreamstate.
 
-        Sets the interrupted flag so dreamstate will stop after completing
-        the current nerve's improvement cycle (non-interruptible per-nerve).
-        Waits briefly (30s) for dreamstate to reach a safe yield point.
-        If dreamstate is in a non-interruptible phase (sync, consolidation,
-        or nerve improvement), the brain proceeds to handle the task anyway —
-        dreamstate will finish in the background and check the flag at the
-        next interruptible point.
+        Sets the interrupted flag so dreamstate will stop at its next
+        checkpoint (after completing the current non-interruptible phase).
+        Does NOT block waiting for dreamstate to finish — the brain proceeds
+        immediately to handle the incoming task.  Dreamstate will check
+        ``_interrupted`` at its next interruptible point and yield on its own.
+
+        A brief 0.5s join catches the common fast-yield case (dreamstate
+        already idle or between phases) without penalising task latency.
         """
         self._last_activity = time.time()
         self._interrupted.set()
         worker = self._worker_thread
         if worker and worker.is_alive():
             logger.info("[DREAMSTATE] Waking up — signaling dreamstate to yield...")
-            worker.join(timeout=30)
+            worker.join(timeout=0.5)
             if worker.is_alive():
                 logger.info("[DREAMSTATE] Dreamstate still running (non-interruptible phase) — proceeding with task")
             else:
@@ -1797,6 +2340,7 @@ class Dreamstate:
             ("community_sync", self._dream_community_sync),
             ("consolidation", lambda: consolidate_nerves(interrupted=self._interrupted)),
             ("nerve_improvement", self._dream_nerve_improvement_loop),
+            ("pr_review", self._dream_pr_review),
             ("usage_report", self._dream_usage_report),
             ("personality", self._dream_personality),
         ]
@@ -1837,8 +2381,6 @@ class Dreamstate:
             all_nerves = mem.cold.list_nerves()
             invoked = []
             for name in all_nerves:
-                if name in CORE_SENSES or mem.cold.is_sense(name):
-                    continue
                 last = mem.cold.get_last_invoked_at(name)
                 if not last:
                     continue
@@ -1903,6 +2445,7 @@ class Dreamstate:
             qual = mem.cold.get_qualification("nerve", nerve_name)
             if qual:
                 best_score = qual.get("score", 0.0)
+            baseline_score = best_score
 
             for iteration in range(1, MAX_IMPROVE_ITERATIONS + 1):
                 logger.info("[DREAMSTATE] '%s' iteration %d/%d (score: %.0f%%)",
@@ -2118,24 +2661,13 @@ class Dreamstate:
             logger.warning("[NERVE-HEAL] Failed to fix '%s': %s", tool_name, e)
 
     def _contribute_nerve_progress(self, nerve_name: str):
-        """Open or update a PR to arqitect-community for a nerve (no adapter.gguf gate)."""
+        """Open or update a PR to arqitect-community for a nerve."""
         community_dir = self._find_community_dir()
         if not community_dir:
             return
 
         try:
-            bundle = self._build_nerve_bundle(nerve_name)
-            if not bundle:
-                return
-
-            if not self._community_has_nerve(community_dir, nerve_name):
-                self._contribute_nerve_bundle(community_dir, nerve_name, bundle)
-            else:
-                from arqitect.brain.adapters import get_active_variant
-                role = bundle.get("role", "tool")
-                size_class = get_active_variant(role)
-                self._contribute_nerve_model_adapter(community_dir, nerve_name, size_class)
-
+            self._contribute_nerve(community_dir, nerve_name)
             logger.info("[CONTRIBUTE] Contributed progress for '%s'", nerve_name)
         except Exception as e:
             logger.warning("[CONTRIBUTE] Failed to contribute '%s': %s", nerve_name, e)
@@ -2281,8 +2813,6 @@ class Dreamstate:
             for nerve_name, desc in catalog.items():
                 if self._interrupted.is_set():
                     break
-                if nerve_name in CORE_SENSES or mem.cold.is_sense(nerve_name):
-                    continue
 
                 # Track iteration progress per nerve (resumes across dream cycles)
                 progress_raw = mem.cold.get_fact("fanout", nerve_name)
@@ -3017,35 +3547,21 @@ class Dreamstate:
         if not nerve_meta:
             return None
 
-        description = nerve_meta.get("description", "")
+        project_names = _get_project_specific_names()
+        description = _generalize_text(
+            nerve_meta.get("description", ""), project_names,
+        )
         role = nerve_meta.get("role", "tool")
         system_prompt = nerve_meta.get("system_prompt", "")
 
-        # Description fallback: if it's just the nerve name, extract goal from system_prompt
         if not description or description == name or " " not in description:
-            try:
-                prompt_obj = json.loads(system_prompt)
-                if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
-                    description = prompt_obj["goal"]
-            except (json.JSONDecodeError, TypeError):
-                pass
+            description = _extract_description_from_prompt(system_prompt, description)
+            description = _generalize_text(description, project_names)
 
-        examples = nerve_meta.get("examples", [])
-        if isinstance(examples, str):
-            try:
-                examples = json.loads(examples)
-            except (json.JSONDecodeError, TypeError):
-                examples = []
-
-        # Examples fallback: read from local adapter context.json
+        examples = _parse_examples(nerve_meta.get("examples", []))
+        examples = _generalize_examples(examples, project_names)
         if not examples:
-            try:
-                from arqitect.brain.adapters import resolve_nerve_prompt
-                ctx = resolve_nerve_prompt(name, role)
-                if ctx and ctx.get("few_shot_examples"):
-                    examples = ctx["few_shot_examples"]
-            except (ImportError, ValueError):
-                pass
+            examples = _fallback_examples(name, role)
 
         tool_entries = self._collect_tool_entries(name)
 
@@ -3096,7 +3612,7 @@ class Dreamstate:
                 src = _resolve_tool_source(mcp_tools_dir, tool_name, lang)
                 if src:
                     ext = os.path.splitext(src)[1]
-                    implementations[lang] = f"mcp_tools/{tool_name}/tool{ext}"
+                    implementations[lang] = f"{tool_name}/tool{ext}"
 
             if not implementations:
                 logger.debug("[CONTRIBUTE] Skipping phantom tool '%s' (not found on disk)", tool_name)
@@ -3143,23 +3659,27 @@ class Dreamstate:
         shutil.copy2(local_adapter, os.path.join(dest_dir, "adapter.gguf"))
         logger.info("[CONTRIBUTE] Included LoRA adapter for %s/%s/%s", name, size_class, model_slug)
 
-    def _copy_tool_implementations(self, name: str, bundle: dict, nerve_dir: str):
-        """Copy tool source files from local mcp_tools/ into the community nerve directory.
+    def _copy_tool_implementations(self, name: str, bundle: dict, community_dir: str):
+        """Copy tool source files from local mcp_tools/ into the community root mcp_tools/.
+
+        Tools live at {community_dir}/mcp_tools/{tool_name}/ — shared across all
+        nerves, not nested inside the nerve directory.
 
         Uses _resolve_tool_source to find implementations in both directory and
         flat layouts. Prunes implementations entries in-place when source is not found.
         """
         from arqitect.config.loader import get_mcp_tools_dir
         mcp_tools_dir = str(get_mcp_tools_dir())
+        community_tools_dir = os.path.join(community_dir, "mcp_tools")
         for tool in bundle.get("tools", []):
             tool_name = tool["name"]
             missing_langs = []
             for lang, rel_path in tool.get("implementations", {}).items():
                 src = _resolve_tool_source(mcp_tools_dir, tool_name, lang)
                 if src:
-                    dest_dir = os.path.join(nerve_dir, os.path.dirname(rel_path))
-                    os.makedirs(dest_dir, exist_ok=True)
-                    shutil.copy2(src, os.path.join(nerve_dir, rel_path))
+                    dest = os.path.join(community_tools_dir, rel_path)
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    shutil.copy2(src, dest)
                 else:
                     missing_langs.append(lang)
             # Prune implementations that couldn't be copied
@@ -3167,9 +3687,13 @@ class Dreamstate:
                 tool["implementations"].pop(lang, None)
 
     def _write_test_cases(self, name: str, nerve_dir: str):
-        """Write test_cases.json from cold memory into the community nerve directory."""
+        """Write test_cases.json from cold memory into the community nerve directory.
+
+        Generalizes test cases to strip project-specific references.
+        """
         test_bank = mem.cold.get_test_bank(name) if hasattr(mem.cold, "get_test_bank") else None
         if test_bank:
+            test_bank = _generalize_test_bank(test_bank)
             with open(os.path.join(nerve_dir, "test_cases.json"), "w") as f:
                 json.dump(test_bank, f, indent=2)
 
@@ -3189,82 +3713,63 @@ class Dreamstate:
             get_temperature, build_meta_json,
         )
 
-        nerve_meta = mem.cold.get_nerve_metadata(name)
-        system_prompt = nerve_meta.get("system_prompt", "")
-        description = nerve_meta.get("description", "")
-        examples = nerve_meta.get("examples", [])
-        if isinstance(examples, str):
-            try:
-                examples = json.loads(examples)
-            except (json.JSONDecodeError, TypeError):
-                examples = []
+        system_prompt, description, examples, tool_names = (
+            self._resolve_nerve_adapter_inputs(name, role)
+        )
 
-        # Examples fallback: read from local adapter context.json
-        if not examples:
-            try:
-                from arqitect.brain.adapters import resolve_nerve_prompt
-                ctx = resolve_nerve_prompt(name, role)
-                if ctx and ctx.get("few_shot_examples"):
-                    examples = ctx["few_shot_examples"]
-            except (ImportError, ValueError):
-                pass
-
-        # Description fallback: extract goal from JSON system_prompt
-        if not description or description == name or " " not in description:
-            try:
-                prompt_obj = json.loads(system_prompt)
-                if isinstance(prompt_obj, dict) and "goal" in prompt_obj:
-                    description = prompt_obj["goal"]
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        # Collect tool names for prompt adaptation
-        tools_with_counts = mem.cold.get_nerve_tools_with_counts(name)
-        tool_names = [t["tool"] for t in tools_with_counts
-                      if t["tool"] != name and t["use_count"] >= MIN_TOOL_USES_FOR_CONTRIBUTION]
-
-        # Use qualification score (from test bank), not invocation success ratio
         qual = mem.cold.get_qualification("nerve", name)
         score = qual.get("score", 0.0) if qual else 0.0
         temperature = get_temperature(role)
 
-        # Size-class-specific defaults: context budget, few-shot count, prompt style
-        size_configs = {
-            "tinylm": {"few_shot_limit": 2, "max_context": 2048, "max_messages": 1, "include_summary": True},
-            "small":  {"few_shot_limit": 3, "max_context": 4096, "max_messages": 5, "include_summary": True},
-            "medium": {"few_shot_limit": 5, "max_context": 8192, "max_messages": 20, "include_summary": False},
-            "large":  {"few_shot_limit": 8, "max_context": 16384, "max_messages": 100, "include_summary": False},
-        }
-
         for sc in SIZE_CLASSES:
-            cfg = size_configs.get(sc, size_configs["medium"])
+            cfg = _SIZE_CONFIGS.get(sc, _SIZE_CONFIGS["medium"])
             sc_dir = os.path.join(nerve_dir, sc)
             os.makedirs(sc_dir, exist_ok=True)
 
-            adapted_prompt = _adapt_prompt_for_size(system_prompt, sc, tool_names=tool_names)
-            context = {
-                "system_prompt": adapted_prompt,
-                "few_shot_examples": examples[:cfg["few_shot_limit"]],
-                "temperature": temperature,
-                "qualification_score": round(score, 2),
-            }
+            _write_size_class_files(
+                sc_dir, system_prompt, sc, tool_names, examples,
+                cfg, role, description, score, build_meta_json, temperature,
+            )
 
-            meta = build_meta_json(role, sc, sc, score=score, has_lora=False)
-            meta["capabilities"] = {
-                "json_mode": True,
-                "tool_calling": True,
-                "max_context": cfg["max_context"],
-                "max_messages": cfg["max_messages"],
-                "include_summary": cfg["include_summary"],
-            }
-            meta["description"] = description
+        self._write_model_specific_files(
+            name, role, nerve_dir, system_prompt, examples,
+            tool_names, score, temperature, build_meta_json,
+            get_active_variant, get_model_name_for_role,
+        )
 
-            with open(os.path.join(sc_dir, "context.json"), "w") as f:
-                json.dump(context, f, indent=2)
-            with open(os.path.join(sc_dir, "meta.json"), "w") as f:
-                json.dump(meta, f, indent=2)
+    def _resolve_nerve_adapter_inputs(self, name: str, role: str):
+        """Load system_prompt, description, examples, and tool_names for adapter writing.
 
-        # Model-specific level: our exact model gets its own subdirectory
+        Generalizes all text to strip project-specific references (bot names,
+        project names) so contributed nerves work for any arqitect instance.
+        """
+        project_names = _get_project_specific_names()
+        nerve_meta = mem.cold.get_nerve_metadata(name)
+        system_prompt = _system_prompt_to_plain_text(nerve_meta.get("system_prompt", ""))
+        system_prompt = _generalize_text(system_prompt, project_names)
+        description = nerve_meta.get("description", "")
+        description = _generalize_text(description, project_names)
+        examples = _parse_examples(nerve_meta.get("examples", []))
+        examples = _generalize_examples(examples, project_names)
+
+        if not examples:
+            examples = _fallback_examples(name, role)
+
+        if not description or description == name or " " not in description:
+            description = _extract_description_from_prompt(
+                nerve_meta.get("system_prompt", ""), description,
+            )
+            description = _generalize_text(description, project_names)
+
+        tool_names = _collect_contribution_tool_names(name)
+        return system_prompt, description, examples, tool_names
+
+    def _write_model_specific_files(
+        self, name, role, nerve_dir, system_prompt, examples,
+        tool_names, score, temperature, build_meta_json,
+        get_active_variant, get_model_name_for_role,
+    ):
+        """Write adapter files for the exact model currently in use."""
         try:
             active_sc = get_active_variant(role)
             model_slug = get_model_name_for_role(role)
@@ -3277,7 +3782,7 @@ class Dreamstate:
         model_dir = os.path.join(nerve_dir, active_sc, model_slug)
         os.makedirs(model_dir, exist_ok=True)
 
-        active_cfg = size_configs.get(active_sc, size_configs["medium"])
+        active_cfg = _SIZE_CONFIGS.get(active_sc, _SIZE_CONFIGS["medium"])
         model_context = {
             "system_prompt": _adapt_prompt_for_size(system_prompt, active_sc, tool_names=tool_names),
             "few_shot_examples": examples[:active_cfg["few_shot_limit"]],
@@ -3293,148 +3798,101 @@ class Dreamstate:
         with open(os.path.join(model_dir, "meta.json"), "w") as f:
             json.dump(model_meta, f, indent=2)
 
-    def _contribute_nerve_bundle(self, community_dir: str, name: str, bundle: dict):
-        """Push a new nerve bundle to the community repo via PR.
+    def _contribute_nerve(self, community_dir: str, name: str) -> bool:
+        """Stage all local changes for a nerve and create/update a single PR.
 
-        Copies tool implementations first (which prunes missing entries in-place),
-        then writes bundle.json so the committed file reflects only real tools.
+        Consolidates bundle, adapter, and stack contributions into one PR per
+        nerve. Uses a consistent branch (``contribute/{name}``) and search key
+        so that repeated calls update the same PR rather than spawning new ones.
+
+        File staging happens inside a ``prepare_fn`` callback so that all
+        writes target the worktree directory, not the main clone.
+
+        Args:
+            community_dir: Path to community repo clone.
+            name: Nerve identifier.
+
+        Returns:
+            True if a PR was created or updated, False otherwise.
         """
-        import shutil
-        from arqitect.config.loader import get_mcp_tools_dir
-
-        nerve_dir = os.path.join(community_dir, "nerves", name)
-        os.makedirs(nerve_dir, exist_ok=True)
-
-        # Copy tools first — prunes implementations in-place for missing sources
-        self._copy_tool_implementations(name, bundle, nerve_dir)
-
-        # Write bundle.json after pruning so it reflects only real tools
-        with open(os.path.join(nerve_dir, "bundle.json"), "w") as f:
-            json.dump(bundle, f, indent=2)
-
-        self._write_test_cases(name, nerve_dir)
+        bundle = self._build_nerve_bundle(name)
+        if not bundle:
+            return False
 
         role = bundle.get("role", "tool")
-        self._write_nerve_adapter_files(name, role, nerve_dir)
-        self._copy_nerve_adapter_to_community(name, nerve_dir, role)
+        tool_names = [t["name"] for t in bundle.get("tools", [])]
+        add_paths = [f"nerves/{name}"] + [f"mcp_tools/{t}" for t in tool_names]
 
-        _contribute_pr(
+        def _prepare(worktree_dir: str) -> None:
+            """Write nerve files into the worktree before commit."""
+            nerve_dir = os.path.join(worktree_dir, "nerves", name)
+            os.makedirs(nerve_dir, exist_ok=True)
+
+            self._copy_tool_implementations(name, bundle, worktree_dir)
+            with open(os.path.join(nerve_dir, "bundle.json"), "w") as f:
+                json.dump(bundle, f, indent=2)
+            self._write_test_cases(name, nerve_dir)
+            self._write_nerve_adapter_files(name, role, nerve_dir)
+            self._copy_nerve_adapter_to_community(name, nerve_dir, role)
+            self._add_stack_implementations(name, bundle, worktree_dir)
+
+            # Re-write after stack may have updated implementation entries
+            with open(os.path.join(nerve_dir, "bundle.json"), "w") as f:
+                json.dump(bundle, f, indent=2)
+
+        result = _contribute_pr(
             community_dir,
-            add_path=f"nerves/{name}",
-            commit_msg=f"Add nerve: {name}",
-            pr_title=f"Add nerve: {name}",
-            pr_body=(f"## Nerve: {name}\n\n{bundle.get('description', '')}\n\n"
-                     f"Role: {bundle.get('role', 'tool')}\n"
-                     f"Tools: {', '.join(t['name'] for t in bundle.get('tools', []))}\n\n"
-                     f"Auto-contributed by dream state."),
+            add_path=add_paths,
+            commit_msg=f"nerve({name}): bundle + adapters + tools",
+            pr_title=f"Nerve: {name}",
+            pr_body=_build_pr_body(name, bundle, role),
             branch_prefix=f"contribute/{name}",
-            search_key=f"Add nerve: {name}",
+            search_key=f"Nerve: {name}",
+            prepare_fn=_prepare,
         )
+        return result is not None
 
-    def _contribute_nerve_model_adapter(self, community_dir: str, name: str, size_class: str):
-        """Push a model-specific adapter for an existing nerve.
+    def _add_stack_implementations(self, name: str, bundle: dict,
+                                   community_dir: str) -> None:
+        """Copy local tool implementations in all available languages into the community nerve.
 
-        Writes {size_class}/context.json + meta.json and
-        {size_class}/{model_slug}/context.json + meta.json into the
-        community nerve directory, then creates a PR.
+        Modifies ``bundle["tools"]`` in-place to add new implementation entries.
+
+        Args:
+            name: Nerve identifier.
+            bundle: Nerve bundle dict (mutated in-place).
+            community_dir: Path to community repo clone.
         """
-        nerve_meta = mem.cold.get_nerve_metadata(name)
-        if not nerve_meta:
-            return
-
-        nerve_role = nerve_meta.get("role", "tool")
-        nerve_dir = os.path.join(community_dir, "nerves", name)
-        self._write_nerve_adapter_files(name, nerve_role, nerve_dir)
-        self._copy_nerve_adapter_to_community(name, nerve_dir, nerve_role)
-
-        from arqitect.brain.adapters import get_model_name_for_role, get_temperature, get_tuning_config
-        model_slug = get_model_name_for_role(nerve_role) or size_class
-        total = nerve_meta.get("total_invocations", 0) or 0
-        successes = nerve_meta.get("successes", 0) or 0
-        score = successes / total if total > 0 else 0
-        has_lora = os.path.isfile(os.path.join(
-            nerve_dir, size_class, model_slug, "adapter.gguf"
-        ))
-
-        pr_body = (
-            f"Model adapter for {name} on {size_class} models.\n\n"
-            f"Model: {model_slug}\n"
-            f"Score: {score:.0%}\n"
-            f"LoRA adapter: {'included' if has_lora else 'none'}\n\n"
-            f"Auto-contributed by dream state."
-        )
-        _contribute_pr(
-            community_dir,
-            add_path=f"nerves/{name}",
-            commit_msg=f"adapter({name}/{size_class}): score {score:.2f}",
-            pr_title=f"Nerve adapter: {name}/{size_class}/{model_slug}",
-            pr_body=pr_body,
-            branch_prefix=f"nerve-adapter/{name}-{size_class}",
-            search_key=f"Nerve adapter: {name}/{size_class}",
-        )
-
-    def _contribute_nerve_stack(self, community_dir: str, name: str, lang: str):
-        """Push a new language implementation for an existing nerve's tools."""
-        import subprocess
         import shutil
         from arqitect.config.loader import get_mcp_tools_dir
 
-        bundle_path = os.path.join(community_dir, "nerves", name, "bundle.json")
-        if not os.path.isfile(bundle_path):
-            return
-        try:
-            with open(bundle_path) as f:
-                bundle = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            return
-
         _EXT_MAP = {"python": ".py", "javascript": ".js", "typescript": ".ts"}
-        ext = _EXT_MAP.get(lang, f".{lang}")
         mcp_tools_dir = str(get_mcp_tools_dir())
         nerve_dir = os.path.join(community_dir, "nerves", name)
-        changed = False
 
         for tool in bundle.get("tools", []):
             tool_name = tool["name"]
-            if lang in tool.get("implementations", {}):
-                continue  # Already has this language
-            src = os.path.join(mcp_tools_dir, f"{tool_name}{ext}")
-            if not os.path.isfile(src):
-                continue
-            rel_path = f"tools/{tool_name}/tool{ext}"
-            dest = os.path.join(nerve_dir, rel_path)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            shutil.copy2(src, dest)
-            tool.setdefault("implementations", {})[lang] = rel_path
-            changed = True
-
-        if not changed:
-            return
-
-        with open(bundle_path, "w") as f:
-            json.dump(bundle, f, indent=2)
-
-        _contribute_pr(
-            community_dir,
-            add_path=f"nerves/{name}",
-            commit_msg=f"stack({name}): add {lang} implementation",
-            pr_title=f"Nerve stack: {name} ({lang})",
-            pr_body=(f"Add {lang} tool implementations for {name}.\n\n"
-                     f"Auto-contributed by dream state."),
-            branch_prefix=f"nerve-stack/{name}-{lang}",
-            search_key=f"Nerve stack: {name} ({lang})",
-        )
+            for lang, ext in _EXT_MAP.items():
+                if lang in tool.get("implementations", {}):
+                    continue
+                src = os.path.join(mcp_tools_dir, f"{tool_name}{ext}")
+                if not os.path.isfile(src):
+                    src = os.path.join(mcp_tools_dir, tool_name, f"run{ext}")
+                    if not os.path.isfile(src):
+                        continue
+                rel_path = f"tools/{tool_name}/tool{ext}"
+                dest = os.path.join(nerve_dir, rel_path)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                shutil.copy2(src, dest)
+                tool.setdefault("implementations", {})[lang] = rel_path
 
     def _dream_contribute(self):
-        """Contribution phase — push nerves and adapters back to community.
+        """Contribution phase — one PR per nerve with everything included.
 
-        For each local nerve (excluding senses):
-        1. New nerve (not in community) → push full bundle
-        2. Existing nerve, new model size class → push model adapter
-        3. Existing nerve, same model, new language stack → push stack
+        For each local nerve (excluding senses), creates or updates a single
+        PR containing the bundle, adapters for all size classes, and tool
+        implementations in all available languages.
         """
-        from arqitect.brain.adapters import get_active_variant
-
         community_dir = self._find_community_dir()
         if not community_dir:
             logger.info("[CONTRIBUTE] Community repo not found, skipping contribution phase")
@@ -3446,51 +3904,301 @@ class Dreamstate:
         for name, data in all_nerve_data.items():
             if self._interrupted.is_set():
                 break
-            # Skip senses — they use the adapter contribution path
             if data.get("is_sense"):
                 continue
 
-            role = data.get("role", "tool")
-            size_class = get_active_variant(role)
-
-            if not self._community_has_nerve(community_dir, name):
-                # Case 1: New nerve — push full bundle
-                bundle = self._build_nerve_bundle(name)
-                if bundle:
-                    logger.info("[CONTRIBUTE] New nerve: %s", name)
-                    self._contribute_nerve_bundle(community_dir, name, bundle)
-                    contributed += 1
-            else:
-                # Case 2: Existing nerve, new model → push adapter
-                if size_class != "core" and not self._community_nerve_has_model_adapter(
-                    community_dir, name, size_class
-                ):
-                    logger.info("[CONTRIBUTE] New model adapter: %s/%s", name, size_class)
-                    self._contribute_nerve_model_adapter(community_dir, name, size_class)
-                    contributed += 1
-
-                # Case 3: Existing nerve, new stack → push implementations
-                from arqitect.config.loader import get_mcp_tools_dir
-                mcp_tools_dir = str(get_mcp_tools_dir())
-                nerve_tools = mem.cold.get_nerve_tools(name)
-                local_langs = set()
-                for t in nerve_tools:
-                    for ext, lang in _EXT_TO_LANG.items():
-                        if os.path.isfile(os.path.join(mcp_tools_dir, f"{t}{ext}")):
-                            local_langs.add(lang)
-
-                for lang in local_langs:
-                    if self._interrupted.is_set():
-                        break
-                    if not self._community_nerve_has_stack(community_dir, name, lang):
-                        logger.info("[CONTRIBUTE] New stack: %s/%s", name, lang)
-                        self._contribute_nerve_stack(community_dir, name, lang)
-                        contributed += 1
+            logger.info("[CONTRIBUTE] Processing nerve: %s", name)
+            if self._contribute_nerve(community_dir, name):
+                contributed += 1
 
         if contributed:
-            logger.info("[CONTRIBUTE] Contributed %d item(s) to community", contributed)
+            logger.info("[CONTRIBUTE] Contributed %d nerve(s) to community", contributed)
         else:
             logger.info("[CONTRIBUTE] Nothing new to contribute")
+
+    # ── PR Review & Cleanup ──────────────────────────────────────────────
+
+    def _dream_pr_review(self):
+        """Review open PRs for feedback and clean up stale/merged ones.
+
+        Three responsibilities:
+        1. Fix PRs with review comments (changes_requested) by applying
+           the reviewer's feedback to the nerve code, then pushing.
+        2. Close PRs that have been open without activity for too long.
+        3. Delete local branches for PRs that were merged or closed upstream.
+        """
+        community_dir = self._find_community_dir()
+        if not community_dir:
+            return
+
+        import subprocess
+
+        def _run(cmd, **kw):
+            return subprocess.run(cmd, cwd=community_dir, capture_output=True,
+                                  text=True, timeout=kw.pop("timeout", 30), **kw)
+
+        try:
+            self._review_open_prs(community_dir, _run)
+            self._cleanup_stale_prs(community_dir, _run)
+            self._cleanup_merged_branches(community_dir, _run)
+        except subprocess.TimeoutExpired:
+            logger.warning("[PR-REVIEW] Git timeout during PR review phase")
+        except Exception as e:
+            logger.warning("[PR-REVIEW] Error during PR review: %s", e)
+
+    def _review_open_prs(self, community_dir: str, _run) -> None:
+        """Fetch open PRs and address any feedback — reviews or comments.
+
+        Handles two feedback channels:
+        1. Formal reviews with ``CHANGES_REQUESTED`` status.
+        2. Issue comments from CI bots or human reviewers (e.g. schema
+           errors, code review feedback, score failures).
+
+        A PR is skipped if the last comment was authored by us (already
+        addressed) or if there are no actionable comments.
+        """
+        result = _run(["gh", "pr", "list", "--author", "@me", "--state", "open",
+                        "--json", "number,headRefName,title,reviewDecision",
+                        "--limit", "20"], timeout=15)
+        if result.returncode != 0:
+            return
+
+        prs = json.loads(result.stdout) if result.stdout.strip() else []
+        for pr in prs:
+            if self._interrupted.is_set():
+                break
+
+            pr_number = pr["number"]
+            branch = pr["headRefName"]
+            has_review = pr.get("reviewDecision") == "CHANGES_REQUESTED"
+            has_comments = self._has_unaddressed_comments(community_dir, _run, pr_number)
+
+            if not has_review and not has_comments:
+                continue
+
+            logger.info("[PR-REVIEW] PR #%d needs attention (review=%s, comments=%s)",
+                        pr_number, has_review, has_comments)
+            self._fix_pr_from_comments(community_dir, _run, pr_number, branch)
+
+    def _has_unaddressed_comments(self, community_dir: str, _run,
+                                  pr_number: int) -> bool:
+        """Check if a PR has issue comments that we haven't addressed yet.
+
+        Returns True if the most recent comment was NOT authored by us,
+        meaning there's feedback we haven't responded to.
+        """
+        result = _run(
+            ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments",
+             "--jq", ".[-1].user.login"],
+            timeout=15,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return False
+        last_author = result.stdout.strip()
+        # If the last comment is from us, we've already addressed it
+        me_result = _run(["gh", "api", "user", "--jq", ".login"], timeout=10)
+        my_login = me_result.stdout.strip() if me_result.returncode == 0 else ""
+        return last_author != my_login
+
+    def _fix_pr_from_comments(self, community_dir: str, _run,
+                              pr_number: int, branch: str) -> None:
+        """Read all feedback on a PR and apply LLM-generated fixes.
+
+        Collects feedback from three sources:
+        1. Inline PR review comments (code-level).
+        2. Review-level bodies (CHANGES_REQUESTED reviews).
+        3. Issue comments (CI bot output, human review comments).
+
+        Args:
+            community_dir: Path to community repo clone.
+            _run: Subprocess runner bound to community_dir.
+            pr_number: GitHub PR number.
+            branch: Head branch name.
+        """
+        feedback_parts = []
+
+        # 1. Inline PR review comments
+        inline_result = _run(
+            ["gh", "api", f"repos/{{owner}}/{{repo}}/pulls/{pr_number}/comments",
+             "--jq", '.[].body'],
+            timeout=15,
+        )
+        if inline_result.returncode == 0 and inline_result.stdout.strip():
+            feedback_parts.append(inline_result.stdout.strip())
+
+        # 2. Review-level bodies
+        review_result = _run(
+            ["gh", "pr", "view", str(pr_number), "--json", "reviews",
+             "--jq", '.reviews[] | select(.state == "CHANGES_REQUESTED") | .body'],
+            timeout=15,
+        )
+        if review_result.returncode == 0 and review_result.stdout.strip():
+            feedback_parts.append(review_result.stdout.strip())
+
+        # 3. Issue comments (CI bot + human reviews)
+        issue_result = _run(
+            ["gh", "api", f"repos/{{owner}}/{{repo}}/issues/{pr_number}/comments",
+             "--jq", '.[].body'],
+            timeout=15,
+        )
+        if issue_result.returncode == 0 and issue_result.stdout.strip():
+            feedback_parts.append(issue_result.stdout.strip())
+
+        feedback = "\n\n---\n\n".join(feedback_parts)
+
+        if not feedback:
+            logger.info("[PR-REVIEW] PR #%d: no actionable feedback found", pr_number)
+            return
+
+        # Extract nerve name from branch (format: contribute/nerve_name-timestamp)
+        nerve_name = _parse_nerve_from_branch(branch)
+        if not nerve_name:
+            logger.info("[PR-REVIEW] PR #%d: could not determine nerve from branch '%s'",
+                        pr_number, branch)
+            return
+
+        # Read bundle from the PR branch via a temporary worktree
+        tmp_worktree = os.path.join(community_dir, ".worktrees",
+                                    f"read_{branch.replace('/', '_')}")
+        try:
+            _run(["git", "fetch", "origin", branch])
+            _clean_worktree(community_dir, _run, tmp_worktree)
+            _run(["git", "worktree", "add", tmp_worktree, branch])
+            bundle_path = os.path.join(tmp_worktree, "nerves", nerve_name, "bundle.json")
+            if not os.path.isfile(bundle_path):
+                return
+            with open(bundle_path) as f:
+                bundle = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return
+        finally:
+            _clean_worktree(community_dir, _run, tmp_worktree)
+
+        from arqitect.nerves.nerve_runtime import think_code
+
+        fix_prompt = (
+            f"A community PR for nerve '{nerve_name}' received review feedback.\n\n"
+            f"Current bundle.json:\n```json\n{json.dumps(bundle, indent=2)}\n```\n\n"
+            f"Reviewer feedback:\n{feedback[:2000]}\n\n"
+            f"Generate a corrected bundle.json that addresses the feedback. "
+            f"Return ONLY valid JSON, no explanation."
+        )
+
+        fixed_json = think_code(fix_prompt)
+        fixed_json = fixed_json.strip()
+        if fixed_json.startswith("```"):
+            lines = fixed_json.split("\n")
+            fixed_json = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
+
+        try:
+            fixed_bundle = json.loads(fixed_json)
+        except json.JSONDecodeError:
+            logger.warning("[PR-REVIEW] PR #%d: LLM produced invalid JSON", pr_number)
+            return
+
+        # Apply fix in a worktree to avoid disrupting the main clone
+        worktree_dir = os.path.join(community_dir, ".worktrees",
+                                    f"fix_{branch.replace('/', '_')}")
+        try:
+            _run(["git", "fetch", "origin", branch])
+            _clean_worktree(community_dir, _run, worktree_dir)
+            _run(["git", "worktree", "add", worktree_dir, branch])
+
+            repo = _get_community_repo()
+            _configure_app_auth(worktree_dir, repo)
+
+            wt_bundle_path = os.path.join(worktree_dir, "nerves", nerve_name, "bundle.json")
+            os.makedirs(os.path.dirname(wt_bundle_path), exist_ok=True)
+            with open(wt_bundle_path, "w") as f:
+                json.dump(fixed_bundle, f, indent=2)
+
+            wt_run = lambda cmd, **kw: _run(cmd, cwd=worktree_dir, **kw)
+            wt_run(["git", "add", f"nerves/{nerve_name}"])
+            diff = wt_run(["git", "diff", "--cached", "--quiet"])
+            if diff.returncode == 0:
+                return
+
+            wt_run(["git", "commit", "-m", f"fix({nerve_name}): address review feedback"])
+            _sync_with_main(worktree_dir, wt_run)
+            push = wt_run(["git", "push", "--force-with-lease"], timeout=60)
+
+            if push.returncode == 0:
+                logger.info("[PR-REVIEW] PR #%d: pushed fix for '%s'", pr_number, nerve_name)
+            else:
+                logger.warning("[PR-REVIEW] PR #%d: push failed: %s",
+                               pr_number, push.stderr[:200])
+        finally:
+            _clean_worktree(community_dir, _run, worktree_dir)
+
+    def _cleanup_stale_prs(self, community_dir: str, _run) -> None:
+        """Close PRs that have been open without activity for over 30 days."""
+        result = _run(
+            ["gh", "pr", "list", "--author", "@me", "--state", "open",
+             "--json", "number,updatedAt,title", "--limit", "50"],
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return
+
+        prs = json.loads(result.stdout) if result.stdout.strip() else []
+        import datetime
+
+        stale_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=30)
+
+        for pr in prs:
+            if self._interrupted.is_set():
+                break
+            updated = pr.get("updatedAt", "")
+            if not updated:
+                continue
+            try:
+                updated_dt = datetime.datetime.fromisoformat(updated.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+
+            if updated_dt < stale_cutoff:
+                pr_number = pr["number"]
+                logger.info("[PR-REVIEW] Closing stale PR #%d: '%s' (last updated %s)",
+                            pr_number, pr.get("title", ""), updated)
+                _run(["gh", "pr", "close", str(pr_number),
+                      "--comment", "Closing: stale for 30+ days. Will re-contribute if needed."],
+                     timeout=15)
+
+    def _cleanup_merged_branches(self, community_dir: str, _run) -> None:
+        """Delete local branches whose PRs have been merged or closed."""
+        result = _run(
+            ["gh", "pr", "list", "--author", "@me", "--state", "merged",
+             "--json", "headRefName", "--limit", "50"],
+            timeout=15,
+        )
+        merged_branches: set[str] = set()
+        if result.returncode == 0 and result.stdout.strip():
+            for pr in json.loads(result.stdout):
+                merged_branches.add(pr["headRefName"])
+
+        result = _run(
+            ["gh", "pr", "list", "--author", "@me", "--state", "closed",
+             "--json", "headRefName", "--limit", "50"],
+            timeout=15,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            for pr in json.loads(result.stdout):
+                merged_branches.add(pr["headRefName"])
+
+        # Ensure we're on main before deleting branches
+        _run(["git", "checkout", "main"])
+        cleaned = 0
+        for branch in merged_branches:
+            if branch == "main":
+                continue
+            delete_result = _run(["git", "branch", "-D", branch])
+            if delete_result.returncode == 0:
+                cleaned += 1
+                # Also delete remote tracking branch
+                _run(["git", "push", "origin", "--delete", branch], timeout=15)
+
+        if cleaned:
+            logger.info("[PR-REVIEW] Cleaned up %d merged/closed branch(es)", cleaned)
 
     def _expand_test_banks_for_training(self):
         """Generate test cases for qualified nerves that need more data for LoRA.
@@ -3515,7 +4223,7 @@ class Dreamstate:
 
         rows = mem.cold.conn.execute(
             "SELECT name, description, role FROM nerve_registry "
-            "WHERE is_sense=0 AND last_invoked_at IS NOT NULL"
+            "WHERE last_invoked_at IS NOT NULL"
         ).fetchall()
 
         for row in rows:

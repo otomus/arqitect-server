@@ -57,7 +57,7 @@ from arqitect.brain.tdd import detect_project_path, build_tdd_chain, is_coding_t
 from arqitect.brain.checklist import TaskChecklist
 from arqitect.brain.intent import classify_intent
 from arqitect.brain.safety import check_input as _safety_check_input
-from arqitect.brain.planner import plan_task
+from arqitect.brain.planner import compose_chain
 from arqitect.brain.plan_session import PlanSession
 from arqitect.brain.plan_router import classify_plan_message
 from arqitect.brain.community import (
@@ -157,71 +157,6 @@ def _reverse_geocode(lat: float, lon: float) -> str:
         return ""
 
 
-
-def _personality_media_enhancement(task: str, msg: str, nerve_result: dict) -> dict:
-    """Let personality decide whether to enhance a response with media (GIF, emoji).
-
-    Checks personality trait weights from cold memory. High wit/swagger = more
-    likely to add a GIF or emoji. Structured data responses are never enhanced.
-    Returns the (possibly enriched) nerve_result dict.
-    """
-    if not msg or not isinstance(nerve_result, dict):
-        return nerve_result
-    # Already has media — don't double up
-    if nerve_result.get("gif_url") or nerve_result.get("image_b64") or nerve_result.get("image_path"):
-        return nerve_result
-    # Structured data — personality stays minimal
-    if msg.strip().startswith(("{", "[", "```", "    ")):
-        return nerve_result
-
-    try:
-        import random
-        weights = {"wit": 0.5, "swagger": 0.3}  # defaults from seed
-        raw = mem.cold.get_fact("personality", "trait_weights")
-        if raw:
-            weights.update(json.loads(raw))
-
-        wit = weights.get("wit", 0.5)
-        swagger = weights.get("swagger", 0.5)
-        # Probability of adding media — kept low to avoid abuse
-        # wit=0.7, swagger=0.6 → ~4% chance of GIF, ~6% chance of emoji
-        gif_chance = max(0, (wit + swagger - 1.0) * 0.12)   # ~0.04 at defaults
-        emoji_chance = max(0, (wit - 0.3) * 0.15)            # ~0.06 at defaults
-
-        roll = random.random()
-
-        if roll < gif_chance:
-            # Try to invoke a GIF nerve
-            catalog = discover_nerves()
-            gif_nerves = [n for n, d in catalog.items() if "gif" in d.lower() and n not in CORE_SENSES]
-            if gif_nerves:
-                gif_query = task[:50]  # use task as search context
-                gif_output = invoke_nerve(gif_nerves[0], json.dumps({"query": gif_query}))
-                try:
-                    gif_result = json.loads(gif_output)
-                    url = gif_result.get("gif_url", "")
-                    if url:
-                        nerve_result["gif_url"] = url
-                        print(f"[PERSONALITY] Enhanced response with GIF (nerve={gif_nerves[0]})")
-                except (json.JSONDecodeError, TypeError):
-                    pass
-        elif roll < gif_chance + emoji_chance:
-            # Add emoji enhancement via communication sense
-            emoji_output = invoke_nerve("communication", json.dumps({
-                "message": msg, "format": "emoji", "tone": "casual"
-            }))
-            try:
-                emoji_result = json.loads(emoji_output)
-                enhanced = emoji_result.get("response", "")
-                if enhanced and enhanced != msg:
-                    nerve_result["_personality_rewrite"] = enhanced
-                    print(f"[PERSONALITY] Enhanced response with emojis")
-            except (json.JSONDecodeError, TypeError):
-                pass
-    except Exception as e:
-        print(f"[PERSONALITY] Media enhancement failed: {e}")
-
-    return nerve_result
 
 
 def _trigger_domain_index_background(task: str):
@@ -656,146 +591,6 @@ def _handle_tdd_chain(task: str, decision: dict, checklist: TaskChecklist) -> st
     return msg
 
 
-def _handle_recipe_chain(task: str, recipe_decision: dict) -> str:
-    """Execute a planner-generated recipe as a nerve chain.
-
-    The recipe_decision has the same format as chain_nerves:
-    {"action": "chain_nerves", "steps": [...], "goal": "...", "recipe_id": "..."}
-
-    Each step is a nerve invocation. Missing nerves are synthesized on the fly.
-    After execution, the recipe is evaluated and stored/updated.
-    """
-    steps = recipe_decision.get("steps", [])
-    goal = recipe_decision.get("goal", task)
-    recipe_id = recipe_decision.get("recipe_id", "")
-    chain_task_id = str(uuid.uuid4())
-    nerve_catalog = discover_nerves()
-    available = list(nerve_catalog.keys())
-
-    print(f"[BRAIN] Recipe chain started: {len(steps)} steps for goal: {goal}")
-    publish_event(Channel.BRAIN_THOUGHT, {"stage": "recipe_chain", "steps": len(steps), "goal": goal})
-
-    chain_context = []
-    final_output = ""
-    last_nerve_result = {}
-    step_results = []  # for eval
-
-    _chain_active.set()
-    _last_chain_progress = time.time()
-
-    for i, chain_step in enumerate(steps):
-        nerve_name = re.sub(r"[^a-z0-9_]", "_", chain_step.get("nerve", "").lower()).strip("_")
-        step_args = chain_step.get("args", task)
-        step_desc = chain_step.get("description", "")
-
-        if not nerve_name:
-            print(f"[BRAIN] Recipe step {i+1}: missing nerve name, skipping")
-            step_results.append({"step": i, "status": "skipped"})
-            continue
-
-        # For core senses: if args look like JSON, pass directly (recipe gave structured args)
-        # Otherwise translate natural language args
-        is_json_args = False
-        if nerve_name in CORE_SENSES:
-            try:
-                json.loads(step_args)
-                is_json_args = True
-            except (json.JSONDecodeError, TypeError):
-                step_args = _translate_sense_args(nerve_name, step_args, task)
-
-        # Synthesize nerve if it doesn't exist (skip senses — they always exist)
-        if nerve_name not in available and nerve_name not in CORE_SENSES:
-            from arqitect.brain.permissions import can_model_fabricate
-            if not can_model_fabricate():
-                print(f"[BRAIN] Recipe step {i+1}: model too small to synthesize '{nerve_name}', skipping")
-                continue
-            desc = step_desc or step_args or goal
-            print(f"[BRAIN] Recipe step {i+1}: synthesizing nerve '{nerve_name}'")
-            publish_event(Channel.BRAIN_THOUGHT, {"stage": "recipe_synthesize", "nerve": nerve_name, "step": i+1})
-            nerve_name, _ = synthesize_nerve(nerve_name, desc, trigger_task=task)
-            available.append(nerve_name)
-
-        # Inject previous chain context (only for non-JSON args)
-        if chain_context and not is_json_args:
-            context_summary = "\n".join(
-                f"[Step {j+1} result]: {ctx}" for j, ctx in enumerate(chain_context)
-            )
-            step_args = f"{step_args}\n\nContext from previous steps:\n{context_summary}"
-
-        print(f"[BRAIN] Recipe step {i+1}/{len(steps)}: invoking '{nerve_name}'")
-        publish_event(Channel.BRAIN_ACTION, {"nerve": nerve_name, "args": step_args, "chain_step": i+1})
-        output = invoke_nerve(nerve_name, step_args)
-        publish_event(Channel.NERVE_RESULT, {"nerve": nerve_name, "output": output, "chain_step": i+1})
-
-        # Extract response text
-        try:
-            result = json.loads(output)
-            step_output = result.get("response", output) if isinstance(result, dict) else output
-            if isinstance(result, dict):
-                last_nerve_result = result
-        except (json.JSONDecodeError, TypeError):
-            step_output = output
-
-        step_ok = not _is_nerve_error(str(step_output))
-        chain_context.append(str(step_output)[:500])
-        final_output = step_output
-        step_results.append({"step": i, "nerve": nerve_name, "status": "ok" if step_ok else "error"})
-        get_consolidator().touch()
-        _checkpoint_chain(ChainCheckpoint(
-            task_id=chain_task_id, chain_type="recipe", step_index=i,
-            total_steps=len(steps), chain_context=chain_context,
-            checklist_dict={}, decision=recipe_decision,
-        ))
-        _last_chain_progress = time.time()
-        print(f"[BRAIN] Recipe step {i+1} complete: {str(step_output)[:100]}")
-
-    _chain_active.clear()
-
-    # Build final response
-    combined = str(final_output).strip() if len(chain_context) <= 1 else "\n".join(chain_context)
-    _chain_failed = _is_nerve_error(combined)
-
-    _checkpoint_chain(ChainCheckpoint(
-        task_id=chain_task_id, chain_type="recipe", step_index=len(steps),
-        total_steps=len(steps), chain_context=chain_context,
-        checklist_dict={}, decision=recipe_decision,
-        status="complete" if not _chain_failed else "failed",
-    ))
-
-    if _chain_failed:
-        nerve_names = ", ".join(s.get("nerve", "?") for s in steps)
-        msg = _graceful_failure_message(task, nerve_names)
-    elif len(chain_context) > 1:
-        chain_summary = "\n\n".join(f"Step {j+1}: {ctx}" for j, ctx in enumerate(chain_context))
-        msg = llm_generate(
-            COMMUNICATION_MODEL,
-            f"The user asked: {task}\n\nData collected:\n{chain_summary}\n\n"
-            f"Respond directly to the user. Start with the actual answer — "
-            f"NO preamble, NO meta-commentary. Just give the combined answer.",
-            system=_resolve_adapter("communication")["system_prompt"]
-        ).strip()
-    else:
-        msg = combined
-
-    # Evaluate and store recipe
-    from arqitect.brain.planner import evaluate_and_store_recipe
-    evaluate_and_store_recipe(recipe_decision, step_results, task, not _chain_failed)
-
-    # Encode any image from the chain's last nerve output
-    _enrich_nerve_result_with_image(last_nerve_result)
-
-    _recipe_user_id = get_task_origin().get("user_id", "")
-    mem.hot.add_message("user", task, user_id=_recipe_user_id)
-    mem.hot.add_message("assistant", msg, user_id=_recipe_user_id)
-    mem.record_episode({
-        "task": task, "nerve": "recipe_chain",
-        "tool": "chain", "success": not _chain_failed,
-        "result_summary": str(msg)[:200],
-        "user_id": _recipe_user_id,
-    })
-    publish_response(msg, nerve_result=last_nerve_result)
-    return msg
-
 
 
 def think(task: str, history: list[str] | None = None, depth: int = 0) -> str:
@@ -812,7 +607,7 @@ def _gather_plan_context(plan: PlanSession, task: str, user_id: str) -> None:
     """Populate a PlanSession with context from past work and the project.
 
     Mutates plan in place — sets related_plans, related_episodes,
-    project_facts, and matched_recipe.
+    project_facts, and matched_chain.
 
     Args:
         plan: The PlanSession to enrich.
@@ -829,9 +624,15 @@ def _gather_plan_context(plan: PlanSession, task: str, user_id: str) -> None:
         from arqitect.knowledge.project_profiler import get_stored_profile, store_profile
         plan.project_facts = get_stored_profile(project_path) or store_profile(project_path)
 
-    matched = plan_task(task, plan.category, plan.project_facts)
+    from arqitect.brain.adapters import get_model_size_class
+    matched = compose_chain(
+        task,
+        nerve_catalog=discover_nerves(),
+        project_facts=plan.project_facts,
+        size_class=get_model_size_class("brain"),
+    )
     if matched:
-        plan.matched_recipe = matched
+        plan.matched_chain = matched
 
 
 def _build_planning_prompt(plan: PlanSession) -> str:
@@ -849,8 +650,9 @@ def _build_planning_prompt(plan: PlanSession) -> str:
         parts.append("Related past plans:\n" + "\n".join(summaries))
     if plan.project_facts:
         parts.append(f"Project: {plan.project_facts}")
-    if plan.matched_recipe:
-        parts.append(f"Matched existing recipe with {len(plan.matched_recipe.get('steps', []))} steps")
+    if plan.matched_chain:
+        chain_nerves = [s.get("nerve", "?") for s in plan.matched_chain.get("steps", [])]
+        parts.append(f"Matched nerve chain ({len(chain_nerves)} steps): {', '.join(chain_nerves)}")
     return "\n\n".join(parts)
 
 
@@ -881,6 +683,34 @@ def _handle_plan_start(task: str, intent: dict, user_id: str) -> str:
     plan = PlanSession.create(user_id, goal=task, category=category)
     _gather_plan_context(plan, task, user_id)
     plan.add_message("user", task)
+
+    # If compose_chain already produced a matched chain, propose it directly
+    # rather than relying on the LLM to reformat it as numbered text.
+    if plan.matched_chain and plan.matched_chain.get("steps"):
+        chain_steps = plan.matched_chain["steps"]
+        steps = [
+            {
+                "step": i + 1,
+                "nerve": s.get("nerve", ""),
+                "args": s.get("args", ""),
+                "description": s.get("description", f"{s.get('nerve', '?')}: {s.get('args', '')}"),
+            }
+            for i, s in enumerate(chain_steps)
+        ]
+        plan.propose(steps)
+        plan.save(r)
+        step_lines = "\n".join(
+            f"  {s['step']}. {s.get('nerve', '?')}: {s.get('args', s.get('description', ''))}"
+            for s in steps
+        )
+        response = f"Here's my plan:\n{step_lines}\n\nApprove to execute, or tell me what to change."
+        plan.add_message("assistant", response)
+        plan.save(r)
+        mem.hot.add_message("user", task, user_id=user_id)
+        mem.hot.add_message("assistant", response, user_id=user_id)
+        publish_event(Channel.PLAN_UPDATE, {"stage": "proposed", "plan_id": plan.plan_id})
+        publish_response(response)
+        return response
 
     planning_prompt = _build_planning_prompt(plan)
 
@@ -968,10 +798,19 @@ def _handle_plan_approve(plan: PlanSession, user_id: str) -> str:
     plan.save(r)
     publish_event(Channel.PLAN_UPDATE, {"stage": "approved", "plan_id": plan.plan_id})
 
-    recipe = plan.to_recipe()
+    chain_decision = plan.to_chain_decision()
+    nerve_catalog = discover_nerves()
 
     try:
-        result = _handle_recipe_chain(plan.goal, recipe)
+        from arqitect.brain.dispatch import _handle_chain
+        ctx = DispatchContext(
+            task=plan.goal,
+            decision=chain_decision,
+            user_id=user_id,
+            nerve_catalog=nerve_catalog,
+            available=list(nerve_catalog.keys()),
+        )
+        result = _handle_chain(ctx)
         plan.complete(success=True)
     except Exception as exc:
         print(f"[BRAIN] Plan execution failed: {exc}")
@@ -1006,30 +845,67 @@ def _handle_plan_abort(plan: PlanSession, user_id: str) -> str:
 
 
 def _response_contains_plan(response: str) -> bool:
-    """Heuristic check: does the LLM response contain a numbered plan proposal?
+    """Check if the LLM response contains a plan proposal.
+
+    Handles two formats:
+    - Numbered text: "1. Clone repo\\n2. Create README"
+    - JSON with steps/next_steps array
 
     Args:
         response: The brain's response text.
 
     Returns:
-        True if the response appears to contain a numbered plan.
+        True if the response contains at least 2 actionable steps.
     """
     import re
-    # Look for at least 2 numbered items (e.g., "1." and "2.")
+    # Check numbered text format
     numbered = re.findall(r"^\s*\d+\.\s", response, re.MULTILINE)
-    return len(numbered) >= 2
+    if len(numbered) >= 2:
+        return True
+
+    # Check JSON format with steps or next_steps
+    parsed = extract_json(response)
+    if isinstance(parsed, dict):
+        steps = parsed.get("steps") or parsed.get("next_steps") or []
+        if isinstance(steps, list) and len(steps) >= 2:
+            return True
+
+    return False
 
 
 def _extract_plan_steps(response: str) -> list[dict]:
-    """Extract numbered steps from a plan proposal response.
+    """Extract steps from a plan proposal response.
+
+    Handles two formats:
+    - Numbered text: "1. Clone repo\\n2. Create README"
+    - JSON with steps/next_steps array
 
     Args:
-        response: The brain's response containing numbered steps.
+        response: The brain's response containing steps.
 
     Returns:
         List of step dicts with 'step' number and 'description'.
     """
     import re
+
+    # Try JSON format first — more structured
+    parsed = extract_json(response)
+    if isinstance(parsed, dict):
+        steps = parsed.get("steps") or parsed.get("next_steps") or []
+        if isinstance(steps, list) and len(steps) >= 2:
+            result = []
+            for i, s in enumerate(steps, 1):
+                if isinstance(s, dict):
+                    desc = s.get("description", s.get("args", str(s)))
+                elif isinstance(s, str):
+                    desc = s
+                else:
+                    continue
+                result.append({"step": i, "description": desc})
+            if result:
+                return result
+
+    # Fall back to numbered text format
     steps = []
     for match in re.finditer(r"^\s*(\d+)\.\s+(.+?)(?=\n\s*\d+\.|\n\n|$)", response, re.MULTILINE | re.DOTALL):
         steps.append({
@@ -1128,6 +1004,7 @@ def _think_inner(task: str, history: list[str] | None = None, depth: int = 0) ->
     active_plan = PlanSession.get_active(user_id, r)
     if active_plan:
         plan_action = classify_plan_message(task, active_plan)
+        print(f"[BRAIN] Plan router: action={plan_action}, status={active_plan.status}")
         if plan_action == "continue":
             return _handle_plan_continue(task, active_plan, user_id)
         elif plan_action == "approve":

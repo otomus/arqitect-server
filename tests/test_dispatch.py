@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 from dirty_equals import IsInstance, IsStr, Contains
-from hypothesis import given, settings, assume
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from arqitect.types import Action, Sense
@@ -149,15 +149,70 @@ class TestParseNerveOutput:
         assert _parse_nerve_output("just plain text") == {}
 
     @pytest.mark.timeout(10)
-    @given(st.dictionaries(st.text(min_size=1, max_size=10).filter(lambda s: '"' not in s and '\\' not in s),
-                           st.text(max_size=30).filter(lambda s: '"' not in s and '\\' not in s),
+    @given(st.dictionaries(st.text(min_size=1, max_size=10),
+                           st.text(max_size=30),
                            min_size=1, max_size=3))
     @settings(max_examples=30)
     def test_valid_json_always_roundtrips(self, d):
-        """Any valid JSON dict must be parsed back correctly."""
+        """Any valid JSON dict must be parsed back correctly, including keys
+        with quotes, backslashes, and special characters."""
         raw = json.dumps(d)
         result = _parse_nerve_output(raw)
         assert result == d
+
+
+# ---------------------------------------------------------------------------
+# 0c. Edge cases for _coerce_args and _parse_nerve_output
+# ---------------------------------------------------------------------------
+
+class TestCoerceArgsEdgeCases:
+    """Edge cases that _coerce_args must handle without crashing."""
+
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("value,expected", [
+        (None, ""),
+        (0, ""),
+        (False, ""),
+        ("", ""),
+        ([], ""),
+        (42, "42"),
+        (True, "True"),
+        ({"nested": {"deep": "value"}}, '{"nested": {"deep": "value"}}'),
+        ("   ", "   "),
+        ("\n\t\0", "\n\t\0"),
+    ], ids=[
+        "none", "zero", "false", "empty_string", "empty_list",
+        "integer", "bool_true", "nested_dict", "whitespace_only", "control_chars",
+    ])
+    def test_coerce_args_edge_values(self, value, expected):
+        """Various falsy, wrong-type, and special values must not crash."""
+        result = _coerce_args(value)
+        assert isinstance(result, str)
+        assert result == expected
+
+
+class TestParseNerveOutputEdgeCases:
+    """Edge cases for _parse_nerve_output — malformed and adversarial inputs."""
+
+    @pytest.mark.timeout(10)
+    @pytest.mark.parametrize("raw,expected", [
+        ("", {}),
+        ("   ", {}),
+        ("{truncated", {}),
+        ('{"key": "val",}', {}),
+        ('null', {}),
+        ('42', {}),
+        ('"just a string"', {}),
+        ('[1, 2, 3]', {}),
+        ('{"a": 1}\n{"b": 2}', {"b": 2}),
+    ], ids=[
+        "empty", "whitespace", "truncated_json", "trailing_comma",
+        "json_null", "json_number", "json_string", "json_array",
+        "two_json_objects_returns_last",
+    ])
+    def test_parse_nerve_output_edge_inputs(self, raw, expected):
+        """Non-dict JSON and malformed strings must return empty dict."""
+        assert _parse_nerve_output(raw) == expected
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +323,99 @@ class TestParseDecision:
 
 
 # ---------------------------------------------------------------------------
+# 1b. parse_decision edge cases — malformed LLM output
+# ---------------------------------------------------------------------------
+
+@pytest.mark.timeout(10)
+class TestParseDecisionEdgeCases:
+    """parse_decision must handle malformed dicts the LLM may produce."""
+
+    @pytest.mark.parametrize("raw", [
+        {},
+        {"action": ""},
+        {"action": None},
+        {"name": "foo", "args": "bar"},
+    ], ids=["empty_dict", "empty_action", "none_action", "missing_action_key"])
+    def test_missing_or_empty_action_raises_value_error(self, raw):
+        """Missing or falsy action must raise ValueError, not silently proceed."""
+        with pytest.raises(ValueError, match="action"):
+            parse_decision(raw)
+
+    @pytest.mark.parametrize("raw,expected_type", [
+        ({"action": "invoke_nerve"}, InvokeDecision),
+        ({"action": "synthesize_nerve"}, SynthesizeDecision),
+        ({"action": "clarify"}, ClarifyDecision),
+        ({"action": "feedback"}, FeedbackDecision),
+        ({"action": "update_context"}, UpdateContextDecision),
+        ({"action": "respond"}, RespondDecision),
+    ], ids=["invoke_no_name", "synthesize_no_name", "clarify_no_msg",
+            "feedback_no_sentiment", "update_no_context", "respond_no_msg"])
+    def test_known_action_with_no_other_fields(self, raw, expected_type):
+        """Known action with no name/args/description must still parse with defaults."""
+        parsed = parse_decision(raw)
+        assert parsed == IsInstance(expected_type)
+
+    def test_extra_keys_silently_ignored(self):
+        """LLM may include unexpected keys — they must not crash parsing."""
+        raw = {
+            "action": "invoke_nerve",
+            "name": "joke_nerve",
+            "args": "test",
+            "confidence": 0.95,
+            "reasoning": "user wants a joke",
+            "metadata": {"nested": True},
+        }
+        parsed = parse_decision(raw)
+        assert parsed == IsInstance(InvokeDecision)
+        assert parsed.name == "joke_nerve"
+
+    def test_wrong_type_args_dict_coerced(self):
+        """Args as a dict must be coerced to JSON string, not crash."""
+        raw = {"action": "invoke_nerve", "name": "test", "args": {"key": [1, 2, 3]}}
+        parsed = parse_decision(raw)
+        assert isinstance(parsed.args, str)
+        assert "key" in parsed.args
+
+    def test_wrong_type_args_integer(self):
+        """Args as an integer must be coerced to string."""
+        raw = {"action": "invoke_nerve", "name": "test", "args": 42}
+        parsed = parse_decision(raw)
+        assert parsed.args == "42"
+
+    def test_wrong_type_args_list(self):
+        """Args as a list must be coerced to string representation."""
+        raw = {"action": "invoke_nerve", "name": "test", "args": ["a", "b"]}
+        parsed = parse_decision(raw)
+        assert isinstance(parsed.args, str)
+
+    def test_chain_with_non_dict_steps(self):
+        """chain_nerves with non-dict steps must filter them out."""
+        raw = {
+            "action": "chain_nerves",
+            "steps": ["not_a_dict", 42, {"nerve": "real_nerve", "args": "go"}],
+            "goal": "test",
+        }
+        parsed = parse_decision(raw)
+        assert parsed == IsInstance(ChainDecision)
+        assert len(parsed.steps) == 1
+        assert parsed.steps[0].nerve == "real_nerve"
+
+    def test_chain_with_empty_steps(self):
+        """chain_nerves with empty steps list must produce ChainDecision with no steps."""
+        raw = {"action": "chain_nerves", "steps": [], "goal": "nothing"}
+        parsed = parse_decision(raw)
+        assert parsed == IsInstance(ChainDecision)
+        assert len(parsed.steps) == 0
+
+    def test_chain_with_missing_steps_key(self):
+        """chain_nerves with no steps key must default to empty list."""
+        raw = {"action": "chain_nerves", "goal": "something"}
+        parsed = parse_decision(raw)
+        assert parsed == IsInstance(ChainDecision)
+        assert len(parsed.steps) == 0
+
+
+# ---------------------------------------------------------------------------
 # 2. normalize_action — fix LLM output before dispatch
 # ---------------------------------------------------------------------------
 
@@ -341,6 +489,51 @@ class TestNormalizeAction:
         action, result = normalize_action(raw, nerve_catalog=catalog)
         assert action == Action.INVOKE_NERVE
         assert result["name"] == nerve_name
+
+
+# ---------------------------------------------------------------------------
+# 2b. normalize_action edge cases
+# ---------------------------------------------------------------------------
+
+@pytest.mark.timeout(10)
+class TestNormalizeActionEdgeCases:
+    """Edge cases for normalize_action — empty strings, wrong types, missing keys."""
+
+    def test_empty_action_string(self):
+        """Empty action must pass through (no fuzzy match for empty string)."""
+        action, _ = normalize_action({"action": ""}, nerve_catalog={})
+        assert action == ""
+
+    def test_missing_action_key(self):
+        """Missing action key defaults to empty string."""
+        action, _ = normalize_action({}, nerve_catalog={})
+        assert action == ""
+
+    def test_use_sense_with_no_sense_and_no_name(self):
+        """use_sense with neither sense nor name field stays as use_sense (no mapping)."""
+        raw = {"action": "use_sense", "args": "test"}
+        action, result = normalize_action(raw, nerve_catalog={})
+        # sense is "" and name is "" — empty, so 'if sense:' is False
+        # Falls through to fuzzy matching check
+        assert action != Action.INVOKE_NERVE or result.get("name") != ""
+
+    def test_whitespace_only_action(self):
+        """Whitespace-only action should not match any valid action."""
+        action, _ = normalize_action({"action": "   "}, nerve_catalog={})
+        assert action == "   "
+
+    def test_action_with_special_characters(self):
+        """Action with special chars must not crash fuzzy matching."""
+        action, _ = normalize_action({"action": "invoke\x00nerve"}, nerve_catalog={})
+        assert isinstance(action, str)
+
+    def test_empty_nerve_catalog(self):
+        """Valid action with empty catalog must still resolve correctly."""
+        action, _ = normalize_action(
+            {"action": Action.INVOKE_NERVE, "name": "test"},
+            nerve_catalog={},
+        )
+        assert action == Action.INVOKE_NERVE
 
 
 # ---------------------------------------------------------------------------
@@ -485,8 +678,7 @@ class TestDispatchAction:
              patch("arqitect.brain.dispatch.mem") as mock_mem, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
              patch("arqitect.brain.dispatch.r") as mock_r, \
-             patch("arqitect.brain.dispatch.llm_generate", return_value="Hello there!"), \
-             patch("arqitect.brain.dispatch._resolve_adapter", return_value={"system_prompt": "be nice"}):
+             patch("arqitect.senses.communication.nerve.rewrite_response", return_value={"response": "Hello there!", "format": "text", "tone": "neutral"}):
             mock_mem.cold.get_user_role.return_value = "user"
             mock_mem.cold.get_nerve_metadata.return_value = {"role": "creative"}
             mock_mem.cold.list_nerves.return_value = list(catalog.keys())
@@ -586,8 +778,7 @@ class TestDispatchAction:
              patch("arqitect.brain.dispatch.mem") as mock_mem, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
              patch("arqitect.brain.dispatch.r") as mock_r, \
-             patch("arqitect.brain.dispatch.llm_generate", return_value="Why did the chicken cross the road?"), \
-             patch("arqitect.brain.dispatch._resolve_adapter", return_value={"system_prompt": "be nice"}):
+             patch("arqitect.senses.communication.nerve.rewrite_response", return_value={"response": "Why did the chicken cross the road?", "format": "text", "tone": "neutral"}):
             mock_mem.cold.get_user_role.return_value = "user"
             mock_mem.cold.get_nerve_metadata.return_value = {"role": "creative"}
             mock_mem.cold.list_nerves.return_value = list(catalog.keys())
@@ -619,8 +810,7 @@ class TestDispatchAction:
              patch("arqitect.brain.dispatch.mem") as mock_mem, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
              patch("arqitect.brain.dispatch.r") as mock_r, \
-             patch("arqitect.brain.dispatch.llm_generate", return_value="ha!"), \
-             patch("arqitect.brain.dispatch._resolve_adapter", return_value={"system_prompt": "ok"}):
+             patch("arqitect.senses.communication.nerve.rewrite_response", return_value={"response": "ha!", "format": "text", "tone": "neutral"}):
             mock_mem.cold.get_user_role.return_value = "user"
             mock_mem.cold.get_nerve_metadata.return_value = {"role": "tool"}
             mock_mem.cold.list_nerves.return_value = list(catalog.keys())
@@ -801,8 +991,7 @@ class TestSynthesisPermissionEnforcement:
              patch("arqitect.brain.dispatch.mem") as mock_mem, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
              patch("arqitect.brain.dispatch.r") as mock_r, \
-             patch("arqitect.brain.dispatch.llm_generate", return_value="Why did the chicken cross the road?"), \
-             patch("arqitect.brain.dispatch._resolve_adapter", return_value={"system_prompt": "be nice"}):
+             patch("arqitect.senses.communication.nerve.rewrite_response", return_value={"response": "Why did the chicken cross the road?", "format": "text", "tone": "neutral"}):
             mock_mem.cold.get_user_role.return_value = "anon"
             mock_mem.cold.get_nerve_metadata.return_value = {"role": "tool"}
             mock_mem.cold.list_nerves.return_value = list(catalog.keys())
@@ -827,8 +1016,7 @@ class TestSynthesisPermissionEnforcement:
              patch("arqitect.brain.dispatch.mem") as mock_mem, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
              patch("arqitect.brain.dispatch.r") as mock_r, \
-             patch("arqitect.brain.dispatch.llm_generate", return_value="ha!"), \
-             patch("arqitect.brain.dispatch._resolve_adapter", return_value={"system_prompt": "ok"}):
+             patch("arqitect.senses.communication.nerve.rewrite_response", return_value={"response": "ha!", "format": "text", "tone": "neutral"}):
             mock_mem.cold.get_user_role.return_value = "anon"
             mock_mem.cold.get_nerve_metadata.return_value = {"role": "tool"}
             mock_mem.cold.list_nerves.return_value = list(catalog.keys())
@@ -854,11 +1042,196 @@ class TestSynthesisPermissionEnforcement:
              patch("arqitect.brain.dispatch.mem") as mock_mem, \
              patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
              patch("arqitect.brain.dispatch.r") as mock_r, \
-             patch("arqitect.brain.dispatch.llm_generate", return_value="result"), \
-             patch("arqitect.brain.dispatch._resolve_adapter", return_value={"system_prompt": "ok"}):
+             patch("arqitect.senses.communication.nerve.rewrite_response", return_value={"response": "result", "format": "text", "tone": "neutral"}):
             mock_mem.cold.get_user_role.return_value = "user"
             mock_mem.cold.get_nerve_metadata.return_value = {"role": "tool"}
             mock_mem.cold.list_nerves.return_value = list(catalog.keys())
             mock_r.hget.return_value = None
             result = dispatch_action(ctx)
         mock_synth.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# 8. Dispatch rewrite — plain text enforcement (regression for card bug)
+# ---------------------------------------------------------------------------
+
+class TestDispatchRewriteViaCommunicationNerve:
+    """Verify dispatch uses rewrite_response() from the communication nerve.
+
+    After unification, all response formatting goes through a single
+    rewrite_response() call instead of inline llm_generate().
+    """
+
+    @pytest.mark.timeout(10)
+    def test_invoke_rewrite_calls_rewrite_response(self):
+        """_handle_invoke must call rewrite_response() instead of llm_generate."""
+        catalog = {"greeting_nerve": "greetings"}
+        d = InvokeDecisionFactory.build(name="greeting_nerve", args="hello")
+        ctx = _make_ctx(d, task="hello", nerve_catalog=catalog)
+
+        with patch("arqitect.brain.dispatch.invoke_nerve", return_value='{"response": "Hi there!"}'), \
+             patch("arqitect.brain.dispatch.publish_event"), \
+             patch("arqitect.brain.dispatch.publish_response"), \
+             patch("arqitect.brain.dispatch.publish_memory_state"), \
+             patch("arqitect.brain.dispatch.mem") as mock_mem, \
+             patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
+             patch("arqitect.brain.dispatch.r") as mock_r, \
+             patch("arqitect.senses.communication.nerve.rewrite_response",
+                   return_value={"response": "Hi there!", "format": "text", "tone": "neutral"}) as mock_rw:
+            mock_mem.cold.get_user_role.return_value = "user"
+            mock_mem.cold.get_nerve_metadata.return_value = {"role": "tool"}
+            mock_r.hget.return_value = None
+            dispatch_action(ctx)
+
+        mock_rw.assert_called_once()
+        call_kwargs = mock_rw.call_args.kwargs
+        assert call_kwargs["task"] == "hello"
+        assert "Hi there!" in call_kwargs["message"]
+
+    @pytest.mark.timeout(10)
+    def test_invoke_with_media_skips_rewrite(self):
+        """When nerve returns media (gif/image), rewrite_response must be skipped."""
+        catalog = {"gif_nerve": "finds gifs"}
+        d = InvokeDecisionFactory.build(name="gif_nerve", args="funny cat")
+        ctx = _make_ctx(d, task="funny cat", nerve_catalog=catalog)
+
+        nerve_output = json.dumps({
+            "response": "Here's a cat gif",
+            "gif_url": "https://example.com/cat.gif",
+        })
+        with patch("arqitect.brain.dispatch.invoke_nerve", return_value=nerve_output), \
+             patch("arqitect.brain.dispatch.publish_event"), \
+             patch("arqitect.brain.dispatch.publish_response"), \
+             patch("arqitect.brain.dispatch.publish_memory_state"), \
+             patch("arqitect.brain.dispatch.mem") as mock_mem, \
+             patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
+             patch("arqitect.brain.dispatch.r") as mock_r, \
+             patch("arqitect.senses.communication.nerve.rewrite_response") as mock_rw:
+            mock_mem.cold.get_user_role.return_value = "user"
+            mock_mem.cold.get_nerve_metadata.return_value = {"role": "tool"}
+            mock_r.hget.return_value = None
+            dispatch_action(ctx)
+
+        # rewrite_response should NOT be called when media is present
+        mock_rw.assert_not_called()
+
+    @pytest.mark.timeout(10)
+    def test_invoke_does_not_pass_already_formatted(self):
+        """Dispatch must not pass already_formatted to publish_response (param removed)."""
+        catalog = {"greeting_nerve": "greetings"}
+        d = InvokeDecisionFactory.build(name="greeting_nerve", args="hello")
+        ctx = _make_ctx(d, task="hello", nerve_catalog=catalog)
+
+        with patch("arqitect.brain.dispatch.invoke_nerve", return_value='{"response": "Hi!"}'), \
+             patch("arqitect.brain.dispatch.publish_event"), \
+             patch("arqitect.brain.dispatch.publish_response") as mock_pub, \
+             patch("arqitect.brain.dispatch.publish_memory_state"), \
+             patch("arqitect.brain.dispatch.mem") as mock_mem, \
+             patch("arqitect.brain.dispatch.can_use_nerve", return_value=True), \
+             patch("arqitect.brain.dispatch.r") as mock_r, \
+             patch("arqitect.senses.communication.nerve.rewrite_response",
+                   return_value={"response": "Hi!", "format": "text", "tone": "neutral"}):
+            mock_mem.cold.get_user_role.return_value = "user"
+            mock_mem.cold.get_nerve_metadata.return_value = {"role": "tool"}
+            mock_r.hget.return_value = None
+            dispatch_action(ctx)
+
+        mock_pub.assert_called_once()
+        _, kwargs = mock_pub.call_args
+        assert "already_formatted" not in kwargs
+
+
+# ---------------------------------------------------------------------------
+# 9. dispatch_action edge cases — malformed decisions at the pipeline boundary
+# ---------------------------------------------------------------------------
+
+@pytest.mark.timeout(10)
+class TestDispatchActionEdgeCases:
+    """Edge cases for the full dispatch pipeline — malformed, empty, and
+    adversarial decision dicts that the LLM might produce."""
+
+    def test_empty_decision_dict_re_thinks(self):
+        """Empty decision dict (no action) must trigger re-think, not crash."""
+        ctx = _make_ctx({"action": "fly_to_moon"})
+        with patch("arqitect.brain.dispatch.mem"):
+            dispatch_action(ctx)
+        ctx.think_fn.assert_called_once()
+
+    def test_invoke_with_empty_name(self):
+        """invoke_nerve with empty name must trigger re-think (nerve not found)."""
+        raw = {"action": Action.INVOKE_NERVE, "name": "", "args": "test"}
+        ctx = _make_ctx(raw, nerve_catalog={"awareness": "identity"})
+        with patch("arqitect.brain.dispatch.mem") as mock_mem:
+            mock_mem.cold.list_nerves.return_value = ["awareness"]
+            dispatch_action(ctx)
+        ctx.think_fn.assert_called_once()
+
+    def test_chain_with_no_steps_re_thinks(self):
+        """chain_nerves with empty steps must trigger re-think."""
+        raw = {"action": Action.CHAIN_NERVES, "steps": [], "goal": "nothing"}
+        ctx = _make_ctx(raw)
+        with patch("arqitect.brain.dispatch.mem"):
+            dispatch_action(ctx)
+        ctx.think_fn.assert_called_once()
+
+    def test_chain_with_non_list_steps_re_thinks(self):
+        """chain_nerves with steps as a string must trigger re-think."""
+        raw = {"action": Action.CHAIN_NERVES, "steps": "not_a_list", "goal": "bad"}
+        ctx = _make_ctx(raw)
+        with patch("arqitect.brain.dispatch.mem"):
+            dispatch_action(ctx)
+        ctx.think_fn.assert_called_once()
+
+    def test_update_context_with_empty_context_re_thinks(self):
+        """update_context with all-empty values must re-think, not store blanks."""
+        raw = {"action": Action.UPDATE_CONTEXT, "context": {"city": "", "name": ""}}
+        ctx = _make_ctx(raw, user_id="user1")
+        with patch("arqitect.brain.dispatch.mem"), \
+             patch("arqitect.brain.dispatch.publish_response"), \
+             patch("arqitect.brain.dispatch.publish_memory_state"):
+            dispatch_action(ctx)
+        # Empty values are filtered out, so think_fn should be called for re-think
+        ctx.think_fn.assert_called_once()
+
+    def test_decision_with_extra_unexpected_keys(self):
+        """Decision with extra keys must not crash the pipeline."""
+        raw = {
+            "action": Action.CLARIFY,
+            "message": "What?",
+            "hallucinated_field": True,
+            "confidence": 99,
+            "chain_of_thought": "I think the user wants...",
+        }
+        ctx = _make_ctx(raw)
+        with patch("arqitect.brain.dispatch.publish_response"), \
+             patch("arqitect.brain.dispatch.mem"):
+            result = dispatch_action(ctx)
+        assert "What?" in result
+
+    def test_synthesize_with_empty_name_and_description_re_thinks(self):
+        """synthesize_nerve with no name and no description must re-think."""
+        raw = {"action": Action.SYNTHESIZE_NERVE, "name": "", "description": ""}
+        ctx = _make_ctx(raw, nerve_catalog={}, user_id="user123")
+        with patch("arqitect.brain.dispatch.match_nerves", return_value=[]), \
+             patch("arqitect.brain.dispatch.mem") as mock_mem, \
+             patch("arqitect.brain.dispatch.publish_event"), \
+             patch("arqitect.brain.dispatch.can_model_fabricate", return_value=True):
+            mock_mem.cold.get_user_role.return_value = "user"
+            dispatch_action(ctx)
+        ctx.think_fn.assert_called_once()
+
+    @pytest.mark.parametrize("action_typo", [
+        "invokennerve",
+        "syntthesize_nerve",
+        "INVOKE_NERVE",
+        "chain-nerves",
+        "update context",
+    ], ids=["double_n", "double_t", "uppercase", "hyphen", "space"])
+    def test_action_typos_handled_gracefully(self, action_typo):
+        """Various typos must either fuzzy-match or trigger re-think, never crash."""
+        raw = {"action": action_typo, "name": "test", "args": "test"}
+        ctx = _make_ctx(raw)
+        with patch("arqitect.brain.dispatch.mem"):
+            result = dispatch_action(ctx)
+        # Must return something (either a result or re-think was called)
+        assert result is not None or ctx.think_fn.called

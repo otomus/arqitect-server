@@ -97,8 +97,9 @@ class TestDreamstateOnlyTunesInvokedNerves:
         queued_names = {item["name"] for item in queue}
         assert queued_names == invoked
 
-    def test_senses_excluded_even_if_invoked(self, mem, nerves_dir):
-        """Core senses must never appear in the tuning queue."""
+    def test_senses_included_when_invoked(self, mem, nerves_dir):
+        """Core senses must appear in the tuning queue when invoked —
+        they need model-specific prompt tuning just like nerves."""
         from arqitect.brain.config import CORE_SENSES
 
         for sense in CORE_SENSES:
@@ -114,7 +115,7 @@ class TestDreamstateOnlyTunesInvokedNerves:
 
         queued_names = {item["name"] for item in queue}
         for sense in CORE_SENSES:
-            assert sense not in queued_names
+            assert sense in queued_names
 
     def test_high_scoring_nerve_excluded_even_if_invoked(self, mem, nerves_dir):
         """A nerve scoring above the improvement threshold is already good — skip it."""
